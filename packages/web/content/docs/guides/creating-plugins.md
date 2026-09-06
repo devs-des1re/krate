@@ -223,6 +223,10 @@ Version semantics follow Go's rules:
 
 - `go get github.com/kratejs/krate/packages/compiler@vX.Y.Z` fetches an exact
   version.
+- At **major version 2 or higher** the module path gains the major version
+  suffix, as Go requires: `go get github.com/kratejs/krate/packages/compiler/v2@v2.0.0`.
+  The tag stays `packages/compiler/v2.0.0` — the `/vN` suffix appears only in
+  the module path, never in the tag.
 - `@latest` resolves to the highest **release** version once one exists.
 - While only **prereleases** are published (e.g. `v0.3.0-beta.1`), `@latest`
   resolves to the highest prerelease. Once any stable version is tagged,

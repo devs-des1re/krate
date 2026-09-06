@@ -15,6 +15,8 @@ jobs:
       npm_config_frozen_lockfile: "false"
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -81,11 +83,37 @@ jobs:
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          generate_release_notes: true
-          prerelease: ${{ steps.tag.outputs.prerelease }}
+      - name: Compute compiler SDK changelog
+        id: sdk
+        shell: bash
+        run: |
+          set -e
+          VERSION="v${GITHUB_REF_NAME#v}"
+          PREV="$(
+            git tag -l 'packages/compiler/v*' \
+              | grep -v -F -- "packages/compiler/${VERSION}" \
+              | sort -V \
+              | tail -n 1 || true
+          )"
+          if [ -n "${PREV}" ]; then
+            echo "prev=${PREV}" >> "$GITHUB_OUTPUT"
+            COMMITS="$(git log --format='- %s' "${PREV}..HEAD" -- packages/compiler || true)"
+          else
+            echo "prev=NONE" >> "$GITHUB_OUTPUT"
+            COMMITS="$(git log --format='- %s' HEAD -- packages/compiler || true)"
+          fi
+          if [ -z "${COMMITS}" ]; then
+            COMMITS="- No changes in this release."
+          fi
+          printf '## Compiler SDK released %s\n\n' "${VERSION}" > compiler-sdk-notes.md
+          MAJOR="$(echo "${VERSION}" | cut -d. -f1 | sed 's/v//')"
+          MODULE_PATH="github.com/kratejs/krate/packages/compiler"
+          if [ "${MAJOR}" -gt 1 ]; then
+            MODULE_PATH="${MODULE_PATH}/v${MAJOR}"
+          fi
+          printf 'The Go module `%s` is published at tag `packages/compiler/%s`.\n\n' "${MODULE_PATH}" "${VERSION}" >> compiler-sdk-notes.md
+          printf '```sh\ngo get %s@%s\n```\n\n' "${MODULE_PATH}" "${VERSION}" >> compiler-sdk-notes.md
+          printf '### Changelog\n\n%s\n\n---\n\n' "${COMMITS}" >> compiler-sdk-notes.md
 
       - name: Tag Go module
         shell: bash
@@ -103,17 +131,22 @@ jobs:
             echo "pushed ${GO_TAG}"
           fi
 
-      - name: Publish Go module release
+      - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
+        shell: bash
         run: |
-          VERSION="v${GITHUB_REF_NAME#v}"
-          GO_TAG="packages/compiler/${VERSION}"
-          if gh release view "${GO_TAG}" >/dev/null 2>&1; then
-            echo "release ${GO_TAG} already exists; skipping"
-          else
-            gh release create "${GO_TAG}" \
-              --title "compiler SDK ${GO_TAG}" \
-              --prerelease=${{ steps.tag.outputs.prerelease }} \
-              --generate-notes
+          set -e
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            echo "release ${GITHUB_REF_NAME} already exists; skipping"
+            exit 0
           fi
+          NOTES="$(mktemp)"
+          cat compiler-sdk-notes.md > "${NOTES}"
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/releases/generate-notes" \
+            -f "tag_name=${GITHUB_REF_NAME}" \
+            --jq .body >> "${NOTES}"
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "Krate ${GITHUB_REF_NAME}" \
+            --prerelease=${{ steps.tag.outputs.prerelease }} \
+            --notes-file "${NOTES}"
