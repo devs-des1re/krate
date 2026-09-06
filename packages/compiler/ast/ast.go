@@ -25,8 +25,8 @@ type Identifier struct {
 	Name     string
 }
 
-func (i *Identifier) node()  {}
-func (i *Identifier) expr()  {}
+func (i *Identifier) node()    {}
+func (i *Identifier) expr()    {}
 func (i *Identifier) Pos() Pos { return i.Position }
 
 type LitKind int
@@ -136,8 +136,8 @@ func (o *ObjectExpr) expr()    {}
 func (o *ObjectExpr) Pos() Pos { return o.Position }
 
 type ObjectProp struct {
-	Key      string
-	Value    Expr
+	Key       string
+	Value     Expr
 	Shorthand bool
 	Spread    bool
 	Method    bool
@@ -153,9 +153,9 @@ func (a *ArrayExpr) expr()    {}
 func (a *ArrayExpr) Pos() Pos { return a.Position }
 
 type TemplateExpr struct {
-	Position  Pos
-	Parts     []Expr
-	Raw       []string
+	Position Pos
+	Parts    []Expr
+	Raw      []string
 }
 
 func (t *TemplateExpr) node()    {}
@@ -163,10 +163,10 @@ func (t *TemplateExpr) expr()    {}
 func (t *TemplateExpr) Pos() Pos { return t.Position }
 
 type JSXElement struct {
-	Position  Pos
-	Opening   *JSXOpening
-	Children  []JSXChild
-	Closing   *JSXClosing
+	Position Pos
+	Opening  *JSXOpening
+	Children []JSXChild
+	Closing  *JSXClosing
 }
 
 func (j *JSXElement) node()    {}
@@ -183,8 +183,8 @@ func (j *JSXFragment) expr()    {}
 func (j *JSXFragment) Pos() Pos { return j.Position }
 
 type JSXOpening struct {
-	Name       string
-	Attributes []*JSXAttr
+	Name        string
+	Attributes  []*JSXAttr
 	SelfClosing bool
 }
 
@@ -242,10 +242,10 @@ func HTMLAttrName(name string) string {
 }
 
 type Param struct {
-    Position Pos
-    Name     string
-    Default  Expr // Store the expression here
-    IsRest   bool // Added this
+	Position Pos
+	Name     string
+	Default  Expr // Store the expression here
+	IsRest   bool // Added this
 }
 
 func (p *Param) node()    {}
@@ -264,7 +264,7 @@ type Program struct {
 	Body     []Stmt
 }
 
-func (p *Program) node()   {}
+func (p *Program) node()    {}
 func (p *Program) Pos() Pos { return p.Position }
 
 type ImportStmt struct {
@@ -275,8 +275,8 @@ type ImportStmt struct {
 	Source    string
 }
 
-func (i *ImportStmt) node()   {}
-func (i *ImportStmt) stmt()   {}
+func (i *ImportStmt) node()    {}
+func (i *ImportStmt) stmt()    {}
 func (i *ImportStmt) Pos() Pos { return i.Position }
 
 type NamedImport struct {
@@ -293,8 +293,8 @@ type ExportStmt struct {
 	ReexportSource string // source path for re-exports (export * from '...' or export { X } from '...')
 }
 
-func (e *ExportStmt) node()   {}
-func (e *ExportStmt) stmt()   {}
+func (e *ExportStmt) node()    {}
+func (e *ExportStmt) stmt()    {}
 func (e *ExportStmt) Pos() Pos { return e.Position }
 
 type VarStmt struct {
@@ -303,16 +303,16 @@ type VarStmt struct {
 	Decls    []*VarDecl
 }
 
-func (v *VarStmt) node()   {}
-func (v *VarStmt) stmt()   {}
+func (v *VarStmt) node()    {}
+func (v *VarStmt) stmt()    {}
 func (v *VarStmt) Pos() Pos { return v.Position }
 
 type VarDecl struct {
-	Name           string
-	Names          []string
+	Name            string
+	Names           []string
 	IsDestructuring bool
-	RestName       string
-	Init           Expr
+	RestName        string
+	Init            Expr
 }
 
 type FnDecl struct {
@@ -325,8 +325,8 @@ type FnDecl struct {
 	Default  bool
 }
 
-func (f *FnDecl) node()   {}
-func (f *FnDecl) stmt()   {}
+func (f *FnDecl) node()    {}
+func (f *FnDecl) stmt()    {}
 func (f *FnDecl) Pos() Pos { return f.Position }
 
 type ReturnStmt struct {
@@ -334,8 +334,8 @@ type ReturnStmt struct {
 	Value    Expr
 }
 
-func (r *ReturnStmt) node()   {}
-func (r *ReturnStmt) stmt()   {}
+func (r *ReturnStmt) node()    {}
+func (r *ReturnStmt) stmt()    {}
 func (r *ReturnStmt) Pos() Pos { return r.Position }
 
 type ExprStmt struct {
@@ -343,19 +343,19 @@ type ExprStmt struct {
 	Expression Expr
 }
 
-func (e *ExprStmt) node()   {}
-func (e *ExprStmt) stmt()   {}
+func (e *ExprStmt) node()    {}
+func (e *ExprStmt) stmt()    {}
 func (e *ExprStmt) Pos() Pos { return e.Position }
 
 type IfStmt struct {
-	Position    Pos
-	Test        Expr
-	Consequent  []Stmt
-	Alternate   []Stmt
+	Position   Pos
+	Test       Expr
+	Consequent []Stmt
+	Alternate  []Stmt
 }
 
-func (i *IfStmt) node()   {}
-func (i *IfStmt) stmt()   {}
+func (i *IfStmt) node()    {}
+func (i *IfStmt) stmt()    {}
 func (i *IfStmt) Pos() Pos { return i.Position }
 
 type BlockStmt struct {
@@ -363,20 +363,20 @@ type BlockStmt struct {
 	Body     []Stmt
 }
 
-func (b *BlockStmt) node()   {}
-func (b *BlockStmt) stmt()   {}
+func (b *BlockStmt) node()    {}
+func (b *BlockStmt) stmt()    {}
 func (b *BlockStmt) Pos() Pos { return b.Position }
 
 type ForStmt struct {
-	Position  Pos
-	Init      Stmt
-	Test      Expr
-	Update    Expr
-	Body      []Stmt
+	Position Pos
+	Init     Stmt
+	Test     Expr
+	Update   Expr
+	Body     []Stmt
 }
 
-func (f *ForStmt) node()   {}
-func (f *ForStmt) stmt()   {}
+func (f *ForStmt) node()    {}
+func (f *ForStmt) stmt()    {}
 func (f *ForStmt) Pos() Pos { return f.Position }
 
 type ForInStmt struct {
@@ -387,8 +387,8 @@ type ForInStmt struct {
 	IsForOf  bool
 }
 
-func (f *ForInStmt) node()   {}
-func (f *ForInStmt) stmt()   {}
+func (f *ForInStmt) node()    {}
+func (f *ForInStmt) stmt()    {}
 func (f *ForInStmt) Pos() Pos { return f.Position }
 
 type WhileStmt struct {
@@ -397,8 +397,8 @@ type WhileStmt struct {
 	Body     []Stmt
 }
 
-func (w *WhileStmt) node()   {}
-func (w *WhileStmt) stmt()   {}
+func (w *WhileStmt) node()    {}
+func (w *WhileStmt) stmt()    {}
 func (w *WhileStmt) Pos() Pos { return w.Position }
 
 type DoWhileStmt struct {
@@ -407,18 +407,18 @@ type DoWhileStmt struct {
 	Test     Expr
 }
 
-func (d *DoWhileStmt) node()   {}
-func (d *DoWhileStmt) stmt()   {}
+func (d *DoWhileStmt) node()    {}
+func (d *DoWhileStmt) stmt()    {}
 func (d *DoWhileStmt) Pos() Pos { return d.Position }
 
 type SwitchStmt struct {
-	Position Pos
+	Position     Pos
 	Discriminant Expr
-	Cases    []*CaseClause
+	Cases        []*CaseClause
 }
 
-func (s *SwitchStmt) node()   {}
-func (s *SwitchStmt) stmt()   {}
+func (s *SwitchStmt) node()    {}
+func (s *SwitchStmt) stmt()    {}
 func (s *SwitchStmt) Pos() Pos { return s.Position }
 
 type CaseClause struct {
@@ -428,14 +428,14 @@ type CaseClause struct {
 }
 
 type TryStmt struct {
-	Position  Pos
-	Body      []Stmt
-	Catch     *CatchClause
-	Finally   []Stmt
+	Position Pos
+	Body     []Stmt
+	Catch    *CatchClause
+	Finally  []Stmt
 }
 
-func (t *TryStmt) node()   {}
-func (t *TryStmt) stmt()   {}
+func (t *TryStmt) node()    {}
+func (t *TryStmt) stmt()    {}
 func (t *TryStmt) Pos() Pos { return t.Position }
 
 type CatchClause struct {
@@ -449,8 +449,8 @@ type ThrowStmt struct {
 	Value    Expr
 }
 
-func (t *ThrowStmt) node()   {}
-func (t *ThrowStmt) stmt()   {}
+func (t *ThrowStmt) node()    {}
+func (t *ThrowStmt) stmt()    {}
 func (t *ThrowStmt) Pos() Pos { return t.Position }
 
 type BreakStmt struct {
@@ -458,8 +458,8 @@ type BreakStmt struct {
 	Label    string
 }
 
-func (b *BreakStmt) node()   {}
-func (b *BreakStmt) stmt()   {}
+func (b *BreakStmt) node()    {}
+func (b *BreakStmt) stmt()    {}
 func (b *BreakStmt) Pos() Pos { return b.Position }
 
 type ContinueStmt struct {
@@ -467,8 +467,8 @@ type ContinueStmt struct {
 	Label    string
 }
 
-func (c *ContinueStmt) node()   {}
-func (c *ContinueStmt) stmt()   {}
+func (c *ContinueStmt) node()    {}
+func (c *ContinueStmt) stmt()    {}
 func (c *ContinueStmt) Pos() Pos { return c.Position }
 
 type NewExpr struct {
@@ -477,16 +477,16 @@ type NewExpr struct {
 	Args     []Expr
 }
 
-func (n *NewExpr) node()   {}
-func (n *NewExpr) expr()   {}
+func (n *NewExpr) node()    {}
+func (n *NewExpr) expr()    {}
 func (n *NewExpr) Pos() Pos { return n.Position }
 
 type ThisExpr struct {
 	Position Pos
 }
 
-func (t *ThisExpr) node()   {}
-func (t *ThisExpr) expr()   {}
+func (t *ThisExpr) node()    {}
+func (t *ThisExpr) expr()    {}
 func (t *ThisExpr) Pos() Pos { return t.Position }
 
 type AwaitExpr struct {
@@ -494,8 +494,8 @@ type AwaitExpr struct {
 	Arg      Expr
 }
 
-func (a *AwaitExpr) node()   {}
-func (a *AwaitExpr) expr()   {}
+func (a *AwaitExpr) node()    {}
+func (a *AwaitExpr) expr()    {}
 func (a *AwaitExpr) Pos() Pos { return a.Position }
 
 type DynamicImport struct {
@@ -503,14 +503,14 @@ type DynamicImport struct {
 	Arg      Expr
 }
 
-func (d *DynamicImport) node()   {}
-func (d *DynamicImport) expr()   {}
+func (d *DynamicImport) node()    {}
+func (d *DynamicImport) expr()    {}
 func (d *DynamicImport) Pos() Pos { return d.Position }
 
 type ImportMetaExpr struct {
 	Position Pos
 }
 
-func (im *ImportMetaExpr) node()   {}
-func (im *ImportMetaExpr) expr()   {}
+func (im *ImportMetaExpr) node()    {}
+func (im *ImportMetaExpr) expr()    {}
 func (im *ImportMetaExpr) Pos() Pos { return im.Position }

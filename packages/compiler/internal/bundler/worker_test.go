@@ -6,7 +6,7 @@ import (
 	"regexp"
 	"testing"
 
-	"krate-compiler/internal/ast"
+	"github.com/kratejs/krate/packages/compiler/ast"
 )
 
 // TestWorkerRewrite verifies `new Worker('./x.ts')` and the

@@ -4,8 +4,8 @@ import (
 	"strconv"
 	"strings"
 
-	"krate-compiler/internal/ast"
-	"krate-compiler/internal/escape"
+	"github.com/kratejs/krate/packages/compiler/ast"
+	"github.com/kratejs/krate/packages/compiler/internal/escape"
 )
 
 // itoa converts an int to its decimal string representation without allocating fmt.Sprintf.

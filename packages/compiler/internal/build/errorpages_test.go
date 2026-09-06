@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"krate-compiler/internal/config"
+	"github.com/kratejs/krate/packages/compiler/internal/config"
 )
 
 // TestBuildErrorPages verifies src/pages/404.tsx and src/pages/500.tsx are

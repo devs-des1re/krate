@@ -150,39 +150,39 @@ const (
 )
 
 var keywords = map[string]Kind{
-	"import":    Import,
-	"export":    Export,
-	"const":     Const_,
-	"let":       Let_,
-	"var":       Var_,
-	"function":  Function,
-	"return":    Return,
-	"if":        If_,
-	"else":      Else_,
-	"true":      True,
-	"false":     False,
-	"null":      Null_,
-	"undefined": Undefined,
-	"async":     Async,
-	"default":   Default_,
-	"from":      From,
-	"of":        Of,
-	"as":        As,
-	"in":        In_,
-	"for":       For,
-	"while":     While_,
-	"do":        Do_,
-	"switch":    Switch,
-	"case":      Case_,
-	"try":       Try_,
-	"catch":     Catch_,
-	"finally":   Finally_,
-	"throw":     Throw_,
-	"break":     Break_,
-	"continue":  Continue_,
-	"new":       New_,
-	"this":      This_,
-	"await":     Await_,
+	"import":     Import,
+	"export":     Export,
+	"const":      Const_,
+	"let":        Let_,
+	"var":        Var_,
+	"function":   Function,
+	"return":     Return,
+	"if":         If_,
+	"else":       Else_,
+	"true":       True,
+	"false":      False,
+	"null":       Null_,
+	"undefined":  Undefined,
+	"async":      Async,
+	"default":    Default_,
+	"from":       From,
+	"of":         Of,
+	"as":         As,
+	"in":         In_,
+	"for":        For,
+	"while":      While_,
+	"do":         Do_,
+	"switch":     Switch,
+	"case":       Case_,
+	"try":        Try_,
+	"catch":      Catch_,
+	"finally":    Finally_,
+	"throw":      Throw_,
+	"break":      Break_,
+	"continue":   Continue_,
+	"new":        New_,
+	"this":       This_,
+	"await":      Await_,
 	"class":      Class_,
 	"super":      Super_,
 	"extends":    Extends_,
@@ -237,9 +237,9 @@ type Lexer struct {
 
 func New(src string) *Lexer {
 	return &Lexer{
-		src:   []rune(src),
-		line:  1,
-		col:   0,
+		src:  []rune(src),
+		line: 1,
+		col:  0,
 	}
 }
 
@@ -257,16 +257,16 @@ func (l *Lexer) Tokenize() []Token {
 		case '{':
 			l.incTemplateBrace()
 			l.emit(LBRACE)
-	case '}':
-		// If this closes an open template interpolation (`${ ... }`),
-		// emit RBRACE for the closing brace, then resume reading
-		// template-string text.
-		if l.closeTemplateBrace() {
-			l.emit(RBRACE)
-			l.readTemplate()
-		} else {
-			l.emit(RBRACE)
-		}
+		case '}':
+			// If this closes an open template interpolation (`${ ... }`),
+			// emit RBRACE for the closing brace, then resume reading
+			// template-string text.
+			if l.closeTemplateBrace() {
+				l.emit(RBRACE)
+				l.readTemplate()
+			} else {
+				l.emit(RBRACE)
+			}
 		case '(':
 			l.emit(LPAREN)
 		case ')':
@@ -279,55 +279,56 @@ func (l *Lexer) Tokenize() []Token {
 			l.emit(COMMA)
 		case ';':
 			l.emit(SEMI)
-	case '?':
-		if l.peek() == '.' {
-			l.next()
-			l.emit(QUESTION_DOT)
-		} else if l.peek() == '?' {
-			l.next()
-			l.emit(NULLISH)
-		} else {
-			l.emit(QUEST)
-		}
+		case '?':
+			if l.peek() == '.' {
+				l.next()
+				l.emit(QUESTION_DOT)
+			} else if l.peek() == '?' {
+				l.next()
+				l.emit(NULLISH)
+			} else {
+				l.emit(QUEST)
+			}
 		case ':':
 			l.emit(COLON)
-	case '@':
-		l.emit(AT)
-	case '\'':
-		if isValueEnd(l.lastKind) {
-			l.emit(Apostrophe)
-		} else {
-			l.readString('\'')
-		}
-	case '"':
-		if isValueEnd(l.lastKind) {
-			l.emit(Apostrophe)
-		} else {
-			l.readString('"')
-		}
+		case '@':
+			l.emit(AT)
+		case '\'':
+			if isValueEnd(l.lastKind) {
+				l.emit(Apostrophe)
+			} else {
+				l.readString('\'')
+			}
+		case '"':
+			if isValueEnd(l.lastKind) {
+				l.emit(Apostrophe)
+			} else {
+				l.readString('"')
+			}
 		case '`':
 			// A backtick either opens a template literal or closes one we're
 			// already reading. readTemplate consumes the closing backtick.
 			l.readTemplate()
-	case '/':
-		if l.peek() == '=' {
-			l.next()
-			l.emit(DIV_ASSIGN)
-		} else if l.peek() == '>' {
-			l.next()
-			l.emit(SLASH_GT)
-		} else if l.peek() == '/' {
-			l.readLineComment()
-		} else if l.peek() == '*' {
-			l.readBlockComment()
-		} else if l.regexContext() {
-			l.readRegex()
-		} else {
-			l.emit(DIV)
-		}
+		case '/':
+			if l.peek() == '=' {
+				l.next()
+				l.emit(DIV_ASSIGN)
+			} else if l.peek() == '>' {
+				l.next()
+				l.emit(SLASH_GT)
+			} else if l.peek() == '/' {
+				l.readLineComment()
+			} else if l.peek() == '*' {
+				l.readBlockComment()
+			} else if l.regexContext() {
+				l.readRegex()
+			} else {
+				l.emit(DIV)
+			}
 		case '.':
 			if l.peek() == '.' && l.peekAt(1) == '.' {
-				l.next(); l.next()
+				l.next()
+				l.next()
 				l.emit(SPREAD)
 			} else {
 				l.emit(DOT)
@@ -531,10 +532,10 @@ func (l *Lexer) readString(quote rune) {
 //     backtick becomes its value; the backtick is consumed).
 func (l *Lexer) readTemplate() {
 	l.start = l.pos
-	
-	// If we are resuming from a '}' that closed an interpolation, 
+
+	// If we are resuming from a '}' that closed an interpolation,
 	// the next token is a MID or END.
-	isMid := l.lastKind == RBRACE 
+	isMid := l.lastKind == RBRACE
 
 	for l.pos < len(l.src) {
 		ch := l.src[l.pos]
@@ -696,7 +697,7 @@ var kindNames = map[Kind]string{
 	SHL: "<<", SHR: ">>", SHL_ASSIGN: "<<=", SHR_ASSIGN: ">>=", USHIFT_RIGHT: ">>>",
 	SLASH_GT: "/>", LT_SLASH: "</",
 	Apostrophe: "'",
-	Class_: "class", Super_: "super", Extends_: "extends",
+	Class_:     "class", Super_: "super", Extends_: "extends",
 	Yield_: "yield", Delete_: "delete", Typeof_: "typeof",
 	Instanceof_: "instanceof", Void_: "void", Debugger_: "debugger", With_: "with",
 	Interface_: "interface", Type_: "type", Implements_: "implements",
@@ -704,10 +705,10 @@ var kindNames = map[Kind]string{
 	Public_: "public", Private_: "private", Protected_: "protected", Readonly_: "readonly",
 	Any_: "any", Unknown_: "unknown", Never_: "never", Boolean_: "boolean",
 	String_: "string", Number_: "number", Symbol_: "symbol",
-	SPREAD: "...",
+	SPREAD:         "...",
 	TEMPLATE_START: "`", TEMPLATE_END: "`",
 	TEMPLATE_MID: "`",
-	Regexp: "Regexp",
+	Regexp:       "Regexp",
 }
 
 func kindName(k Kind) string {

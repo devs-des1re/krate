@@ -86,3 +86,34 @@ jobs:
         with:
           generate_release_notes: true
           prerelease: ${{ steps.tag.outputs.prerelease }}
+
+      - name: Tag Go module
+        shell: bash
+        run: |
+          set -e
+          VERSION="v${GITHUB_REF_NAME#v}"
+          GO_TAG="packages/compiler/${VERSION}"
+          if git rev-parse -q --verify "refs/tags/${GO_TAG}" >/dev/null; then
+            echo "tag ${GO_TAG} already exists; skipping"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag "${GO_TAG}" "${GITHUB_SHA}"
+            git push origin "${GO_TAG}"
+            echo "pushed ${GO_TAG}"
+          fi
+
+      - name: Publish Go module release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="v${GITHUB_REF_NAME#v}"
+          GO_TAG="packages/compiler/${VERSION}"
+          if gh release view "${GO_TAG}" >/dev/null 2>&1; then
+            echo "release ${GO_TAG} already exists; skipping"
+          else
+            gh release create "${GO_TAG}" \
+              --title "compiler SDK ${GO_TAG}" \
+              --prerelease=${{ steps.tag.outputs.prerelease }} \
+              --generate-notes
+          fi

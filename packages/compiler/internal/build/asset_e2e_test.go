@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"krate-compiler/internal/config"
+	"github.com/kratejs/krate/packages/compiler/internal/config"
 )
 
 // TestBuildPageAssetImport is an end-to-end check that importing a non-code

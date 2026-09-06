@@ -6,10 +6,10 @@ import (
 
 // Directive types for server components
 const (
-	DirectiveNone     = ""
-	DirectiveServer   = "@server"
-	DirectiveRuntime  = "@runtime"
-	DirectiveStatic   = "@static"
+	DirectiveNone    = ""
+	DirectiveServer  = "@server"
+	DirectiveRuntime = "@runtime"
+	DirectiveStatic  = "@static"
 )
 
 // HasDirective checks if source code starts with a server/runtime directive.
@@ -121,9 +121,9 @@ type ComponentClass int
 
 const (
 	ComponentClassStatic  ComponentClass = -1 // compile-time only, no interactivity
-	ComponentClassClient   ComponentClass = 0 // default: client component
-	ComponentClassServer   ComponentClass = 1 // build-time server component (@server)
-	ComponentClassRuntime  ComponentClass = 2 // runtime server component (@runtime)
+	ComponentClassClient  ComponentClass = 0  // default: client component
+	ComponentClassServer  ComponentClass = 1  // build-time server component (@server)
+	ComponentClassRuntime ComponentClass = 2  // runtime server component (@runtime)
 )
 
 // IsStatic returns true if the component is compile-time only.

@@ -5,9 +5,9 @@ import (
 	"strings"
 	"unicode"
 
-	"krate-compiler/internal/ast"
-	"krate-compiler/internal/diag"
-	"krate-compiler/internal/lexer"
+	"github.com/kratejs/krate/packages/compiler/ast"
+	"github.com/kratejs/krate/packages/compiler/internal/diag"
+	"github.com/kratejs/krate/packages/compiler/internal/lexer"
 )
 
 // Diagnostic is an alias for the shared compiler diagnostic type.
@@ -179,9 +179,9 @@ var precMap = map[lexer.Kind]int{
 	lexer.SUB_ASSIGN:   precAssign,
 	lexer.MUL_ASSIGN:   precAssign,
 	lexer.DIV_ASSIGN:   precAssign,
-	lexer.MOD_ASSIGN:    precAssign,
-	lexer.SHL_ASSIGN:    precAssign,
-	lexer.SHR_ASSIGN:    precAssign,
+	lexer.MOD_ASSIGN:   precAssign,
+	lexer.SHL_ASSIGN:   precAssign,
+	lexer.SHR_ASSIGN:   precAssign,
 	lexer.QUEST:        precCond,
 	lexer.NULLISH:      precOr,
 	lexer.OR:           precOr,

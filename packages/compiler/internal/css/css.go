@@ -8,7 +8,7 @@ import (
 	"sort"
 	"strings"
 
-	"krate-compiler/internal/fsutil"
+	"github.com/kratejs/krate/packages/compiler/internal/fsutil"
 )
 
 var classSelector = regexp.MustCompile(`\.([a-zA-Z_][a-zA-Z0-9_-]*)`)

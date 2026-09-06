@@ -10,10 +10,10 @@ import (
 	"sort"
 	"strings"
 
-	"krate-compiler/internal/ast"
-	"krate-compiler/internal/irtree"
-	"krate-compiler/internal/lexer"
-	"krate-compiler/internal/parser"
+	"github.com/kratejs/krate/packages/compiler/ast"
+	"github.com/kratejs/krate/packages/compiler/internal/irtree"
+	"github.com/kratejs/krate/packages/compiler/internal/lexer"
+	"github.com/kratejs/krate/packages/compiler/internal/parser"
 )
 
 // SignalNode tracks where a signal is read from and written to.

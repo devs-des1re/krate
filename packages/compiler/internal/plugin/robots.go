@@ -6,7 +6,7 @@ import (
 	"path"
 	"strings"
 
-	"krate-compiler/internal/config"
+	"github.com/kratejs/krate/packages/compiler/internal/config"
 )
 
 func init() {

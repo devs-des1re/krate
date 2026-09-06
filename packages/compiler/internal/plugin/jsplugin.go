@@ -9,8 +9,9 @@ import (
 	"sync"
 
 	"github.com/evanw/esbuild/pkg/api"
-	"krate-compiler/internal/config"
-	"krate-compiler/internal/jsruntime"
+	"github.com/kratejs/krate/packages/compiler/internal/astjson"
+	"github.com/kratejs/krate/packages/compiler/internal/config"
+	"github.com/kratejs/krate/packages/compiler/internal/jsruntime"
 )
 
 // jsPluginBundleCache memoizes the esbuild-bundled IIFE for each plugin module
@@ -45,7 +46,7 @@ func runJSPluginHook(hookName string, pc config.PluginConfig, root, outDir strin
 		return fmt.Errorf("loading plugin bundle: %w", err)
 	}
 
-	ctxJSON, err := json.Marshal(hookCtx)
+	ctxJSON, err := marshalHookContext(hookName, hookCtx)
 	if err != nil {
 		return fmt.Errorf("serializing hook context: %w", err)
 	}
@@ -131,6 +132,26 @@ func runJSPluginHook(hookName string, pc config.PluginConfig, root, outDir strin
 	}
 
 	return applyPluginOutput(hookName, &output, outDir, hookCtx)
+}
+
+// marshalHookContext serializes a hook context for the JS runtime. The
+// AfterParse context carries the AST as a kind-tagged document (astjson) so
+// JavaScript plugins inspect and edit a stable AST shape.
+func marshalHookContext(hookName string, hookCtx interface{}) ([]byte, error) {
+	if hookName == "AfterParse" {
+		if pctx, ok := hookCtx.(*ParseHookCtx); ok && pctx != nil {
+			doc := map[string]interface{}{"page": pctx.Page}
+			if pctx.Program != nil {
+				progDoc, err := astjson.EncodeProgram(pctx.Program)
+				if err != nil {
+					return nil, err
+				}
+				doc["program"] = json.RawMessage(progDoc)
+			}
+			return json.Marshal(doc)
+		}
+	}
+	return json.Marshal(hookCtx)
 }
 
 // pluginCallMessage is the JSON envelope returned by the JS hook invocation.

@@ -4,9 +4,9 @@ import (
 	"strings"
 	"testing"
 
-	"krate-compiler/internal/ast"
-	"krate-compiler/internal/lexer"
-	"krate-compiler/internal/parser"
+	"github.com/kratejs/krate/packages/compiler/ast"
+	"github.com/kratejs/krate/packages/compiler/internal/lexer"
+	"github.com/kratejs/krate/packages/compiler/internal/parser"
 )
 
 func parseProg(t *testing.T, src string) *ast.Program {

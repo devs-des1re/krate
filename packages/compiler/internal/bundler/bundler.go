@@ -9,11 +9,11 @@ import (
 	"sort"
 	"strings"
 
-	"krate-compiler/internal/ast"
-	"krate-compiler/internal/css"
-	"krate-compiler/internal/lexer"
-	"krate-compiler/internal/markdown"
-	"krate-compiler/internal/parser"
+	"github.com/kratejs/krate/packages/compiler/ast"
+	"github.com/kratejs/krate/packages/compiler/internal/css"
+	"github.com/kratejs/krate/packages/compiler/internal/lexer"
+	"github.com/kratejs/krate/packages/compiler/internal/markdown"
+	"github.com/kratejs/krate/packages/compiler/internal/parser"
 )
 
 type PkgJSON struct {
@@ -98,10 +98,10 @@ var reactNames = map[string]string{
 
 func New(root string) *Bundler {
 	return &Bundler{
-		root:    root,
-		seen:    make(map[string]bool),
-		assets:  make(map[string]string),
-		workers: make(map[string]string),
+		root:      root,
+		seen:      make(map[string]bool),
+		assets:    make(map[string]string),
+		workers:   make(map[string]string),
 		workerEsm: make(map[string]bool),
 	}
 }

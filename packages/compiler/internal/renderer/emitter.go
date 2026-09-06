@@ -8,9 +8,9 @@ import (
 	"strings"
 	"sync"
 
-	"krate-compiler/internal/ast"
-	"krate-compiler/internal/escape"
-	"krate-compiler/internal/irtree"
+	"github.com/kratejs/krate/packages/compiler/ast"
+	"github.com/kratejs/krate/packages/compiler/internal/escape"
+	"github.com/kratejs/krate/packages/compiler/internal/irtree"
 )
 
 // EmitResult consolidates all page output from the emitter.

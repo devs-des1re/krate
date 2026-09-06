@@ -56,8 +56,8 @@ func BuildSidebarTree(pages []Page) []SidebarItem {
 	SortPages(pages)
 
 	type dirNode struct {
-		item     SidebarItem
-		subdirs  map[string]*dirNode
+		item    SidebarItem
+		subdirs map[string]*dirNode
 	}
 
 	root := &dirNode{

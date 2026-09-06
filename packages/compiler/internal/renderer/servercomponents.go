@@ -3,25 +3,25 @@ package renderer
 import (
 	"strings"
 
-	"krate-compiler/internal/ast"
+	"github.com/kratejs/krate/packages/compiler/ast"
 )
 
 // ComponentTier classifies components into rendering strategies.
 type ComponentTier int
 
 const (
-	TierClient   ComponentTier = iota // Default: full SSR + client hydration
-	TierStatic                        // Compile-time only, no client JS
-	TierServer                        // Build-time evaluation, HTML output only
-	TierRuntime                       // Serve-time evaluation via QuickJS, streamed to client
+	TierClient  ComponentTier = iota // Default: full SSR + client hydration
+	TierStatic                       // Compile-time only, no client JS
+	TierServer                       // Build-time evaluation, HTML output only
+	TierRuntime                      // Serve-time evaluation via QuickJS, streamed to client
 )
 
 // TierCommentPrefixes maps tier annotation comments to their tier.
 var TierCommentPrefixes = map[string]ComponentTier{
-	"@client":   TierClient,
-	"@static":   TierStatic,
-	"@server":   TierServer,
-	"@runtime":  TierRuntime,
+	"@client":  TierClient,
+	"@static":  TierStatic,
+	"@server":  TierServer,
+	"@runtime": TierRuntime,
 }
 
 // ClassifyComponent determines a component's tier from its leading comments.
@@ -75,8 +75,8 @@ func (t ComponentTier) String() string {
 
 // TierInfo holds classification metadata for a component during rendering.
 type TierInfo struct {
-	Tier       ComponentTier
-	SourceFile string // file where the component is defined
+	Tier          ComponentTier
+	SourceFile    string // file where the component is defined
 	ComponentName string
 }
 
@@ -95,8 +95,8 @@ func NewTierClassifier() *TierClassifier {
 // Classify records a component's tier.
 func (tc *TierClassifier) Classify(name string, tier ComponentTier, sourceFile string) {
 	tc.components[name] = &TierInfo{
-		Tier:       tier,
-		SourceFile: sourceFile,
+		Tier:          tier,
+		SourceFile:    sourceFile,
 		ComponentName: name,
 	}
 }

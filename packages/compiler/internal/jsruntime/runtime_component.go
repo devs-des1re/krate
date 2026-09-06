@@ -7,7 +7,7 @@ import (
 	"strings"
 	"sync"
 
-	"krate-compiler/internal/escape"
+	"github.com/kratejs/krate/packages/compiler/internal/escape"
 )
 
 // RuntimeComponentRuntime executes compiled runtime component bundles via embedded quickjs.

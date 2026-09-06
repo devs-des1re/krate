@@ -22,8 +22,9 @@ import (
 	"sync"
 	"time"
 
-	"krate-compiler/internal/config"
-	"krate-compiler/internal/jsruntime"
+	"github.com/kratejs/krate/packages/compiler/internal/config"
+	"github.com/kratejs/krate/packages/compiler/internal/jsruntime"
+	"github.com/kratejs/krate/packages/compiler/internal/plugin"
 )
 
 const apiServerScriptContent = `import http from 'node:http';
@@ -1037,8 +1038,14 @@ func serve(root string, cfg *config.Config, reload <-chan []string, startTime ti
 		redirectRewriteHandler.ServeHTTP(w, r)
 	})
 
-	// Final handler chain: userMiddleware -> redirectRewrite -> logging -> ssrPageHandler
-	mux.Handle("/", loggingMiddleware(middlewareHandler))
+	// Final handler chain: userMiddleware -> redirectRewrite -> logging -> ssrPageHandler.
+	// When community plugins with serve hooks are configured, wrap the chain in
+	// the plugin serve handler (ServeRequest interceptor + ServeResponse buffer).
+	var top http.Handler = middlewareHandler
+	if len(cfg.Plugins) > 0 {
+		top = wirePluginServeHandlers(root, cfg, top)
+	}
+	mux.Handle("/", loggingMiddleware(top))
 
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
@@ -1123,6 +1130,8 @@ func serve(root string, cfg *config.Config, reload <-chan []string, startTime ti
 	if cfg.DevServer.Open {
 		openBrowser(fmt.Sprintf("http://localhost:%d", addr.Port))
 	}
+
+	defer plugin.CloseGoPlugins()
 
 	return httpServer.Serve(listener)
 }

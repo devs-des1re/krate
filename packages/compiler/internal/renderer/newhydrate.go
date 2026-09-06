@@ -4,7 +4,7 @@ import (
 	"strconv"
 	"strings"
 
-	"krate-compiler/internal/irtree"
+	"github.com/kratejs/krate/packages/compiler/internal/irtree"
 )
 
 // HydrationBootstrapJS is the shared hydration infrastructure appended to the

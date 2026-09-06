@@ -5,64 +5,15 @@ order: 5
 
 # Plugin System
 
-Krate's plugin system is a single, unified interface with **7 lifecycle
-hooks**. Built-in plugins are written in Go; community plugins are JavaScript
-modules executed inside the embedded QuickJS runtime — no subprocess, no
-stdin/stdout protocol.
-
-## The plugin interface
-
-```go
-type Plugin interface {
-    Name() string
-    Order() int                    // Lower runs first (default: 50)
-    Hooks() PluginHooks
-}
-
-type PluginHooks struct {
-    BeforeBuild        func(ctx *BuildHookCtx) error
-    AfterParse         func(ctx *ParseHookCtx) error
-    AfterMarkdownParse func(ctx *MarkdownHookCtx) error
-    AfterRender        func(ctx *RenderHookCtx) error
-    GenerateRoutes     func(ctx *BuildHookCtx) ([]Route, error)
-    AfterPage          func(ctx *PageHookCtx) error
-    AfterBuild         func(ctx *BuildResultHookCtx) error
-}
-```
-
-## The 7 lifecycle hooks
-
-| Hook | When | Mutable Context |
-|------|------|-----------------|
-| `BeforeBuild` | Before any pages are built | Root, Config |
-| `AfterParse` | After a page is parsed (AST available) | AST, Source |
-| `AfterMarkdownParse` | After markdown/MDX is parsed | HTML, Frontmatter |
-| `AfterRender` | After SSR rendering | HTML, HeadHTML, Signals, Handlers |
-| `GenerateRoutes` | Generate virtual pages | Routes |
-| `AfterPage` | After a page is fully built | HTML, Route |
-| `AfterBuild` | After all pages are built | Results, Manifest |
-
-## Config usage (typed)
-
-```ts
-import { defineConfig, sitemap, docs } from '@krate/core';
-import demoPlugin from './plugins/krate-plugin-demo';
-
-export default defineConfig({
-  plugins: [
-    sitemap({ baseUrl: "https://example.com" }),
-    docs({ contentDir: "content/docs", title: "Docs" }),
-    demoPlugin({ greeting: "Hello!" }),
-  ],
-});
-```
-
-Each factory returns a **serializable descriptor**: `{ name, order, options }`
-(built-ins) or `{ name, order, module, options }` (community plugins).
+Krate's plugin system is a single, unified interface with **9 hooks** across
+two runtimes. Built-in plugins are written in Go; community plugins are either
+JavaScript modules executed inside the embedded QuickJS runtime — no subprocess,
+no stdin/stdout protocol — **or** Go plugins run as a subprocess over HashiCorp
+`go-plugin`.
 
 ## Community plugin protocol
 
-Community plugins are **JavaScript modules** executed inside the embedded
+Community JS plugins are JavaScript modules executed inside the embedded
 QuickJS runtime (`modernc.org/quickjs`). The module is bundled with esbuild
 into a self-contained IIFE and its hooks are called directly from Go.
 
@@ -96,14 +47,64 @@ export default function myPlugin(options) {
   `ctx.page`, `ctx.outName`, `ctx.headHTML`, `ctx.rawCSS`) and `krate` is
   `{ root, outDir, version }`.
 - **Return value** — hooks return `{ files, routes, generatedPages, html,
-  headHTML, rawCSS }` (all optional; may be a Promise). `files` are written into
-  the output directory (path traversal is rejected), `routes` become static
-  HTML pages, `generatedPages` feed the page pipeline, and `html`/`headHTML`/
-  `rawCSS` mutate the hook context.
+  headHTML, rawCSS, scripts, metaTags, ast }` (all optional; may be a Promise).
+  `files` are written into the output directory (path traversal is rejected),
+  `routes` become static HTML pages, `generatedPages` feed the page pipeline,
+  and `html`/`headHTML`/`rawCSS`/`scripts`/`metaTags` mutate the hook context.
+  At `AfterParse`, `ctx.program` is the kind-tagged AST document; mutate it and
+  return it as `ast` to rewrite the tree (same capability as Go plugins).
 - **Runtime capabilities** — bundled plugins can use `import fs from 'fs'` /
   `import path from 'path'` (polyfilled) plus Web API polyfills (`fetch`, `URL`,
   `Headers`, `Response`, `TextEncoder`, timers, `process.env`). Non-relative
   third-party imports are left external and unavailable.
+
+## Go plugins
+
+Community plugins can also be **Go programs** run as a subprocess via HashiCorp
+`go-plugin`. They use the public SDK
+(`github.com/kratejs/krate/packages/compiler/pluginsdk`, package
+`plug`) and are distributed as an npm package whose descriptor reports
+`runtime: 'go'` and per-platform binary paths:
+
+```javascript
+module.exports = function () {
+  return {
+    name: "my-plugin",
+    runtime: "go",
+    binaries: { "linux-amd64": "bin/my-plugin-linux-amd64" },
+  };
+};
+```
+
+Go plugins are trusted dependencies and run with full subprocess access. They
+can edit the parsed AST (`ctx.Program` is a live `*ast.Program`), and their
+serve hooks handle request-time transforms.
+
+## Serve hooks
+
+Two additional request-time hooks run in the dev server: `ServeRequest`
+(mutate or short-circuit an incoming request before it is served) and
+`ServeResponse` (rewrite a non-streaming response after it has been buffered).
+Streaming responses pass through unchanged.
+
+## Config usage (typed)
+
+```ts
+import { defineConfig, sitemap, docs } from '@krate/core';
+import demoPlugin from './plugins/krate-plugin-demo';
+
+export default defineConfig({
+  plugins: [
+    sitemap({ baseUrl: "https://example.com" }),
+    docs({ contentDir: "content/docs", title: "Docs" }),
+    demoPlugin({ greeting: "Hello!" }),
+  ],
+});
+```
+
+Each factory returns a **serializable descriptor**: `{ name, order, options }`
+(built-ins), `{ name, order, module, options }` (JS community plugins), or
+`{ name, order, runtime: "go", hooks, binaries }` (Go plugins).
 
 ## Built-in plugins
 
@@ -116,5 +117,6 @@ export default function myPlugin(options) {
 | `csp` | Content Security Policy meta tag |
 | `docs` | Documentation site generator with WASM search |
 
-See [Guides: Create a Plugin](/docs/guides/customizing-docs/) and the demo
-plugin in the examples for a full walkthrough.
+See [Guides: Creating Plugins](/docs/guides/creating-plugins/) for an authoring
+walkthrough (JS and Go), [Guides: Customizing Docs](/docs/guides/customizing-docs/),
+and the demo plugins in the examples (`examples/plugins/`).

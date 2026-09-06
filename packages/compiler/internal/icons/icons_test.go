@@ -102,14 +102,14 @@ func TestSanitizeSVG(t *testing.T) {
 
 func TestDangerousURLValue(t *testing.T) {
 	cases := map[string]bool{
-		`href="javascript:alert(1)"`:         true,
-		`href='data:text/html,x'`:            true,
-		`href="  JavaScript:alert(1)"`:       true,
-		`href="jav&#x61;script:alert(1)"`:    true,
-		`href="https://example.com/a?b=c"`:   false,
-		`href="/relative/path"`:              false,
-		`href="mailto:a@b.c"`:                false,
-		`href="">`:                           false,
+		`href="javascript:alert(1)"`:       true,
+		`href='data:text/html,x'`:          true,
+		`href="  JavaScript:alert(1)"`:     true,
+		`href="jav&#x61;script:alert(1)"`:  true,
+		`href="https://example.com/a?b=c"`: false,
+		`href="/relative/path"`:            false,
+		`href="mailto:a@b.c"`:              false,
+		`href="">`:                         false,
 	}
 	for attr, want := range cases {
 		if got := dangerousURLValue(attr); got != want {

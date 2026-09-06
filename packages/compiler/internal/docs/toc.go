@@ -4,7 +4,7 @@ import (
 	"strings"
 	"unicode"
 
-	"krate-compiler/internal/escape"
+	"github.com/kratejs/krate/packages/compiler/internal/escape"
 )
 
 // TOCItem represents a single heading entry in the table of contents.

@@ -64,7 +64,7 @@ func encodeVLQSegment(value int) string {
 	// Make room for sign bit
 	var v uint
 	if value < 0 {
-		v = uint((-value) << 1) | 1
+		v = uint((-value)<<1) | 1
 	} else {
 		v = uint(value << 1)
 	}

@@ -5,7 +5,11 @@ import (
 	"path/filepath"
 	"testing"
 
-	"krate-compiler/internal/config"
+	"github.com/kratejs/krate/packages/compiler/ast"
+	"github.com/kratejs/krate/packages/compiler/internal/astjson"
+	"github.com/kratejs/krate/packages/compiler/internal/config"
+	"github.com/kratejs/krate/packages/compiler/internal/lexer"
+	"github.com/kratejs/krate/packages/compiler/internal/parser"
 )
 
 // writeTestPlugin writes a JS plugin module into a temp project and returns
@@ -242,6 +246,105 @@ export default {
 	}
 	if _, statErr := os.Stat(filepath.Join(root, "evil.txt")); statErr == nil {
 		t.Fatal("plugin escaped output directory")
+	}
+}
+
+func TestJSPluginAfterParseEditsAST(t *testing.T) {
+	src := `export default function App() { return <div>hello</div>; }`
+	toks := lexer.New(src).Tokenize()
+	prog := parser.New(toks).ParseProgram()
+	if prog == nil || len(prog.Body) == 0 {
+		t.Fatal("setup: failed to parse program")
+	}
+
+	root, outDir, cfg := writeTestPlugin(t, `
+export default {
+  name: "ast-plugin",
+  order: 10,
+  hooks: {
+    AfterParse(ctx, options, krate) {
+      const walk = (node) => {
+        if (!node || typeof node !== 'object') return null;
+        if (node.kind === 'JSXText' && node.value === 'hello') return node;
+        for (const k in node) {
+          const v = node[k];
+          if (Array.isArray(v)) { for (const item of v) { const r = walk(item); if (r) return r; } }
+          else { const r = walk(v); if (r) return r; }
+        }
+        return null;
+      };
+      const el = walk(ctx.program);
+      if (el) el.value = 'hello plugin';
+      return { ast: ctx.program };
+    },
+  },
+};
+`)
+
+	ctx := &ParseHookCtx{Page: "index.tsx", Program: prog}
+	if err := RunCommunityPlugins("AfterParse", []config.PluginConfig{cfg}, root, outDir, ctx); err != nil {
+		t.Fatalf("RunCommunityPlugins: %v", err)
+	}
+	if ctx.Program == nil {
+		t.Fatal("AfterParse plugin dropped the program")
+	}
+
+	exportStmt, ok := ctx.Program.Body[0].(*ast.ExportStmt)
+	if !ok {
+		t.Fatalf("Body[0] = %T, want *ast.ExportStmt", ctx.Program.Body[0])
+	}
+	fn, ok := exportStmt.Declaration.(*ast.FnDecl)
+	if !ok {
+		t.Fatalf("declaration = %T, want *ast.FnDecl", exportStmt.Declaration)
+	}
+	ret, ok := fn.Body[0].(*ast.ReturnStmt)
+	if !ok {
+		t.Fatalf("Body[0] = %T, want *ast.ReturnStmt", fn.Body[0])
+	}
+	jsx, ok := ret.Value.(*ast.JSXElement)
+	if !ok {
+		t.Fatalf("return value = %T, want *ast.JSXElement", ret.Value)
+	}
+	text, ok := jsx.Children[0].(*ast.JSXText)
+	if !ok {
+		t.Fatalf("child = %T, want *ast.JSXText", jsx.Children[0])
+	}
+	if want := "hello plugin"; text.Value != want {
+		t.Errorf("JSXText.Value = %q, want %q (plugin AST edit did not flow into Go program)", text.Value, want)
+	}
+
+	// The edited program must still encode to a valid AST document.
+	doc, err := astjson.EncodeProgram(ctx.Program)
+	if err != nil {
+		t.Fatalf("re-encoding edited program: %v", err)
+	}
+	if !contains(string(doc), "hello plugin") {
+		t.Errorf("re-encoded doc does not contain the plugin edit")
+	}
+}
+
+func TestJSPluginHeadInjections(t *testing.T) {
+	root, outDir, cfg := writeTestPlugin(t, `
+export default {
+  name: "inject-plugin",
+  order: 10,
+  hooks: {
+    AfterRender(ctx, options, krate) {
+      return {
+        metaTags: ['name="description" content="injected"'],
+        scripts: ['/assets/plugin.js'],
+      };
+    },
+  },
+};
+`)
+
+	ctx := &RenderHookCtx{Page: "p.tsx", HTML: "<p>body</p>", HeadHTML: "<title>t</title>", RawCSS: ""}
+	if err := RunCommunityPlugins("AfterRender", []config.PluginConfig{cfg}, root, outDir, ctx); err != nil {
+		t.Fatalf("RunCommunityPlugins: %v", err)
+	}
+	if want := "<title>t</title>\n<meta name=\"description\" content=\"injected\">\n<script src=\"/assets/plugin.js\"></script>"; ctx.HeadHTML != want {
+		t.Errorf("HeadHTML = %q, want %q", ctx.HeadHTML, want)
 	}
 }
 

@@ -6,7 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"krate-compiler/internal/markdown"
+	"github.com/kratejs/krate/packages/compiler/internal/markdown"
 )
 
 type DevServer struct {

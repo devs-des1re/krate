@@ -8,8 +8,8 @@ import (
 	"strconv"
 	"strings"
 
-	"krate-compiler/internal/markdown"
-	"krate-compiler/internal/pluginutil"
+	"github.com/kratejs/krate/packages/compiler/internal/markdown"
+	"github.com/kratejs/krate/packages/compiler/internal/pluginutil"
 )
 
 // SidebarItem represents a single entry in a recursive sidebar tree.
@@ -17,32 +17,32 @@ import (
 // Items with URL (and no Children) act as clickable links.
 // Items with neither are plain text headers.
 type SidebarItem struct {
-	Title      string        `json:"title"`
-	URL        string        `json:"url"`
-	Active     bool          `json:"active"`
-	Children   []SidebarItem `json:"children,omitempty"`
-	IndexURL   string        `json:"indexURL,omitempty"`
-	Collapsible bool         `json:"collapsible,omitempty"`
-	Expanded   bool          `json:"expanded,omitempty"`
+	Title       string        `json:"title"`
+	URL         string        `json:"url"`
+	Active      bool          `json:"active"`
+	Children    []SidebarItem `json:"children,omitempty"`
+	IndexURL    string        `json:"indexURL,omitempty"`
+	Collapsible bool          `json:"collapsible,omitempty"`
+	Expanded    bool          `json:"expanded,omitempty"`
 }
 
 // Page represents a single documentation page.
 type Page struct {
-	Path          string        `json:"path"`          // relative path like "getting-started" or "guides/advanced"
-	Title         string        `json:"title"`         // from frontmatter
-	Order         int           `json:"order"`         // from frontmatter, default 999
-	Content       string        `json:"content"`       // rendered HTML body
-	Dir           string        `json:"dir"`           // directory grouping for sidebar
-	Sidebar       string        `json:"sidebar"`       // optional sidebar section override from frontmatter
-	SourcePath    string        `json:"sourcePath"`    // absolute path to original .md/.mdx file
+	Path          string        `json:"path"`               // relative path like "getting-started" or "guides/advanced"
+	Title         string        `json:"title"`              // from frontmatter
+	Order         int           `json:"order"`              // from frontmatter, default 999
+	Content       string        `json:"content"`            // rendered HTML body
+	Dir           string        `json:"dir"`                // directory grouping for sidebar
+	Sidebar       string        `json:"sidebar"`            // optional sidebar section override from frontmatter
+	SourcePath    string        `json:"sourcePath"`         // absolute path to original .md/.mdx file
 	Keywords      []string      `json:"keywords,omitempty"` // explicit search keywords from frontmatter
-	CustomSidebar []SidebarItem `json:"customSidebar"` // fully custom sidebar items (from JSON in frontmatter)
+	CustomSidebar []SidebarItem `json:"customSidebar"`      // fully custom sidebar items (from JSON in frontmatter)
 }
 
 // Config holds configuration for scanning documentation.
 type Config struct {
-	ContentDir string         // relative to project root
-	Root       string         // absolute project root
+	ContentDir string          // relative to project root
+	Root       string          // absolute project root
 	MDConfig   markdown.Config // markdown rendering config
 }
 

@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strconv"
 
-	"krate-compiler/internal/lexer"
+	"github.com/kratejs/krate/packages/compiler/internal/lexer"
 )
 
 type configParser struct {
@@ -295,15 +295,15 @@ func applyConfigProp(cfg *Config, key string, val interface{}) error {
 				if b, ok := v.(bool); ok {
 					cfg.Markdown.Admonitions = b
 				}
-		case "codeHighlight":
-			if b, ok := v.(bool); ok {
-				cfg.Markdown.CodeHighlight = b
-			}
-		case "codeTheme":
-			if s, ok := v.(string); ok {
-				cfg.Markdown.CodeTheme = s
-			}
-		case "math":
+			case "codeHighlight":
+				if b, ok := v.(bool); ok {
+					cfg.Markdown.CodeHighlight = b
+				}
+			case "codeTheme":
+				if s, ok := v.(string); ok {
+					cfg.Markdown.CodeTheme = s
+				}
+			case "math":
 				if b, ok := v.(bool); ok {
 					cfg.Markdown.Math = b
 				}
@@ -331,7 +331,7 @@ func applyConfigProp(cfg *Config, key string, val interface{}) error {
 					}
 				}
 			}
-	}
+		}
 	case "csp":
 		m, ok := val.(map[string]interface{})
 		if !ok {

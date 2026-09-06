@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"krate-compiler/internal/irtree"
+	"github.com/kratejs/krate/packages/compiler/internal/irtree"
 )
 
 func sig(signals []irtree.SignalDecl, effects, memos, extra []string) irtree.ComponentSignature {

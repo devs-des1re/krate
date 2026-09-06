@@ -4,7 +4,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"krate-compiler/internal/renderer"
+	"github.com/kratejs/krate/packages/compiler/internal/renderer"
 )
 
 func loadRuntimeFromDisk(projectRoot string) string {

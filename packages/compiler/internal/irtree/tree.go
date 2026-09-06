@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"krate-compiler/internal/ast"
+	"github.com/kratejs/krate/packages/compiler/ast"
 )
 
 // ─── SlotID ────────────────────────────────────────────────────────────────
@@ -86,8 +86,8 @@ type StaticHTML struct {
 	HTML string
 }
 
-func (s *StaticHTML) slotNode()         {}
-func (s *StaticHTML) GetID() SlotID     { return "" }
+func (s *StaticHTML) slotNode()     {}
+func (s *StaticHTML) GetID() SlotID { return "" }
 
 // ─── TextSlot — simple signal read: {count()} ──────────────────────────────
 type TextSlot struct {
@@ -96,8 +96,8 @@ type TextSlot struct {
 	Initial string
 }
 
-func (s *TextSlot) slotNode()         {}
-func (s *TextSlot) GetID() SlotID     { return s.ID }
+func (s *TextSlot) slotNode()     {}
+func (s *TextSlot) GetID() SlotID { return s.ID }
 
 // ─── ExprSlot — complex expression: {x() > 0 ? "yes" : "no"} ──────────────
 type ExprSlot struct {
@@ -107,25 +107,25 @@ type ExprSlot struct {
 	Signals    []string
 }
 
-func (s *ExprSlot) slotNode()         {}
-func (s *ExprSlot) GetID() SlotID     { return s.ID }
+func (s *ExprSlot) slotNode()     {}
+func (s *ExprSlot) GetID() SlotID { return s.ID }
 
 // ─── ConditionalSlot — ternary with JSX in branches ────────────────────────
 // Both branches are statically rendered (render-both) wrapped in togglable
 // wrapper elements. Hydration toggles their visibility based on the test.
 type ConditionalSlot struct {
-	ID         SlotID
-	ExprSource string // full ternary JS (unused at hydration; kept for compat)
-	TestJS     string // JS expression for the ternary test (used to toggle)
-	Initial    string
+	ID            SlotID
+	ExprSource    string // full ternary JS (unused at hydration; kept for compat)
+	TestJS        string // JS expression for the ternary test (used to toggle)
+	Initial       string
 	InitialActive bool // whether the consequent branch is active initially
-	Consequent []SlotNode
-	Alternate  []SlotNode
-	Signals    []string
+	Consequent    []SlotNode
+	Alternate     []SlotNode
+	Signals       []string
 }
 
-func (s *ConditionalSlot) slotNode()         {}
-func (s *ConditionalSlot) GetID() SlotID     { return s.ID }
+func (s *ConditionalSlot) slotNode()     {}
+func (s *ConditionalSlot) GetID() SlotID { return s.ID }
 
 // ─── ListSlot — .map() rendering ───────────────────────────────────────────
 type ListSlot struct {
@@ -141,8 +141,8 @@ type ListSlot struct {
 	Components []string
 }
 
-func (s *ListSlot) slotNode()         {}
-func (s *ListSlot) GetID() SlotID     { return s.ID }
+func (s *ListSlot) slotNode()     {}
+func (s *ListSlot) GetID() SlotID { return s.ID }
 
 // ListItem represents a single item in a ListSlot.
 type ListItem struct {
@@ -157,8 +157,8 @@ type ComponentSlot struct {
 	Component *ComponentNode
 }
 
-func (s *ComponentSlot) slotNode()         {}
-func (s *ComponentSlot) GetID() SlotID     { return s.ID }
+func (s *ComponentSlot) slotNode()     {}
+func (s *ComponentSlot) GetID() SlotID { return s.ID }
 
 // ─── SuspenseSlot — streaming boundary ─────────────────────────────────────
 type SuspenseSlot struct {
@@ -168,8 +168,8 @@ type SuspenseSlot struct {
 	StreamID string
 }
 
-func (s *SuspenseSlot) slotNode()         {}
-func (s *SuspenseSlot) GetID() SlotID     { return s.ID }
+func (s *SuspenseSlot) slotNode()     {}
+func (s *SuspenseSlot) GetID() SlotID { return s.ID }
 
 // ─── MetaSlot — Head/Script/Style content routed to page metadata ──────────
 type MetaSlot struct {
@@ -177,34 +177,34 @@ type MetaSlot struct {
 	Children      []SlotNode
 }
 
-func (s *MetaSlot) slotNode()         {}
-func (s *MetaSlot) GetID() SlotID     { return "" }
+func (s *MetaSlot) slotNode()     {}
+func (s *MetaSlot) GetID() SlotID { return "" }
 
 // ─── ChildrenSlot — placeholder for {children} in layouts ──────────────────
 type ChildrenSlot struct {
 	Content string // filled by injectChildrenHTML at emit time
 }
 
-func (s *ChildrenSlot) slotNode()         {}
-func (s *ChildrenSlot) GetID() SlotID     { return "" }
+func (s *ChildrenSlot) slotNode()     {}
+func (s *ChildrenSlot) GetID() SlotID { return "" }
 
 // ─── AttrBinding — dynamic attribute: <div class={expr()}> ─────────────────
 type AttrBinding struct {
 	ElementSlotID SlotID
-	AttrName     string
-	SignalName   string
-	ExprSource   string
-	Initial      string
-	InitialExpr  ast.Expr
-	IsString     bool
+	AttrName      string
+	SignalName    string
+	ExprSource    string
+	Initial       string
+	InitialExpr   ast.Expr
+	IsString      bool
 }
 
 // ─── HandlerDecl — event handler: onClick={() => fn()} ─────────────────────
 type HandlerDecl struct {
 	ElementSlotID SlotID
-	Event        string
-	Body         string
-	Signals      []string
+	Event         string
+	Body          string
+	Signals       []string
 }
 
 // ─── RefBinding — ref={someVar} on an element ──────────────────────────────
@@ -218,32 +218,32 @@ type RefBinding struct {
 
 // ─── SignalDecl — per-instance signal declaration ──────────────────────────
 type SignalDecl struct {
-	Name       string
-	SetterName string
-	Initial    string
-	IsString   bool
+	Name        string
+	SetterName  string
+	Initial     string
+	IsString    bool
 	InitialExpr ast.Expr
 }
 
 // ─── ComponentNode — a single component instance in the tree ───────────────
 type ComponentNode struct {
-	ID       SlotID
-	Name     string
-	Tier     ComponentTier
-	Fn       *ast.FnDecl
-	Props    map[string]ast.Expr
+	ID    SlotID
+	Name  string
+	Tier  ComponentTier
+	Fn    *ast.FnDecl
+	Props map[string]ast.Expr
 	// RuntimeProps holds resolved prop values for runtime-tier components
 	// (prop name → value). These are serialized into the page's runtime props
 	// script so the serve-time renderer can pass them to the component.
 	RuntimeProps map[string]any
 
-	Signals    []SignalDecl
+	Signals      []SignalDecl
 	AttrBindings []AttrBinding
-	Handlers   []HandlerDecl
-	RefBindings []RefBinding
-	Effects    []string
-	Memos      []string
-	ExtraVars  []string
+	Handlers     []HandlerDecl
+	RefBindings  []RefBinding
+	Effects      []string
+	Memos        []string
+	ExtraVars    []string
 	// BodyUses lists every signal read or written anywhere in the component's
 	// function body (including named functions and control flow), so the
 	// reactive validator knows these signals are used even when they don't
@@ -309,16 +309,16 @@ func NewRuntimePropStore() *RuntimePropStore {
 
 // ─── ComponentSignature — serializable metadata for SPA reconciliation ─────
 type ComponentSignature struct {
-	ComponentID SlotID
-	Tier        ComponentTier
-	Signals     []SignalDecl
-	Handlers    []HandlerDecl
-	RefBindings []RefBinding
-	Effects     []string
-	Memos       []string
-	ExtraVars   []string
-	BodyUses    []string
-	Children    []SlotID
+	ComponentID  SlotID
+	Tier         ComponentTier
+	Signals      []SignalDecl
+	Handlers     []HandlerDecl
+	RefBindings  []RefBinding
+	Effects      []string
+	Memos        []string
+	ExtraVars    []string
+	BodyUses     []string
+	Children     []SlotID
 	SlotBindings []SlotBinding
 	AttrBindings []AttrBinding
 }
@@ -327,10 +327,10 @@ type ComponentSignature struct {
 // SlotBinding maps a slot ID to its type and expression source, so the hydrate
 // code can generate createEffect calls to bind signals to DOM text nodes.
 type SlotBinding struct {
-	SlotID   SlotID
-	Type     string // "text", "expr", "conditional", "list"
-	ExprJS   string // JS expression to evaluate (e.g. "count()" or "(x() > 0 ? ... : ...)")
-	Signals  []string // signal names this binding depends on
+	SlotID  SlotID
+	Type    string   // "text", "expr", "conditional", "list"
+	ExprJS  string   // JS expression to evaluate (e.g. "count()" or "(x() > 0 ? ... : ...)")
+	Signals []string // signal names this binding depends on
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────────

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"strings"
 
-	"krate-compiler/internal/escape"
+	"github.com/kratejs/krate/packages/compiler/internal/escape"
 )
 
 const liveReloadScript = `<script>(function(){var s=new EventSource('/__krate/hotreload'),p=location.pathname;s.addEventListener('reload',function(e){try{var d=JSON.parse(e.data);if(d.pages&&d.pages.indexOf(p)===-1)return}catch(_){}location.reload()})})();

@@ -1,12 +1,14 @@
 package plugin
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"krate-compiler/internal/config"
+	"github.com/kratejs/krate/packages/compiler/internal/astjson"
+	"github.com/kratejs/krate/packages/compiler/internal/config"
 )
 
 // communityOutput is the JSON result shape a JS plugin hook returns.
@@ -17,6 +19,9 @@ type communityOutput struct {
 	HTML           *string         `json:"html,omitempty"`
 	HeadHTML       *string         `json:"headHTML,omitempty"`
 	RawCSS         *string         `json:"rawCSS,omitempty"`
+	Ast            json.RawMessage `json:"ast,omitempty"`
+	Scripts        []string        `json:"scripts,omitempty"`
+	MetaTags       []string        `json:"metaTags,omitempty"`
 }
 
 // fileEntry describes a single file to write to the output directory.
@@ -26,9 +31,13 @@ type fileEntry struct {
 }
 
 // runCommunityHook executes a configured community plugin for the given hook.
-// Community plugins are JavaScript modules executed inside the embedded QuickJS
-// runtime — there is no subprocess and no stdin/stdout protocol.
+// The plugin is dispatched by runtime: descriptors returning runtime "go" are
+// launched as Go subprocesses, everything else runs as JavaScript inside the
+// embedded QuickJS runtime — no subprocess and no stdin/stdout protocol.
 func runCommunityHook(hookName string, pc config.PluginConfig, root, outDir string, hookCtx interface{}) error {
+	if isGoPlugin(pc) {
+		return runGoPluginHook(hookName, pc, root, outDir, hookCtx)
+	}
 	return runJSPluginHook(hookName, pc, root, outDir, hookCtx)
 }
 
@@ -92,6 +101,16 @@ func applyPluginOutput(hookName string, output *communityOutput, outDir string, 
 
 	// Apply HTML/head/CSS modifications back to the hook context
 	switch hookName {
+	case "AfterParse":
+		if ctx, ok := hookCtx.(*ParseHookCtx); ok {
+			if len(output.Ast) > 0 {
+				prog, err := astjson.DecodeProgram(output.Ast)
+				if err != nil {
+					return fmt.Errorf("decoding edited AST: %w", err)
+				}
+				ctx.Program = prog
+			}
+		}
 	case "AfterMarkdownParse":
 		if ctx, ok := hookCtx.(*MarkdownHookCtx); ok {
 			if output.HTML != nil {
@@ -109,6 +128,7 @@ func applyPluginOutput(hookName string, output *communityOutput, outDir string, 
 			if output.RawCSS != nil {
 				ctx.RawCSS = ctx.RawCSS + "\n" + *output.RawCSS
 			}
+			ctx.HeadHTML = appendHeadInjections(ctx.HeadHTML, output.Scripts, output.MetaTags)
 		}
 	case "AfterPage":
 		if ctx, ok := hookCtx.(*PageHookCtx); ok {
@@ -118,8 +138,22 @@ func applyPluginOutput(hookName string, output *communityOutput, outDir string, 
 			if output.HeadHTML != nil {
 				ctx.HeadHTML = ctx.HeadHTML + *output.HeadHTML
 			}
+			ctx.HeadHTML = appendHeadInjections(ctx.HeadHTML, output.Scripts, output.MetaTags)
 		}
 	}
 
 	return nil
+}
+
+// appendHeadInjections renders plugin script URLs and meta tag attribute strings
+// into head HTML. Meta tags carry full attribute markup (e.g.
+// `name="description" content="..."`) which is wrapped in <meta ...> tags.
+func appendHeadInjections(head string, scripts, metaTags []string) string {
+	for _, m := range metaTags {
+		head += "\n<meta " + m + ">"
+	}
+	for _, s := range scripts {
+		head += "\n<script src=\"" + s + "\"></script>"
+	}
+	return head
 }

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"krate-compiler/internal/escape"
+	"github.com/kratejs/krate/packages/compiler/internal/escape"
 )
 
 // testBundleCode generates a self-contained IIFE bundle that mimics

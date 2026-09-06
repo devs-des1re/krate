@@ -5,10 +5,10 @@ import (
 	"strconv"
 	"strings"
 
-	"krate-compiler/internal/ast"
-	"krate-compiler/internal/escape"
-	"krate-compiler/internal/irtree"
-	"krate-compiler/internal/syntaxhighlight"
+	"github.com/kratejs/krate/packages/compiler/ast"
+	"github.com/kratejs/krate/packages/compiler/internal/escape"
+	"github.com/kratejs/krate/packages/compiler/internal/irtree"
+	"github.com/kratejs/krate/packages/compiler/internal/syntaxhighlight"
 )
 
 // SSREval is a lightweight SSR evaluator that produces HTML output only.

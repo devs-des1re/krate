@@ -24,7 +24,7 @@ func TestMatchRedirect(t *testing.T) {
 		{"/old", "/old/*", true},
 		{"/old/deep/nested", "/old/*", true},
 		{"/other/page", "/old/*", false},
-		{"/oldpage", "/old/*", false},    // no slash boundary
+		{"/oldpage", "/old/*", false}, // no slash boundary
 		{"/old/", "/old/*", true},
 		{"/old//double", "/old/*", true},
 
@@ -83,7 +83,7 @@ func TestMatchRoute(t *testing.T) {
 		// Exact matches
 		{"/", "/", nil, true},
 		{"/about", "/about", nil, true},
-		{"/about/page", "/about", nil, false},   // different segment count
+		{"/about/page", "/about", nil, false}, // different segment count
 		{"/about", "/about/page", nil, false},
 
 		// Dynamic segments

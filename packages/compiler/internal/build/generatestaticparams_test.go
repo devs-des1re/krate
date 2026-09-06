@@ -6,11 +6,11 @@ import (
 	"strings"
 	"testing"
 
-	"krate-compiler/internal/annotator"
-	"krate-compiler/internal/bundler"
-	"krate-compiler/internal/config"
-	"krate-compiler/internal/irtree"
-	"krate-compiler/internal/renderer"
+	"github.com/kratejs/krate/packages/compiler/internal/annotator"
+	"github.com/kratejs/krate/packages/compiler/internal/bundler"
+	"github.com/kratejs/krate/packages/compiler/internal/config"
+	"github.com/kratejs/krate/packages/compiler/internal/irtree"
+	"github.com/kratejs/krate/packages/compiler/internal/renderer"
 )
 
 func TestExtractParamNames(t *testing.T) {

@@ -3,7 +3,7 @@ package parser
 import (
 	"testing"
 
-	"krate-compiler/internal/lexer"
+	"github.com/kratejs/krate/packages/compiler/internal/lexer"
 )
 
 func testParse(t *testing.T, name, src string) {

@@ -5,8 +5,8 @@ import (
 	"regexp"
 	"strings"
 
-	"krate-compiler/internal/escape"
-	"krate-compiler/internal/syntaxhighlight"
+	"github.com/kratejs/krate/packages/compiler/internal/escape"
+	"github.com/kratejs/krate/packages/compiler/internal/syntaxhighlight"
 )
 
 // RenderToHTML converts Markdown source to HTML using the given config.
@@ -37,12 +37,12 @@ const (
 )
 
 type block struct {
-	typ    blockType
-	level  int       // heading level, list indent, etc.
-	info   string    // fenced code language, admonition type
-	lines  []string  // raw lines
-	cells  [][]string // table cells
-	items  []block   // list items, blockquote children
+	typ   blockType
+	level int        // heading level, list indent, etc.
+	info  string     // fenced code language, admonition type
+	lines []string   // raw lines
+	cells [][]string // table cells
+	items []block    // list items, blockquote children
 }
 
 var (
@@ -75,27 +75,27 @@ func parseBlocks(lines []string, cfg Config) []block {
 			continue
 		}
 
-	// Fenced code block
-	if m := fenceRe.FindStringSubmatch(line); m != nil {
-		lang := m[1]
-		var code []string
-		i++
-		// The closer is just the backtick sequence, NOT including the language tag
-		// e.g. ```tsx opens with ``` and should close with ``` (not ```tsx)
-		closeRe := regexp.MustCompile("^`{3,}")
-		closer := closeRe.FindString(m[0])
-		if closer == "" {
-			closer = m[0]
-		}
-		for i < len(lines) {
-			trimmed := strings.TrimSpace(lines[i])
-			if trimmed == closer || (len(trimmed) >= len(closer) && strings.TrimRight(trimmed, "`") == "") {
-				i++
-				break
-			}
-			code = append(code, lines[i])
+		// Fenced code block
+		if m := fenceRe.FindStringSubmatch(line); m != nil {
+			lang := m[1]
+			var code []string
 			i++
-		}
+			// The closer is just the backtick sequence, NOT including the language tag
+			// e.g. ```tsx opens with ``` and should close with ``` (not ```tsx)
+			closeRe := regexp.MustCompile("^`{3,}")
+			closer := closeRe.FindString(m[0])
+			if closer == "" {
+				closer = m[0]
+			}
+			for i < len(lines) {
+				trimmed := strings.TrimSpace(lines[i])
+				if trimmed == closer || (len(trimmed) >= len(closer) && strings.TrimRight(trimmed, "`") == "") {
+					i++
+					break
+				}
+				code = append(code, lines[i])
+				i++
+			}
 			blocks = append(blocks, block{
 				typ:   bFencedCode,
 				info:  lang,

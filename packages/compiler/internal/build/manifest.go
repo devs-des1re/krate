@@ -9,10 +9,10 @@ import (
 
 // Manifest is written to dist/manifest.json and read by the SSR server at runtime.
 type Manifest struct {
-	Pages             []PageMeta           `json:"pages"`
-	Stylesheet        string               `json:"stylesheet,omitempty"`        // global CSS filename
-	RuntimeJS         string               `json:"runtimeJS,omitempty"`         // shared runtime chunk path (relative to outDir)
-	Routes            map[string]PageMeta  `json:"-"`                           // URL route → PageMeta (in-memory only)
+	Pages             []PageMeta             `json:"pages"`
+	Stylesheet        string                 `json:"stylesheet,omitempty"`        // global CSS filename
+	RuntimeJS         string                 `json:"runtimeJS,omitempty"`         // shared runtime chunk path (relative to outDir)
+	Routes            map[string]PageMeta    `json:"-"`                           // URL route → PageMeta (in-memory only)
 	RuntimeComponents []RuntimeComponentMeta `json:"runtimeComponents,omitempty"` // runtime server components
 }
 
@@ -25,18 +25,18 @@ type RuntimeComponentMeta struct {
 
 // ManifestPage is a simplified version written to disk for the Node.js renderer.
 type ManifestPage struct {
-	Route     string `json:"route"`
-	Source    string `json:"source"`
-	Mode      string `json:"mode"`
-	Revalidate int  `json:"revalidate,omitempty"`
+	Route      string `json:"route"`
+	Source     string `json:"source"`
+	Mode       string `json:"mode"`
+	Revalidate int    `json:"revalidate,omitempty"`
 	BundlePath string `json:"bundlePath"` // path to server bundle (relative to outDir)
 }
 
 // ServerManifest is the on-disk format read by the Node.js renderer server.
 type ServerManifest struct {
-	Pages             []ManifestPage      `json:"pages"`
-	Stylesheet        string              `json:"stylesheet,omitempty"`
-	RuntimeJS         string              `json:"runtimeJS,omitempty"`         // shared runtime chunk path
+	Pages             []ManifestPage         `json:"pages"`
+	Stylesheet        string                 `json:"stylesheet,omitempty"`
+	RuntimeJS         string                 `json:"runtimeJS,omitempty"`         // shared runtime chunk path
 	RuntimeComponents []RuntimeComponentMeta `json:"runtimeComponents,omitempty"` // runtime server components
 }
 
@@ -54,9 +54,9 @@ func BuildManifest(results []*PageResult, cssFile string, runtimeJS string) *Man
 			continue
 		}
 		meta := PageMeta{
-			Route:     routeFromOutName(r.OutName),
-			Source:    r.SourcePath,
-			Mode:      r.Mode,
+			Route:      routeFromOutName(r.OutName),
+			Source:     r.SourcePath,
+			Mode:       r.Mode,
 			Revalidate: r.Revalidate,
 		}
 		m.Pages = append(m.Pages, meta)

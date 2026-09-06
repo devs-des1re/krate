@@ -7,10 +7,10 @@ import (
 	"strconv"
 	"strings"
 
-	"krate-compiler/internal/ast"
-	"krate-compiler/internal/escape"
-	"krate-compiler/internal/sigutil"
-	"krate-compiler/internal/syntaxhighlight"
+	"github.com/kratejs/krate/packages/compiler/ast"
+	"github.com/kratejs/krate/packages/compiler/internal/escape"
+	"github.com/kratejs/krate/packages/compiler/internal/sigutil"
+	"github.com/kratejs/krate/packages/compiler/internal/syntaxhighlight"
 )
 
 // resourceSentinel marks a localSignals entry as a createResource getter so

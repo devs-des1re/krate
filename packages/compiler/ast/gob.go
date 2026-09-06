@@ -1,0 +1,63 @@
+package ast
+
+import (
+	"encoding/gob"
+)
+
+// init registers every concrete node type with encoding/gob so that a parsed
+// *ast.Program can travel over go-plugin's net/rpc transport (from a krate Go
+// plugin binary back to the host compiler). Both sides import this package, so
+// gob reproduces identical type names and interface values deserialize cleanly.
+func init() {
+	register := func(v interface{}) { gob.Register(v) }
+	register(&Identifier{})
+	register(&Literal{})
+	register(&CallExpr{})
+	register(&MemberExpr{})
+	register(&BinaryExpr{})
+	register(&UnaryExpr{})
+	register(&ConditionalExpr{})
+	register(&TypeAssertion{})
+	register(&ArrowFn{})
+	register(&ObjectExpr{})
+	register(&ObjectProp{})
+	register(&ArrayExpr{})
+	register(&TemplateExpr{})
+	register(&JSXElement{})
+	register(&JSXFragment{})
+	register(&JSXOpening{})
+	register(&JSXClosing{})
+	register(&JSXText{})
+	register(&JSXExprContainer{})
+	register(&JSXElementChild{})
+	register(&JSXFragmentChild{})
+	register(&JSXAttr{})
+	register(&Param{})
+	register(&Program{})
+	register(&ImportStmt{})
+	register(&NamedImport{})
+	register(&ExportStmt{})
+	register(&VarStmt{})
+	register(&VarDecl{})
+	register(&FnDecl{})
+	register(&ReturnStmt{})
+	register(&ExprStmt{})
+	register(&IfStmt{})
+	register(&BlockStmt{})
+	register(&ForStmt{})
+	register(&ForInStmt{})
+	register(&WhileStmt{})
+	register(&DoWhileStmt{})
+	register(&SwitchStmt{})
+	register(&CaseClause{})
+	register(&TryStmt{})
+	register(&CatchClause{})
+	register(&ThrowStmt{})
+	register(&BreakStmt{})
+	register(&ContinueStmt{})
+	register(&NewExpr{})
+	register(&ThisExpr{})
+	register(&AwaitExpr{})
+	register(&DynamicImport{})
+	register(&ImportMetaExpr{})
+}

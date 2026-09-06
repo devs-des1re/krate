@@ -4,10 +4,10 @@ import (
 	"path/filepath"
 	"strings"
 
-	"krate-compiler/internal/ast"
-	"krate-compiler/internal/config"
-	irtree "krate-compiler/internal/irtree"
-	"krate-compiler/internal/sigutil"
+	"github.com/kratejs/krate/packages/compiler/ast"
+	"github.com/kratejs/krate/packages/compiler/internal/config"
+	irtree "github.com/kratejs/krate/packages/compiler/internal/irtree"
+	"github.com/kratejs/krate/packages/compiler/internal/sigutil"
 )
 
 // Annotate performs static analysis on a parsed program to determine

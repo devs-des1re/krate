@@ -3,11 +3,11 @@ package annotator
 import (
 	"testing"
 
-	"krate-compiler/internal/ast"
-	"krate-compiler/internal/config"
-	"krate-compiler/internal/irtree"
-	"krate-compiler/internal/lexer"
-	"krate-compiler/internal/parser"
+	"github.com/kratejs/krate/packages/compiler/ast"
+	"github.com/kratejs/krate/packages/compiler/internal/config"
+	"github.com/kratejs/krate/packages/compiler/internal/irtree"
+	"github.com/kratejs/krate/packages/compiler/internal/lexer"
+	"github.com/kratejs/krate/packages/compiler/internal/parser"
 )
 
 func parseProg(t *testing.T, src string) *ast.Program {

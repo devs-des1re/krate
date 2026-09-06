@@ -6,7 +6,7 @@ import (
 	"regexp"
 	"strings"
 
-	"krate-compiler/internal/fsutil"
+	"github.com/kratejs/krate/packages/compiler/internal/fsutil"
 )
 
 // classAttrRe matches className="..." / class="..." string-literal attributes.

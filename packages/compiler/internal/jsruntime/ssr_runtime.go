@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"krate-compiler/internal/escape"
+	"github.com/kratejs/krate/packages/compiler/internal/escape"
 )
 
 // SSRPageRequest is the input for rendering a page via QuickJS.

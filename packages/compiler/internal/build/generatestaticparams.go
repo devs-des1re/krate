@@ -8,13 +8,13 @@ import (
 	"strings"
 	"time"
 
-	"krate-compiler/internal/annotator"
-	"krate-compiler/internal/ast"
-	"krate-compiler/internal/bundler"
-	"krate-compiler/internal/irtree"
-	"krate-compiler/internal/reactive"
-	"krate-compiler/internal/renderer"
-	"krate-compiler/internal/tsexec"
+	"github.com/kratejs/krate/packages/compiler/ast"
+	"github.com/kratejs/krate/packages/compiler/internal/annotator"
+	"github.com/kratejs/krate/packages/compiler/internal/bundler"
+	"github.com/kratejs/krate/packages/compiler/internal/irtree"
+	"github.com/kratejs/krate/packages/compiler/internal/reactive"
+	"github.com/kratejs/krate/packages/compiler/internal/renderer"
+	"github.com/kratejs/krate/packages/compiler/internal/tsexec"
 )
 
 // injectStaticParams seeds the root page component with concrete dynamic-route

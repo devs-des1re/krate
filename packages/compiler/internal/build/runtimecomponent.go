@@ -7,7 +7,7 @@ import (
 	"strings"
 
 	"github.com/evanw/esbuild/pkg/api"
-	"krate-compiler/internal/bundler"
+	"github.com/kratejs/krate/packages/compiler/internal/bundler"
 )
 
 // RuntimeComponentBundle represents a compiled runtime server component

@@ -5,16 +5,16 @@ import (
 	"regexp"
 	"strings"
 
-	"krate-compiler/internal/escape"
+	"github.com/kratejs/krate/packages/compiler/internal/escape"
 )
 
 var (
-	boldRe      = regexp.MustCompile(`\*\*(.+?)\*\*`)
-	italicRe    = regexp.MustCompile(`\*(.+?)\*`)
-	strikeRe    = regexp.MustCompile(`~~(.+?)~~`)
-	codeRe      = regexp.MustCompile("`([^`]+)`")
-	autoLinkRe  = regexp.MustCompile(`https?://[^\s<">]+`)
-	schemeRe    = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9+.\-]*$`)
+	boldRe     = regexp.MustCompile(`\*\*(.+?)\*\*`)
+	italicRe   = regexp.MustCompile(`\*(.+?)\*`)
+	strikeRe   = regexp.MustCompile(`~~(.+?)~~`)
+	codeRe     = regexp.MustCompile("`([^`]+)`")
+	autoLinkRe = regexp.MustCompile(`https?://[^\s<">]+`)
+	schemeRe   = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9+.\-]*$`)
 )
 
 func renderInline(text string, cfg Config) string {

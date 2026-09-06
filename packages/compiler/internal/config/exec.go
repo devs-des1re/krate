@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"krate-compiler/internal/tsexec"
+	"github.com/kratejs/krate/packages/compiler/internal/tsexec"
 )
 
 // configExecTimeout bounds how long the npx tsx config bootstrap may run. A

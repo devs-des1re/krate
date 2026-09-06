@@ -3,8 +3,8 @@ package irtree
 import (
 	"strings"
 
-	"krate-compiler/internal/ast"
-	"krate-compiler/internal/escape"
+	"github.com/kratejs/krate/packages/compiler/ast"
+	"github.com/kratejs/krate/packages/compiler/internal/escape"
 )
 
 // generateExprJS converts an AST expression to a JavaScript source string.

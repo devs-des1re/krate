@@ -83,9 +83,9 @@ function GET(request) {
 
 	rt := NewAPIRouteRuntime(apiDir)
 	result := rt.Execute(APIRequest{
-		URL:    "http://localhost:3000/api/test",
-		Method: "GET",
-		Path:   "/api/test",
+		URL:     "http://localhost:3000/api/test",
+		Method:  "GET",
+		Path:    "/api/test",
 		Headers: map[string]string{},
 	})
 
@@ -133,13 +133,13 @@ func TestAPIRoutePathTraversalRejected(t *testing.T) {
 	}
 
 	for _, path := range []string{
-		"/api/../secret",          // traverse up a level
-		"/api/..%2F..%2Fsecret",   // encoded traversal (decoded by resolver)
-		"/api/..%2fsecret",        // lowercase encoded traversal
-		"/api/%2e%2e/secret",      // dotted-encoded segments
-		"/api/../outside",         // escape to the decoy
-		"/api/..\\outside",        // backslash separator (Windows)
-		"/api/x/../../secret",     // deep traversal back in
+		"/api/../secret",        // traverse up a level
+		"/api/..%2F..%2Fsecret", // encoded traversal (decoded by resolver)
+		"/api/..%2fsecret",      // lowercase encoded traversal
+		"/api/%2e%2e/secret",    // dotted-encoded segments
+		"/api/../outside",       // escape to the decoy
+		"/api/..\\outside",      // backslash separator (Windows)
+		"/api/x/../../secret",   // deep traversal back in
 	} {
 		result := rt.Execute(APIRequest{Method: "GET", Path: path})
 		if result.Status != 404 {

@@ -3,8 +3,8 @@ package parser
 import (
 	"testing"
 
-	"krate-compiler/internal/ast"
-	"krate-compiler/internal/lexer"
+	"github.com/kratejs/krate/packages/compiler/ast"
+	"github.com/kratejs/krate/packages/compiler/internal/lexer"
 )
 
 func parse(t *testing.T, src string) (*ast.Program, []error) {

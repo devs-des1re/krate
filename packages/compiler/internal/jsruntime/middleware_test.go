@@ -203,9 +203,9 @@ var middleware = function(request) {
 
 	// Test blocked path
 	result := mrt.Execute(MiddlewareRequest{
-		URL:    "http://localhost:3000/blocked",
-		Method: "GET",
-		Path:   "/blocked",
+		URL:     "http://localhost:3000/blocked",
+		Method:  "GET",
+		Path:    "/blocked",
 		Headers: map[string]string{},
 	})
 	if result.Status != 403 {
@@ -217,9 +217,9 @@ var middleware = function(request) {
 
 	// Test allowed path
 	result = mrt.Execute(MiddlewareRequest{
-		URL:    "http://localhost:3000/about",
-		Method: "GET",
-		Path:   "/about",
+		URL:     "http://localhost:3000/about",
+		Method:  "GET",
+		Path:    "/about",
 		Headers: map[string]string{},
 	})
 	if result.Status != 0 || result.Action != "continue" {
@@ -300,8 +300,8 @@ export {
 
 	// Test /old-blog → 301 redirect
 	result := mrt.Execute(MiddlewareRequest{
-		URL:  "http://localhost:3000/old-blog",
-		Path: "/old-blog",
+		URL:     "http://localhost:3000/old-blog",
+		Path:    "/old-blog",
 		Headers: map[string]string{},
 	})
 	if result.Status != 301 {
@@ -316,8 +316,8 @@ export {
 
 	// Test /admin → 403
 	result = mrt.Execute(MiddlewareRequest{
-		URL:  "http://localhost:3000/admin/settings",
-		Path: "/admin/settings",
+		URL:     "http://localhost:3000/admin/settings",
+		Path:    "/admin/settings",
 		Headers: map[string]string{},
 	})
 	if result.Status != 403 {
@@ -329,8 +329,8 @@ export {
 
 	// Test normal page → 200
 	result = mrt.Execute(MiddlewareRequest{
-		URL:  "http://localhost:3000/about",
-		Path: "/about",
+		URL:     "http://localhost:3000/about",
+		Path:    "/about",
 		Headers: map[string]string{},
 	})
 	if result.Status != 200 {

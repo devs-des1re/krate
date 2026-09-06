@@ -4,10 +4,10 @@ import (
 	"strings"
 	"testing"
 
-	"krate-compiler/internal/annotator"
-	"krate-compiler/internal/ast"
-	"krate-compiler/internal/config"
-	"krate-compiler/internal/irtree"
+	"github.com/kratejs/krate/packages/compiler/ast"
+	"github.com/kratejs/krate/packages/compiler/internal/annotator"
+	"github.com/kratejs/krate/packages/compiler/internal/config"
+	"github.com/kratejs/krate/packages/compiler/internal/irtree"
 )
 
 func annotateWithRuntime(prog *ast.Program, raw string) *irtree.Annotations {

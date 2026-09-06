@@ -3,7 +3,7 @@ package renderer
 import (
 	"testing"
 
-	"krate-compiler/internal/ast"
+	"github.com/kratejs/krate/packages/compiler/ast"
 )
 
 // TestSSREvalUnsupportedExpressionErrors verifies that expression constructs

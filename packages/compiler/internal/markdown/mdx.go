@@ -339,9 +339,9 @@ type seqMarker struct {
 }
 
 type jsxBlockT struct {
-	Tag      string
-	Attrs    string
-	Children string
+	Tag       string
+	Attrs     string
+	Children  string
 	SelfClose bool
 }
 
@@ -472,9 +472,9 @@ func ParseMDXSegments(src string, cfg Config) (frontmatter map[string]string, se
 						i--
 					}
 					info := &jsxBlockT{
-						Tag:      tag,
-						Attrs:    attrs,
-						Children: children,
+						Tag:       tag,
+						Attrs:     attrs,
+						Children:  children,
 						SelfClose: false,
 					}
 					placeholder := makePlaceholder("MDX", jsxIdx)
@@ -502,9 +502,9 @@ func ParseMDXSegments(src string, cfg Config) (frontmatter map[string]string, se
 					j++
 				}
 				info := &jsxBlockT{
-					Tag:      tag,
-					Attrs:    attrs,
-					Children: children,
+					Tag:       tag,
+					Attrs:     attrs,
+					Children:  children,
 					SelfClose: false,
 				}
 				placeholder := makePlaceholder("MDX", jsxIdx)
@@ -522,9 +522,9 @@ func ParseMDXSegments(src string, cfg Config) (frontmatter map[string]string, se
 				cleanAttrs = strings.TrimSuffix(strings.TrimSpace(cleanAttrs), "/")
 				cleanAttrs = strings.TrimSpace(cleanAttrs)
 				info := &jsxBlockT{
-					Tag:      tag,
-					Attrs:    cleanAttrs,
-					Children: "",
+					Tag:       tag,
+					Attrs:     cleanAttrs,
+					Children:  "",
 					SelfClose: true,
 				}
 				placeholder := makePlaceholder("MDX", jsxIdx)
@@ -755,4 +755,3 @@ func collectFencedCode(lines []string, i int) (lang string, code []string, next 
 	}
 	return lang, code, i
 }
-

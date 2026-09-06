@@ -4,7 +4,7 @@
 // copies of this traversal; both now consume this single implementation.
 package sigutil
 
-import "krate-compiler/internal/ast"
+import "github.com/kratejs/krate/packages/compiler/ast"
 
 // Decl is a single detected reactive declaration.
 type Decl struct {

@@ -8,9 +8,9 @@ import (
 	"strings"
 	"sync"
 
-	"krate-compiler/internal/config"
-	"krate-compiler/internal/docs"
-	"krate-compiler/internal/markdown"
+	"github.com/kratejs/krate/packages/compiler/internal/config"
+	"github.com/kratejs/krate/packages/compiler/internal/docs"
+	"github.com/kratejs/krate/packages/compiler/internal/markdown"
 )
 
 type DocsPluginOptions struct {

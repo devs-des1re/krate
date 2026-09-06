@@ -12,22 +12,22 @@ import (
 	"time"
 
 	"github.com/evanw/esbuild/pkg/api"
-	"krate-compiler/internal/annotator"
-	"krate-compiler/internal/ast"
-	"krate-compiler/internal/bundler"
-	"krate-compiler/internal/config"
-	"krate-compiler/internal/css"
-	"krate-compiler/internal/escape"
-	"krate-compiler/internal/fsutil"
-	"krate-compiler/internal/icons"
-	"krate-compiler/internal/imageproc"
-	"krate-compiler/internal/irtree"
-	"krate-compiler/internal/jsruntime"
-	"krate-compiler/internal/markdown"
-	"krate-compiler/internal/plugin"
-	"krate-compiler/internal/reactive"
-	"krate-compiler/internal/renderer"
-	"krate-compiler/internal/syntaxhighlight"
+	"github.com/kratejs/krate/packages/compiler/ast"
+	"github.com/kratejs/krate/packages/compiler/internal/annotator"
+	"github.com/kratejs/krate/packages/compiler/internal/bundler"
+	"github.com/kratejs/krate/packages/compiler/internal/config"
+	"github.com/kratejs/krate/packages/compiler/internal/css"
+	"github.com/kratejs/krate/packages/compiler/internal/escape"
+	"github.com/kratejs/krate/packages/compiler/internal/fsutil"
+	"github.com/kratejs/krate/packages/compiler/internal/icons"
+	"github.com/kratejs/krate/packages/compiler/internal/imageproc"
+	"github.com/kratejs/krate/packages/compiler/internal/irtree"
+	"github.com/kratejs/krate/packages/compiler/internal/jsruntime"
+	"github.com/kratejs/krate/packages/compiler/internal/markdown"
+	"github.com/kratejs/krate/packages/compiler/internal/plugin"
+	"github.com/kratejs/krate/packages/compiler/internal/reactive"
+	"github.com/kratejs/krate/packages/compiler/internal/renderer"
+	"github.com/kratejs/krate/packages/compiler/internal/syntaxhighlight"
 )
 
 type cssModuleBinding struct {
@@ -69,9 +69,9 @@ type Builder struct {
 	pageDeps map[string][]string // page source path → files it depends on
 	depMu    sync.Mutex          // protects depGraph/pageDeps
 
-	workerMu sync.Mutex
-	workers  map[string]string // worker source path → hashed site URL (/workers/…)
-	workerEsm map[string]bool  // worker source path → built as ES module
+	workerMu  sync.Mutex
+	workers   map[string]string // worker source path → hashed site URL (/workers/…)
+	workerEsm map[string]bool   // worker source path → built as ES module
 }
 
 func New(root string, cfg *config.Config) *Builder {
@@ -240,6 +240,7 @@ func (b *Builder) BuildAll() error {
 	if err := os.MkdirAll(b.Cfg.OutDir, 0755); err != nil {
 		return fmt.Errorf("creating output dir: %w", err)
 	}
+	defer b.ClosePlugins()
 
 	pages, err := findPages(b.Cfg.PagesDir)
 	if err != nil {
@@ -564,6 +565,11 @@ func (b *Builder) BuildAll() error {
 	return nil
 }
 
+// ClosePlugins shuts down any running Go plugin subprocesses.
+func (b *Builder) ClosePlugins() {
+	plugin.CloseGoPlugins()
+}
+
 // recordDeps records the dependency mapping between a page and the files it depends on.
 func (b *Builder) recordDeps(page string, pageDeps []string) {
 	b.depMu.Lock()
@@ -742,6 +748,10 @@ func (b *Builder) buildPage(page string) (*PageResult, string, error) {
 	if err := plugin.RunCommunityPlugins("AfterParse", b.Cfg.Plugins, b.Root, b.Cfg.OutDir, parseCtx); err != nil {
 		fmt.Fprintf(os.Stderr, "  %sCommunity plugin error AfterParse (%s):%s %v\n", cYellow, page, cReset, err)
 	}
+	// Plugins may hand back a replacement AST (JS plugins decode the astjson doc
+	// they return; Go-style plugins swap ctx.Program directly). Point the entry
+	// module at the final program so all downstream stages render the edited tree.
+	entryModule.Program = parseCtx.Program
 
 	// Detect rendering mode (SSR/ISR/Streaming) from AST exports + <Suspense> usage
 	renderMode, revalidate := detectRenderMode(entryModule.Program, entryModule.SourceCode)
@@ -1632,7 +1642,7 @@ func (b *Builder) writeWorkerBundles() error {
 			return err
 		}
 
-loader := api.LoaderJS
+		loader := api.LoaderJS
 		ext := strings.ToLower(filepath.Ext(src))
 		switch ext {
 		case ".ts":

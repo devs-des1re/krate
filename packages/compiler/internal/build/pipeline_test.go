@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"krate-compiler/internal/config"
+	"github.com/kratejs/krate/packages/compiler/internal/config"
 )
 
 // testProjectPath returns the examples root used by the integration tests.

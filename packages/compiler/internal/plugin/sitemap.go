@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"krate-compiler/internal/config"
+	"github.com/kratejs/krate/packages/compiler/internal/config"
 )
 
 // SitemapPluginOptions holds typed configuration for the sitemap plugin.

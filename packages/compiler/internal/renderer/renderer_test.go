@@ -5,14 +5,14 @@ import (
 	"strings"
 	"testing"
 
-	"krate-compiler/internal/annotator"
-	"krate-compiler/internal/ast"
-	"krate-compiler/internal/bundler"
-	"krate-compiler/internal/config"
-	"krate-compiler/internal/escape"
-	"krate-compiler/internal/irtree"
-	"krate-compiler/internal/lexer"
-	"krate-compiler/internal/parser"
+	"github.com/kratejs/krate/packages/compiler/ast"
+	"github.com/kratejs/krate/packages/compiler/internal/annotator"
+	"github.com/kratejs/krate/packages/compiler/internal/bundler"
+	"github.com/kratejs/krate/packages/compiler/internal/config"
+	"github.com/kratejs/krate/packages/compiler/internal/escape"
+	"github.com/kratejs/krate/packages/compiler/internal/irtree"
+	"github.com/kratejs/krate/packages/compiler/internal/lexer"
+	"github.com/kratejs/krate/packages/compiler/internal/parser"
 )
 
 // ─── Test helpers ────────────────────────────────────────────────────────────

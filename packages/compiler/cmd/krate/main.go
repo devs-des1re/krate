@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	"krate-compiler/internal/build"
-	"krate-compiler/internal/config"
+	"github.com/kratejs/krate/packages/compiler/internal/build"
+	"github.com/kratejs/krate/packages/compiler/internal/config"
 )
 
 const (
@@ -203,4 +203,3 @@ func runServe(flags cliFlags, args []string) {
 		os.Exit(1)
 	}
 }
-

@@ -3,8 +3,8 @@ package build
 import (
 	"testing"
 
-	"krate-compiler/internal/lexer"
-	"krate-compiler/internal/parser"
+	"github.com/kratejs/krate/packages/compiler/internal/lexer"
+	"github.com/kratejs/krate/packages/compiler/internal/parser"
 )
 
 func TestDetectRenderModeSuspenseAutoStreaming(t *testing.T) {

@@ -4,10 +4,10 @@ import (
 	"strings"
 	"testing"
 
-	"krate-compiler/internal/annotator"
-	"krate-compiler/internal/ast"
-	"krate-compiler/internal/config"
-	"krate-compiler/internal/irtree"
+	"github.com/kratejs/krate/packages/compiler/ast"
+	"github.com/kratejs/krate/packages/compiler/internal/annotator"
+	"github.com/kratejs/krate/packages/compiler/internal/config"
+	"github.com/kratejs/krate/packages/compiler/internal/irtree"
 )
 
 func annotateWith(prog *ast.Program, cfg *config.Config, path, raw string) *irtree.Annotations {
@@ -26,7 +26,7 @@ func configWithServer(names ...string) *config.Config {
 
 func TestBuildFragmentFlattensMixedChildren(t *testing.T) {
 	tree := annotateAndBuild(t, `export default function App() {
-	return <><span>one</span>{` + "`two`" + `}<span>three</span></>;
+	return <><span>one</span>{`+"`two`"+`}<span>three</span></>;
 }`)
 	if len(tree.Root.Children) < 3 {
 		t.Fatalf("expected >=3 children from flattened fragment, got %d", len(tree.Root.Children))
@@ -273,10 +273,10 @@ func TestBuildHandlerIdentifierReferences(t *testing.T) {
 	// onClick={fn} should work the same as onClick={() => fn()} for local
 	// function declarations, const arrow functions, and module-level functions.
 	tests := []struct {
-		name       string
-		src        string
-		wantBody   string
-		wantVar    string // expected extra var hoisting the function into scope
+		name     string
+		src      string
+		wantBody string
+		wantVar  string // expected extra var hoisting the function into scope
 	}{
 		{
 			name: "local function declaration",

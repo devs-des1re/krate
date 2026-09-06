@@ -8,9 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"krate-compiler/internal/docfind"
-	"krate-compiler/internal/docs"
-	"krate-compiler/internal/plugin/searchassets"
+	"github.com/kratejs/krate/packages/compiler/internal/docfind"
+	"github.com/kratejs/krate/packages/compiler/internal/docs"
+	"github.com/kratejs/krate/packages/compiler/internal/plugin/searchassets"
 )
 
 // DocsSearchOptions configures the docs site search bar.

@@ -6,8 +6,8 @@ import (
 	"sync"
 	"time"
 
-	"krate-compiler/internal/ast"
-	"krate-compiler/internal/config"
+	"github.com/kratejs/krate/packages/compiler/ast"
+	"github.com/kratejs/krate/packages/compiler/internal/config"
 )
 
 // Plugin is the unified plugin interface. Every plugin — built-in or community —
@@ -75,17 +75,17 @@ type GeneratedPage struct {
 
 // BuildHookCtx is passed to BeforeBuild and GenerateRoutes hooks.
 type BuildHookCtx struct {
-	Root           string          `json:"root"`
-	OutDir         string          `json:"outDir"`
-	Config         interface{}     `json:"config,omitempty"` // *config.Config
-	Pages          []string        `json:"pages"`
+	Root           string           `json:"root"`
+	OutDir         string           `json:"outDir"`
+	Config         interface{}      `json:"config,omitempty"` // *config.Config
+	Pages          []string         `json:"pages"`
 	GeneratedPages *[]GeneratedPage `json:"generatedPages,omitempty"` // mutable — append generated pages here
-	DevMode        bool            `json:"devMode"`
+	DevMode        bool             `json:"devMode"`
 }
 
 // ParseHookCtx is passed to AfterParse hook after a page's source is parsed.
 type ParseHookCtx struct {
-	Page    string      `json:"page"`
+	Page    string       `json:"page"`
 	Program *ast.Program `json:"program,omitempty"`
 }
 
@@ -101,7 +101,7 @@ type MarkdownHookCtx struct {
 // but before layout wrapping. All pointer fields are mutable.
 type RenderHookCtx struct {
 	Page     string `json:"page"`
-	HTML     string `json:"html"` // mutable — plugin can modify rendered HTML
+	HTML     string `json:"html"`     // mutable — plugin can modify rendered HTML
 	HeadHTML string `json:"headHTML"` // mutable — plugin can inject head content
 	HasJS    bool   `json:"hasJS"`
 	RawCSS   string `json:"rawCSS"` // mutable — plugin can inject additional CSS
@@ -112,7 +112,7 @@ type RenderHookCtx struct {
 type PageHookCtx struct {
 	Page     string `json:"page"`
 	OutName  string `json:"outName"`
-	HTML     string `json:"html"` // mutable — plugin can modify final HTML
+	HTML     string `json:"html"`     // mutable — plugin can modify final HTML
 	HeadHTML string `json:"headHTML"` // mutable — plugin can inject head content
 	HasJS    bool   `json:"hasJS"`
 }
@@ -213,9 +213,9 @@ type HookFunc struct {
 	hooks PluginHooks
 }
 
-func (h *HookFunc) Name() string           { return h.name }
-func (h *HookFunc) Order() int             { return h.order }
-func (h *HookFunc) Hooks() PluginHooks     { return h.hooks }
+func (h *HookFunc) Name() string       { return h.name }
+func (h *HookFunc) Order() int         { return h.order }
+func (h *HookFunc) Hooks() PluginHooks { return h.hooks }
 
 // NewHookFunc creates a Plugin from a name, order, and hooks.
 func NewHookFunc(name string, order int, hooks PluginHooks) Plugin {

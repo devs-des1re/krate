@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"krate-compiler/internal/config"
+	"github.com/kratejs/krate/packages/compiler/internal/config"
 )
 
 // TestBuildPageWorker verifies `new Worker('./worker.ts')` in a page: the

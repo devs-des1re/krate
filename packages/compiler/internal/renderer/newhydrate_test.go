@@ -171,10 +171,10 @@ func TestHydrationRouterInit(t *testing.T) {
 
 func TestSanitizeHandlerProp(t *testing.T) {
 	cases := map[string]string{
-		"page.counter.btn":      "page_counter_btn",
-		"page.items:0.del":      "page_items_0_del",
-		"page.content-slot.x":   "page_content_slot_x",
-		"already_underscored":   "already_underscored",
+		"page.counter.btn":    "page_counter_btn",
+		"page.items:0.del":    "page_items_0_del",
+		"page.content-slot.x": "page_content_slot_x",
+		"already_underscored": "already_underscored",
 	}
 	for in, want := range cases {
 		if got := sanitizeHandlerProp(in); got != want {

@@ -6,10 +6,10 @@ import (
 
 func TestHasDirective(t *testing.T) {
 	tests := []struct {
-		name     string
-		source   string
+		name      string
+		source    string
 		directive string
-		want     bool
+		want      bool
 	}{
 		{
 			name:      "line comment @server",
@@ -157,46 +157,46 @@ func TestClassifyComponent(t *testing.T) {
 		want              ComponentClass
 	}{
 		{
-			name:   "default is client",
-			source: "export default function Foo() {}",
+			name:     "default is client",
+			source:   "export default function Foo() {}",
 			filePath: "components/Foo.tsx",
-			want:   ComponentClassClient,
+			want:     ComponentClassClient,
 		},
 		{
-			name:   "@server directive",
-			source: "// @server\nexport default function Foo() {}",
+			name:     "@server directive",
+			source:   "// @server\nexport default function Foo() {}",
 			filePath: "components/Foo.tsx",
-			want:   ComponentClassServer,
+			want:     ComponentClassServer,
 		},
 		{
-			name:   "@runtime directive",
-			source: "// @runtime\nexport default function Bar() {}",
+			name:     "@runtime directive",
+			source:   "// @runtime\nexport default function Bar() {}",
 			filePath: "components/Bar.tsx",
-			want:   ComponentClassRuntime,
+			want:     ComponentClassRuntime,
 		},
 		{
-			name:   "@static directive",
-			source: "// @static\nexport default function Static() {}",
+			name:     "@static directive",
+			source:   "// @static\nexport default function Static() {}",
 			filePath: "components/Static.tsx",
-			want:   ComponentClassStatic,
+			want:     ComponentClassStatic,
 		},
 		{
-			name:   "*.server.tsx convention",
-			source: "export default function Foo() {}",
+			name:     "*.server.tsx convention",
+			source:   "export default function Foo() {}",
 			filePath: "components/Foo.server.tsx",
-			want:   ComponentClassServer,
+			want:     ComponentClassServer,
 		},
 		{
-			name:   "*.runtime.tsx convention",
-			source: "export default function Bar() {}",
+			name:     "*.runtime.tsx convention",
+			source:   "export default function Bar() {}",
 			filePath: "components/Bar.runtime.tsx",
-			want:   ComponentClassRuntime,
+			want:     ComponentClassRuntime,
 		},
 		{
-			name:   "*.static.tsx convention",
-			source: "export default function Static() {}",
+			name:     "*.static.tsx convention",
+			source:   "export default function Static() {}",
 			filePath: "components/Static.static.tsx",
-			want:   ComponentClassStatic,
+			want:     ComponentClassStatic,
 		},
 		{
 			name:              "config serverComponents list",
@@ -215,26 +215,26 @@ func TestClassifyComponent(t *testing.T) {
 			want:              ComponentClassRuntime,
 		},
 		{
-			name:     "serverDirs match",
-			source:   "export default function Foo() {}",
-			filePath: "src/components/server/Foo.tsx",
+			name:       "serverDirs match",
+			source:     "export default function Foo() {}",
+			filePath:   "src/components/server/Foo.tsx",
 			serverDirs: []string{"src/components/server"},
-			want:     ComponentClassServer,
+			want:       ComponentClassServer,
 		},
 		{
-			name:      "runtimeDirs match",
-			source:    "export default function Bar() {}",
-			filePath:  "src/components/runtime/Bar.tsx",
+			name:        "runtimeDirs match",
+			source:      "export default function Bar() {}",
+			filePath:    "src/components/runtime/Bar.tsx",
 			runtimeDirs: []string{"src/components/runtime"},
-			want:      ComponentClassRuntime,
+			want:        ComponentClassRuntime,
 		},
 		{
-			name:   "directive takes priority over config",
-			source: "// @server\nexport default function Foo() {}",
-			filePath: "components/Foo.tsx",
-			serverComponents: nil,
+			name:              "directive takes priority over config",
+			source:            "// @server\nexport default function Foo() {}",
+			filePath:          "components/Foo.tsx",
+			serverComponents:  nil,
 			runtimeComponents: []string{"Foo"},
-			want:   ComponentClassServer,
+			want:              ComponentClassServer,
 		},
 	}
 

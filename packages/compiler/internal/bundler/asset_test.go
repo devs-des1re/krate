@@ -6,7 +6,7 @@ import (
 	"regexp"
 	"testing"
 
-	"krate-compiler/internal/ast"
+	"github.com/kratejs/krate/packages/compiler/ast"
 )
 
 // TestAssetImportRewrite verifies that importing a non-code file registers it

@@ -3,7 +3,7 @@ package parser
 import (
 	"testing"
 
-	"krate-compiler/internal/lexer"
+	"github.com/kratejs/krate/packages/compiler/internal/lexer"
 )
 
 // testUnsupported ensures that parsing `src` produces at least one diagnostic.

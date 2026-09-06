@@ -3,7 +3,7 @@ package build
 import (
 	"strings"
 
-	"krate-compiler/internal/ast"
+	"github.com/kratejs/krate/packages/compiler/ast"
 )
 
 // RenderMode defines how a page is rendered.
@@ -35,10 +35,10 @@ func (m RenderMode) String() string {
 
 // PageMeta holds per-page rendering metadata extracted at build time.
 type PageMeta struct {
-	Route     string     `json:"route"`               // URL path (e.g. "/about")
-	Source    string     `json:"source"`              // source file relative to project root
-	Mode      RenderMode `json:"mode"`                // ssg, ssr, isr, streaming
-	Revalidate int       `json:"revalidate,omitempty"` // ISR revalidation interval in seconds
+	Route      string     `json:"route"`                // URL path (e.g. "/about")
+	Source     string     `json:"source"`               // source file relative to project root
+	Mode       RenderMode `json:"mode"`                 // ssg, ssr, isr, streaming
+	Revalidate int        `json:"revalidate,omitempty"` // ISR revalidation interval in seconds
 }
 
 // detectRenderMode inspects a page's AST and source to determine its rendering

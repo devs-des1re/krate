@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"krate-compiler/internal/config"
+	"github.com/kratejs/krate/packages/compiler/internal/config"
 )
 
 func writeGoAPIRoute(t *testing.T, root, relPath, content string) {
