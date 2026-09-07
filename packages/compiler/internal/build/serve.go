@@ -231,27 +231,59 @@ func colorStatus(code int) string {
 	}
 }
 
-// wrapInPageShell reads the static HTML shell from dist and injects the renderer's
-// dynamic content (title + body) into it. This gives SSR/ISR/streaming pages the
-// full page structure (layout, CSS, nav, footer, scripts) instead of raw fragments.
-//
-// The renderer returns: <title>...</title><div class="card">...</div>
-// The static HTML has:  <head>...<title>...</title>...</head><body>...<main>...</main>...</body>
-// We replace the title in <head> and the content inside <main>.
-func wrapInPageShell(absOut, route, dynamicHTML string) string {
-	prefix, suffix := splitPageShell(absOut, route, dynamicHTML, "", "")
-	if prefix == "" {
-		return dynamicHTML
-	}
-	return prefix + dynamicHTML + suffix
+// regionOpenRe matches a compiled dynamic region's opening splice marker:
+// <!--suspense:ID--> (Suspense boundary) or <!--region:ID--> (standalone
+// runtime component). The matching closing marker is <!--/suspense:ID--> or
+// <!--/region:ID-->. Go's regexp (RE2) has no backreferences, so open/close
+// are matched separately.
+var regionOpenRe = regexp.MustCompile(`<!--(suspense|region):([^>]+?)-->`)
+
+// regionFrame is one NDJSON frame from the sidecar's /__krate/regions stream.
+type regionFrame struct {
+	Type        string `json:"type"`
+	ID          string `json:"id,omitempty"`
+	Kind        string `json:"kind,omitempty"`
+	Status      int    `json:"status,omitempty"`
+	HTML        string `json:"html,omitempty"`
+	Error       string `json:"error,omitempty"`
+	Count       int    `json:"count,omitempty"`
+	CacheStatus string `json:"cacheStatus,omitempty"`
+	NotFound    bool   `json:"notFound,omitempty"`
+	Redirect    string `json:"redirect,omitempty"`
+	Title       string `json:"title,omitempty"`
 }
 
-// serveStaticRuntimePage serves a streaming page from its build-time static
-// HTML (server components frozen) and resolves the runtime component krate-id
-// placeholders via the embedded QuickJS runtime. Returns true if the page was
-// served this way; false if it has no static HTML or no runtime placeholders
-// (in which case the caller falls back to the renderer proxy).
-func serveStaticRuntimePage(w http.ResponseWriter, flusher http.Flusher, absOut, route string, runtimeCompRT *jsruntime.RuntimeComponentRuntime) bool {
+// regionPageResult carries sidecar outcome back to the caller so it can apply
+// ISR cache headers, status, redirects, and title swaps that page-region
+// renders report.
+type regionPageResult struct {
+	// served is true when the shell had region markers and was handled here.
+	served bool
+	// isISR reports whether the page is an ISR page (region render was cached).
+	isISR bool
+	// cacheStatus is the region frame's cacheStatus ("hit"/"stale"/"miss").
+	cacheStatus string
+	// titleOverride, when non-empty, replaces the baked <title>.
+	titleOverride string
+	// notFound signals the page-region render did not match.
+	notFound bool
+	// redirect is the Location for a page-region redirect response.
+	redirect string
+	// renderErr is non-empty when the page-region render reported a server
+	// error (status >= 500). The caller serves the baked shell / error page.
+	renderErr string
+}
+
+// streamRegionPage serves a page with the static-first architecture: the
+// build-time static shell (suspense/region splice markers + baked content) is
+// read from disk and streamed to the browser, and each dynamic region's HTML is
+// fetched from the SSR sidecar (/__krate/regions) and spliced in place of its
+// marker's inner content, one render per region with a flush after each. For
+// SSR/ISR pages the shell carries a single coarse "page" region whose render
+// replaces the whole baked body. Returns the page-region result (served=false
+// when the shell had no region markers and the caller should use another path).
+func streamRegionPage(w http.ResponseWriter, flusher http.Flusher, absOut, route string, ssrPort int, params, query, headers map[string]string) regionPageResult {
+	res := regionPageResult{}
 	relPath := strings.TrimPrefix(route, "/")
 	if relPath == "" {
 		relPath = "index.html"
@@ -260,109 +292,222 @@ func serveStaticRuntimePage(w http.ResponseWriter, flusher http.Flusher, absOut,
 	}
 	data, err := os.ReadFile(filepath.Join(absOut, relPath))
 	if err != nil {
-		return false
+		return res
 	}
-	html := string(data)
+	shell := string(data)
 
-	// Runtime placeholders are `<div krate-id="N"></div>` backed by a
-	// `<script type="application/krate-runtime">{id: {__krate_component, ...}}`
-	propsRe := regexp.MustCompile(`<script type="application/krate-runtime">([\s\S]*?)</script>`)
-	m := propsRe.FindStringSubmatch(html)
-	if m == nil {
-		return false
+	// Only pages with region splice markers use this path. Marker kinds:
+	//   <!--suspense:ID-->...<!--/suspense:ID--> — Suspense boundary or the
+	//       coarse page region; the inner content is baked (fallback / stale
+	//       body) and kept if the region render fails or is skipped.
+	//   <!--region:ID--><!--/region:ID--> — standalone runtime component; empty
+	//       slot filled by the region render.
+	opens := regionOpenRe.FindAllStringSubmatchIndex(shell, -1)
+	if len(opens) == 0 {
+		return res
 	}
-	if runtimeCompRT == nil {
-		// Runtime components can't be resolved without the QuickJS bundles.
-		return false
+	res.served = true
+
+	type boundary struct {
+		openEnd int    // index just past the opening marker's "-->"
+		id      string
+		kind    string // "suspense" | "region"
+		fbStart int    // start of inner content (for suspense: baked content)
+		fbEnd   int    // end of inner content (start of closing marker)
 	}
-	var propsByID map[string]map[string]any
-	if err := json.Unmarshal([]byte(m[1]), &propsByID); err != nil {
-		return false
-	}
-	if len(propsByID) == 0 {
-		return false
+	var boundaries []boundary
+	for _, m := range opens {
+		openTag := shell[m[0]:m[1]]
+		kind := "region"
+		if strings.HasPrefix(openTag, "<!--suspense:") {
+			kind = "suspense"
+		}
+		id := shell[m[4]:m[5]]
+		openEnd := m[1]
+		closeMarker := "<!--/" + kind + ":" + id + "-->"
+		rel := strings.Index(shell[openEnd:], closeMarker)
+		if rel < 0 {
+			// Malformed marker pair — bail to the non-region path.
+			res.served = false
+			return res
+		}
+		boundaries = append(boundaries, boundary{
+			openEnd: openEnd,
+			id:      id,
+			kind:    kind,
+			fbStart: openEnd,
+			fbEnd:   openEnd + rel,
+		})
 	}
 
-	// HTML is minified, so the placeholder attribute may be quoted or not:
-	// `<div krate-id="0"></div>` or `<div krate-id=0></div>`.
-	idRe := regexp.MustCompile(`<div[^>]*krate-id="?(\d+)"?[^>]*></div>`)
-	html = idRe.ReplaceAllStringFunc(html, func(placeholder string) string {
-		sub := idRe.FindStringSubmatch(placeholder)
-		if len(sub) < 2 {
-			return placeholder
+	// The marker id "page" denotes a coarse whole-page region (SSR/ISR shell);
+	// its frame carries the page's ISR cache status for the caller's headers.
+
+	// Open a raw TCP connection to the sidecar and POST /__krate/regions.
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", ssrPort), 5*time.Second)
+	if err != nil {
+		res.served = false
+		return res
+	}
+	defer conn.Close()
+
+	// Send the explicit splice list so the sidecar knows each marker's kind
+	// without reading the manifest for standalone runtime comps.
+	regionList := make([]map[string]string, 0, len(boundaries))
+	for _, b := range boundaries {
+		kind := "component"
+		if b.kind == "suspense" && b.id == "page" {
+			kind = "page"
 		}
-		id := sub[1]
-		entry, ok := propsByID[id]
-		if !ok {
-			return placeholder
-		}
-		name, _ := entry["__krate_component"].(string)
-		if name == "" {
-			return placeholder
-		}
-		props := make(map[string]any, len(entry))
-		for k, v := range entry {
-			if k != "__krate_component" {
-				props[k] = v
-			}
-		}
-		propsJSON, _ := json.Marshal(props)
-		res := runtimeCompRT.RenderComponent(name, string(propsJSON))
-		if res.Error != "" {
-			fmt.Fprintf(os.Stderr, "  %sRuntime component error (%s):%s %s\n", cYellow, name, cReset, res.Error)
-			return placeholder
-		}
-		return `<div krate-id="` + id + `">` + res.HTML + `</div>`
+		regionList = append(regionList, map[string]string{"id": b.id, "kind": kind})
+	}
+	reqBody, _ := json.Marshal(map[string]interface{}{
+		"route":   route,
+		"url":     route,
+		"method":  "GET",
+		"headers": headers,
+		"params":  params,
+		"query":   query,
+		"regions": regionList,
 	})
-
-	w.Write([]byte(html))
-	if flusher != nil {
-		flusher.Flush()
+	httpReq := fmt.Sprintf("POST /__krate/regions HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n", ssrPort, len(reqBody))
+	if _, err := conn.Write([]byte(httpReq)); err != nil {
+		res.served = false
+		return res
 	}
-	return true
+	if _, err := conn.Write(reqBody); err != nil {
+		res.served = false
+		return res
+	}
+
+	tcpBuf := bufio.NewReaderSize(conn, 256)
+
+	// Read status line (e.g., "HTTP/1.1 200 OK\r\n")
+	if _, err := tcpBuf.ReadString('\n'); err != nil {
+		res.served = false
+		return res
+	}
+
+	// Read headers until empty line.
+	for {
+		line, err := tcpBuf.ReadString('\n')
+		if err != nil {
+			res.served = false
+			return res
+		}
+		line = strings.TrimRight(line, "\r\n")
+		if line == "" {
+			break
+		}
+	}
+
+	// Read one NDJSON line per region, collecting region HTML + page metadata.
+	regionHTML := make(map[string]string, len(boundaries))
+	framesLeft := len(boundaries)
+	for framesLeft > 0 {
+		line, err := tcpBuf.ReadBytes('\n')
+		if err != nil {
+			break
+		}
+		var frame regionFrame
+		if err := json.Unmarshal(line, &frame); err != nil {
+			continue
+		}
+		switch frame.Type {
+		case "region":
+			if frame.ID == "page" {
+				res.isISR = frame.CacheStatus != ""
+				res.cacheStatus = frame.CacheStatus
+				res.notFound = frame.NotFound
+				res.redirect = frame.Redirect
+				res.titleOverride = frame.Title
+				// A page-region render that reported an error (or whose status is
+				// a server error) must not replace the baked body with empty HTML.
+				// Keep the baked content and surface the failure to the caller.
+				if frame.Status >= 500 || frame.Error != "" {
+					res.renderErr = frame.Error
+					if res.renderErr == "" {
+						res.renderErr = fmt.Sprintf("page-region render failed with status %d", frame.Status)
+					}
+					framesLeft--
+					continue
+				}
+				if frame.NotFound {
+					// Sidecar couldn't match — treat as no render (keep baked).
+					framesLeft--
+					continue
+				}
+			}
+			regionHTML[frame.ID] = frame.HTML
+			framesLeft--
+		case "skip":
+			// Sidecar has no renderer for this marker — keep baked content.
+			framesLeft--
+		case "error":
+			if frame.ID != "" {
+				framesLeft--
+			} else {
+				framesLeft = 0
+			}
+		case "end":
+			framesLeft = 0
+		}
+	}
+
+	// A page-region render that 404s (unknown dynamic variant) or redirects is
+	// surfaced to the caller instead of streaming the shell.
+	if res.notFound {
+		res.served = true
+		return res
+	}
+
+	// Apply title override from the page-region render to the baked head.
+	if res.titleOverride != "" {
+		shell = replaceTitle(shell, res.titleOverride)
+	}
+
+	// The caller owns response headers (Content-Type, cache headers) and sets
+	// them before calling this function. The 200 status is committed implicitly
+	// by the first body write below; this function only writes the body,
+	// flushing after each splice so the page streams progressively.
+	flush := func() {
+		if flusher != nil {
+			flusher.Flush()
+		}
+	}
+
+	// Write the shell, replacing each marker block's inner content with its
+	// region HTML (or the baked content when the region render failed/skipped),
+	// flushing after each splice so the page streams progressively.
+	cursor := 0
+	for _, b := range boundaries {
+		w.Write([]byte(shell[cursor:b.openEnd]))
+		if html, ok := regionHTML[b.id]; ok {
+			w.Write([]byte(html))
+		} else if b.kind == "suspense" {
+			// Region render failed or no frame — keep the baked content.
+			w.Write([]byte(shell[b.fbStart:b.fbEnd]))
+		}
+		// Standalone runtime regions with no frame leave the empty slot empty.
+		flush()
+		cursor = b.fbEnd
+	}
+	w.Write([]byte(shell[cursor:]))
+	flush()
+
+	return res
 }
 
-// splitPageShell splits a static page into prefix (up to <main>) and suffix (after </main>).
-// Returns ("", "") if the static file can't be read.
-// If stylesheet is provided, generates a minimal shell when the static file is missing.
-func splitPageShell(absOut, route, dynamicHTML string, stylesheet string, runtimeJSFile string) (prefix, suffix string) {
-	relPath := strings.TrimPrefix(route, "/")
-	if relPath == "" {
-		relPath = "index.html"
-	} else {
-		relPath = relPath + "/index.html"
-	}
-	staticPath := filepath.Join(absOut, relPath)
-	staticBytes, err := os.ReadFile(staticPath)
-	if err != nil {
-		// Generate minimal shell from stylesheet when no pre-built HTML exists
-		if stylesheet != "" {
-			prefix = "<!DOCTYPE html><html lang=en><head><meta charset=UTF-8><meta name=viewport content=\"width=device-width, initial-scale=1.0\"><title>Krate App</title><link rel=stylesheet href=/" + stylesheet + "></head><body><div id=root><main>"
-			suffix = "</main></div>"
-			if runtimeJSFile != "" {
-				suffix += "<script src=\"/" + runtimeJSFile + "\"></script>"
-			}
-			suffix += "</body></html>"
-			return prefix, suffix
-		}
-		return "", ""
-	}
-	shell := string(staticBytes)
-
-	titleRe := regexp.MustCompile(`<title>([^<]*)</title>`)
-	titleMatch := titleRe.FindStringSubmatch(dynamicHTML)
-	if len(titleMatch) > 0 {
-		shell = titleRe.ReplaceAllString(shell, titleMatch[0])
-	}
-
-	mainRe := regexp.MustCompile(`(?s)<main>(.*?)</main>`)
-	loc := mainRe.FindStringIndex(shell)
+// replaceTitle swaps the baked <title> content in a shell for a freshly
+// rendered one. Minified shells may have unquoted/empty titles; a simple
+// scan/replace on the first <title>…</title> span is sufficient.
+func replaceTitle(shell, title string) string {
+	re := regexp.MustCompile(`(?i)<title[^>]*>[\s\S]*?</title>`)
+	loc := re.FindStringIndex(shell)
 	if loc == nil {
-		return "", ""
+		return shell
 	}
-	prefix = shell[:loc[0]] + "<main>"
-	suffix = "</main>" + shell[loc[1]:]
-	return prefix, suffix
+	return shell[:loc[0]] + "<title>" + title + "</title>" + shell[loc[1]:]
 }
 
 // ServeDev starts an HTTP server with live reload SSE + request logging.
@@ -449,15 +594,6 @@ func serve(root string, cfg *config.Config, reload <-chan []string, startTime ti
 		}
 	}
 
-	// Runtime component renderer (fills krate-id placeholders on SSG pages that
-	// contain *.runtime.tsx components). Server components are baked at build
-	// time; only these placeholders are resolved at request time.
-	var runtimeCompRT *jsruntime.RuntimeComponentRuntime
-	compDir := filepath.Join(cfg.OutDir, "server-components")
-	if _, err := os.Stat(compDir); err == nil {
-		runtimeCompRT = jsruntime.NewRuntimeComponentRuntime(compDir)
-	}
-
 	sidecarURL, _ := url.Parse(fmt.Sprintf("http://localhost:%d", apiPort))
 	apiProxy := httputil.NewSingleHostReverseProxy(sidecarURL)
 
@@ -510,7 +646,7 @@ func serve(root string, cfg *config.Config, reload <-chan []string, startTime ti
 	if ssrPort == 0 {
 		ssrPort = port + 10
 	}
-	ssr := NewSSRServer(root, ssrPort)
+	ssr := NewSSRServer(root, ssrPort, cfg.SSR.SSRRuntime)
 	ssrStarted := false
 	if err := ssr.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "  %s⚠ SSR renderer not started:%s %v\n", cYellow, cReset, err)
@@ -675,13 +811,25 @@ func serve(root string, cfg *config.Config, reload <-chan []string, startTime ti
 		if route == "" {
 			route = "/"
 		}
-		isSSR := ssr.IsSSRPage(route)
-		isISR := ssr.IsISRPage(route)
-		isStreaming := ssr.IsStreamingPage(route)
 
-		if !isSSR && !isISR && !isStreaming {
+		// Match the URL against route patterns to extract dynamic params (e.g.
+		// [id]). For a dynamic-route page the shell and the region render live
+		// under the CANONICAL pattern route (e.g. "video/[id]/index.html" +
+		// manifest route "/video/[id]"), not the concrete URL — the sidecar
+		// resolves the pattern and keys ISR cache variants by params. So the
+		// canonical route is what everything downstream uses.
+		page, params := ssr.FindPageForRoute(route)
+		if page == nil {
+			// Not an SSR/ISR/streaming page (SSG or unknown).
 			handlerWith404.ServeHTTP(w, r)
 			return
+		}
+		isISR := page.Mode == RenderISR.String()
+		if page.Route != "" {
+			route = page.Route
+		}
+		if params == nil {
+			params = make(map[string]string)
 		}
 
 		headers := make(map[string]string)
@@ -691,12 +839,6 @@ func serve(root string, cfg *config.Config, reload <-chan []string, startTime ti
 			}
 		}
 
-		// Match URL against route patterns to extract dynamic params (e.g., [id])
-		_, params := ssr.FindPageForRoute(route)
-		if params == nil {
-			params = make(map[string]string)
-		}
-
 		query := make(map[string]string)
 		for k, v := range r.URL.Query() {
 			if len(v) > 0 {
@@ -704,196 +846,85 @@ func serve(root string, cfg *config.Config, reload <-chan []string, startTime ti
 			}
 		}
 
-		// Streaming SSR: pipe chunked response from renderer via raw TCP
-		// Manually parse HTTP response and chunked encoding to avoid any buffering.
-		if isStreaming {
+		// All SSR/ISR/streaming pages now use the static-first assembly: the
+		// shell is baked with splice markers (component regions for streaming
+		// pages, one coarse "page" region for SSR/ISR pages) and the sidecar
+		// renders each region. Set cache headers up front, then stream the
+		// assembled shell+regions.
+		flusher, _ := w.(http.Flusher)
+
+		if isISR {
+			// ISR responses are cacheable. The cache variant is encoded in the
+			// URL (path params + query), so s-maxage + stale-while-revalidate
+			// let browsers/CDNs hold HTML while the sidecar refreshes stale
+			// entries in the background.
+			reval := ssr.GetRevalidate(route)
+			if reval <= 0 {
+				reval = defaultISRRevalidate
+			}
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			w.Header().Set("X-Content-Type-Options", "nosniff")
+			w.Header().Set("Cache-Control", fmt.Sprintf("public, s-maxage=%d, stale-while-revalidate=%d", reval, 2*reval))
+		} else {
 			w.Header().Set("Content-Type", "text/html; charset=utf-8")
 			w.Header().Set("X-Content-Type-Options", "nosniff")
 			w.Header().Set("Cache-Control", "no-store")
-			w.WriteHeader(200)
-			flusher, ok := w.(http.Flusher)
+		}
 
-			// Pages that mix server components (baked at build time) with runtime
-			// components are served from their static HTML, and only the runtime
-			// component placeholders are resolved at request time. This keeps
-			// server components frozen instead of re-rendering the whole page.
-			if served := serveStaticRuntimePage(w, flusher, absOut, route, runtimeCompRT); served {
+		rr := streamRegionPage(w, flusher, absOut, route, ssrPort, params, query, headers)
+		if rr.served {
+			if rr.renderErr != "" {
+				// The page-region render failed; the baked body was served as a
+				// graceful fallback. Log it so the failure is visible.
+				fmt.Fprintf(os.Stderr, "  %sPage region error (%s):%s %s\n", cYellow, route, cReset, rr.renderErr)
+				w.Header().Set("X-Krate-Error", "render")
+			}
+			// Apply the page-region cache status header (ISR hit/stale/miss).
+			if isISR && rr.cacheStatus != "" {
+				switch rr.cacheStatus {
+				case "stale":
+					w.Header().Set("X-Krate-Cache", "STALE")
+				case "hit":
+					w.Header().Set("X-Krate-Cache", "HIT")
+				default:
+					w.Header().Set("X-Krate-Cache", "MISS")
+				}
+			}
+			if rr.notFound {
+				if len(custom404) > 0 {
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					w.Header().Del("Cache-Control")
+					w.WriteHeader(404)
+					w.Write(custom404)
+				} else {
+					http.NotFound(w, r)
+				}
 				return
 			}
-
-			// Pre-split the page shell so we can stream chunks between prefix/suffix
-			prefix, suffix := splitPageShell(absOut, route, "", ssr.GetStylesheet(), ssr.GetRuntimeJS())
-
-			// Send shell prefix (HTML up to <main>) immediately
-			if prefix != "" {
-				w.Write([]byte(prefix))
-				if ok {
-					flusher.Flush()
-				}
-			}
-
-			// Open raw TCP connection to Node.js renderer
-			conn, dialErr := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", ssrPort), 5*time.Second)
-			if dialErr != nil {
-				w.Write([]byte("<!-- SSR unavailable -->"))
-				if suffix != "" {
-					w.Write([]byte(suffix))
-				}
+			if rr.redirect != "" {
+				http.Redirect(w, r, rr.redirect, http.StatusFound)
 				return
 			}
-			defer conn.Close()
-
-			// Send HTTP POST request manually over raw TCP
-			reqBody, _ := json.Marshal(map[string]interface{}{
-				"route":   route,
-				"url":     r.URL.String(),
-				"method":  r.Method,
-				"headers": headers,
-				"params":  params,
-				"query":   query,
-			})
-			httpReq := fmt.Sprintf("POST /__krate/render HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n", ssrPort, len(reqBody))
-			conn.Write([]byte(httpReq))
-			conn.Write(reqBody)
-
-			// Read HTTP response status line + headers manually (no http.ReadResponse)
-			tcpBuf := bufio.NewReaderSize(conn, 256)
-
-			// Read status line (e.g., "HTTP/1.1 200 OK\r\n")
-			statusLine, err := tcpBuf.ReadString('\n')
-			if err != nil {
-				w.Write([]byte("<!-- SSR read error -->"))
-				return
-			}
-			_ = statusLine // We trust the renderer returns 200
-
-			// Read headers until empty line
-			isChunked := false
-			for {
-				line, err := tcpBuf.ReadString('\n')
-				if err != nil {
-					break
-				}
-				line = strings.TrimRight(line, "\r\n")
-				if line == "" {
-					break // End of headers
-				}
-				if strings.HasPrefix(strings.ToLower(line), "transfer-encoding:") && strings.Contains(strings.ToLower(line), "chunked") {
-					isChunked = true
-				}
-			}
-
-			// Buffer the full body for runtime component replacement
-			var bodyBuf bytes.Buffer
-
-			if isChunked {
-				// Read chunked transfer encoding manually, one chunk at a time
-				for {
-					// Read chunk size line (hex digits + \r\n)
-					sizeLine, err := tcpBuf.ReadString('\n')
-					if err != nil {
-						break
-					}
-					sizeLine = strings.TrimRight(sizeLine, "\r\n")
-
-					// Parse hex chunk size
-					chunkSize := 0
-					fmt.Sscanf(sizeLine, "%x", &chunkSize)
-					if chunkSize == 0 {
-						break // Terminal chunk
-					}
-
-					// Read exactly chunkSize bytes
-					chunkData := make([]byte, chunkSize)
-					_, err = io.ReadFull(tcpBuf, chunkData)
-					if err != nil {
-						break
-					}
-
-					// Consume trailing \r\n after chunk data
-					tcpBuf.ReadString('\n')
-
-					bodyBuf.Write(chunkData)
-				}
-			} else {
-				// Non-chunked: just read until connection close
-				buf := make([]byte, 4096)
-				for {
-					n, readErr := tcpBuf.Read(buf)
-					if n > 0 {
-						bodyBuf.Write(buf[:n])
-					}
-					if readErr != nil {
-						break
-					}
-				}
-			}
-
-			// Write the collected body
-			body := bodyBuf.Bytes()
-			w.Write(body)
-			if ok {
-				flusher.Flush()
-			}
-
-			// Send shell suffix (</main> + rest)
-			if suffix != "" {
-				w.Write([]byte(suffix))
-				if ok {
-					flusher.Flush()
-				}
-			}
 			return
 		}
 
-		// SSR or ISR: proxy to renderer (renderer handles ISR cache internally)
-		result, err := ssr.RenderPage(route, r.URL.String(), r.Method, headers, params, query)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "  %sSSR error (%s):%s %v\n", cRed, route, cReset, err)
-			// Fallback: try serving static file for ISR pages
-			if isISR {
-				handlerWith404.ServeHTTP(w, r)
-				return
-			}
-			handlerWith404.ServeHTTP(w, r)
+		// No region markers in the shell: this page is fully static (its body
+		// was baked with nothing request-time to render — e.g. a page the global
+		// streaming override marked dynamic but that contains no dynamic
+		// regions). Serve the baked shell directly; there is nothing to fetch
+		// from the sidecar.
+		relPath := strings.TrimPrefix(route, "/")
+		if relPath == "" {
+			relPath = "index.html"
+		} else {
+			relPath = relPath + "/index.html"
+		}
+		if data, err := os.ReadFile(filepath.Join(absOut, relPath)); err == nil {
+			w.Write(data)
 			return
 		}
-
-		if result.NotFound {
-			if len(custom404) > 0 {
-				w.Header().Set("Content-Type", "text/html; charset=utf-8")
-				w.WriteHeader(404)
-				w.Write(custom404)
-			} else {
-				http.NotFound(w, r)
-			}
-			return
-		}
-
-		if result.Redirect != "" {
-			http.Redirect(w, r, result.Redirect, http.StatusFound)
-			return
-		}
-
-		if result.Status == 500 {
-			errPage, _ := os.ReadFile(filepath.Join(absOut, "500.html"))
-			if len(errPage) > 0 {
-				w.Header().Set("Content-Type", "text/html; charset=utf-8")
-				w.WriteHeader(500)
-				w.Write(errPage)
-			} else {
-				http.Error(w, "Internal Server Error", 500)
-			}
-			return
-		}
-
-		if result.Cached {
-			w.Header().Set("X-Krate-Cache", "HIT")
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-store")
-		w.WriteHeader(result.Status)
-		w.Write([]byte(wrapInPageShell(absOut, route, result.HTML)))
+		handlerWith404.ServeHTTP(w, r)
+		return
 	})
 
 	// Redirect/rewrite middleware — applies config-based URL transformations
@@ -1059,48 +1090,43 @@ func serve(root string, cfg *config.Config, reload <-chan []string, startTime ti
 	}
 	fmt.Printf("%s  %s server → %shttp://localhost:%d%s %s(started in %s)%s\n", cGreen, label, cCyan, addr.Port, cReset, cGray, time.Since(startTime).Round(time.Millisecond), cReset)
 
-	// Start ISR background revalidation goroutine
+	// Start ISR background revalidation — one timer per page, each route
+	// revalidating on its own cadence (previously every ISR page was revalidated
+	// together on the shortest interval, stampeding every request at once). The
+	// sidecar also serves stale HTML while a revalidation runs, so expiry never
+	// blocks a request even before the timer fires.
 	var isrWg sync.WaitGroup
 	isrDone := make(chan struct{})
 	if ssrStarted {
 		isrPages := ssr.GetISRPages()
 		if len(isrPages) > 0 {
-			isrWg.Add(1)
-			go func() {
-				defer isrWg.Done()
-				defer close(isrDone)
-				fmt.Printf("  %s⚡%s ISR revalidation: %d pages\n", cCyan, cReset, len(isrPages))
-				for {
-					// Find the shortest revalidation interval
-					minInterval := isrPages[0].Revalidate
-					for _, p := range isrPages {
-						if p.Revalidate < minInterval {
-							minInterval = p.Revalidate
+			fmt.Printf("  %s⚡%s ISR revalidation: %d pages\n", cCyan, cReset, len(isrPages))
+			for _, p := range isrPages {
+				page := p
+				isrWg.Add(1)
+				go func() {
+					defer isrWg.Done()
+					interval := time.Duration(page.Revalidate) * time.Second
+					if interval <= 0 {
+						interval = defaultISRRevalidate * time.Second
+					}
+					ticker := time.NewTicker(interval)
+					defer ticker.Stop()
+					for {
+						if !ssr.IsRunning() {
+							return
+						}
+						if err := ssr.RevalidatePage(page.Route); err != nil {
+							fmt.Fprintf(os.Stderr, "  %sISR revalidation failed (%s):%s %v\n", cYellow, page.Route, cReset, err)
+						}
+						select {
+						case <-ticker.C:
+						case <-isrDone:
+							return
 						}
 					}
-
-					// Sleep with cancellation check
-					timer := time.NewTimer(time.Duration(minInterval) * time.Second)
-					select {
-					case <-timer.C:
-						// Timer expired, revalidate
-					case <-isrDone:
-						timer.Stop()
-						return
-					}
-
-					if !ssr.IsRunning() {
-						return
-					}
-
-					// Revalidate all ISR pages
-					for _, p := range isrPages {
-						if err := ssr.RevalidatePage(p.Route); err != nil {
-							fmt.Fprintf(os.Stderr, "  %sISR revalidation failed (%s):%s %v\n", cYellow, p.Route, cReset, err)
-						}
-					}
-				}
-			}()
+				}()
+			}
 		}
 	}
 

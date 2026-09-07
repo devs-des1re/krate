@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"os/exec"
@@ -16,40 +15,33 @@ import (
 	"github.com/evanw/esbuild/pkg/api"
 )
 
-// SSRServer manages the Node.js SSR renderer process.
+// SSRServer manages the SSR sidecar renderer process (node/bun/deno).
 type SSRServer struct {
 	port     int
 	root     string
+	runtime  string // "node" (default) | "bun" | "deno"
 	cmd      *exec.Cmd
 	mu       sync.Mutex
 	running  bool
 	manifest *ServerManifest
 }
 
-// SSRResponse is the JSON response from the Node.js renderer.
-type SSRResponse struct {
-	HTML       string `json:"html"`
-	Status     int    `json:"status"`
-	HeadHTML   string `json:"headHTML,omitempty"`
-	ScriptHTML string `json:"scriptHTML,omitempty"`
-	Redirect   string `json:"redirect,omitempty"`
-	NotFound   bool   `json:"notFound,omitempty"`
-	Cached     bool   `json:"cached,omitempty"`
-}
-
-// ssrRenderTimeout bounds a single render request so a hung render cannot
-// wedge the HTTP handler waiting for the renderer.
-const ssrRenderTimeout = 30 * time.Second
-
-// NewSSRServer creates a new SSR server manager.
-func NewSSRServer(root string, port int) *SSRServer {
+// NewSSRServer creates a new SSR server manager. runtime selects the sidecar
+// runtime: "node" (default), "bun", or "deno".
+func NewSSRServer(root string, port int, runtime string) *SSRServer {
+	if runtime == "" {
+		runtime = "node"
+	}
 	return &SSRServer{
-		port: port,
-		root: root,
+		port:    port,
+		root:    root,
+		runtime: runtime,
 	}
 }
 
-// Start launches the Node.js renderer server process.
+// Start launches the SSR renderer server process under the configured runtime
+// (node | bun | deno). Prefers the staged driver (.krate/server-renderer.mjs)
+// bundled at build time so plain runtimes work without tsx.
 func (s *SSRServer) Start() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -73,12 +65,9 @@ func (s *SSRServer) Start() error {
 	s.manifest = &ServerManifest{}
 	json.Unmarshal(data, s.manifest)
 
-	runtimeCmd := "node"
-	runtimeArgs := []string{rendererPath}
-	if strings.HasSuffix(strings.ToLower(rendererPath), ".ts") {
-		// Legacy path: no staged driver, run the TS source through tsx.
-		runtimeCmd = "npx"
-		runtimeArgs = []string{"tsx", rendererPath}
+	runtimeCmd, runtimeArgs, err := ssrRuntimeCommand(s.runtime, rendererPath)
+	if err != nil {
+		return err
 	}
 
 	env := os.Environ()
@@ -149,46 +138,6 @@ func (s *SSRServer) IsRunning() bool {
 	return s.running
 }
 
-// RenderPage sends a render request to the Node.js renderer and returns the response.
-func (s *SSRServer) RenderPage(route, url, method string, headers map[string]string, params, query map[string]string) (*SSRResponse, error) {
-	if !s.IsRunning() {
-		return nil, fmt.Errorf("SSR renderer not running")
-	}
-
-	reqBody := map[string]interface{}{
-		"route":   route,
-		"url":     url,
-		"method":  method,
-		"headers": headers,
-	}
-	if params != nil {
-		reqBody["params"] = params
-	}
-	if query != nil {
-		reqBody["query"] = query
-	}
-
-	body, _ := json.Marshal(reqBody)
-	client := &http.Client{Timeout: ssrRenderTimeout}
-	resp, err := client.Post(
-		fmt.Sprintf("http://localhost:%d/__krate/render", s.port),
-		"application/json",
-		bytes.NewReader(body),
-	)
-	if err != nil {
-		return nil, fmt.Errorf("SSR render request failed: %w", err)
-	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
-	result := &SSRResponse{}
-	if err := json.Unmarshal(respBody, result); err != nil {
-		return nil, fmt.Errorf("parsing SSR response: %w", err)
-	}
-
-	return result, nil
-}
-
 // RevalidatePage triggers ISR revalidation for a specific route.
 func (s *SSRServer) RevalidatePage(route string) error {
 	if !s.IsRunning() {
@@ -233,25 +182,18 @@ func (s *SSRServer) IsStreamingPage(route string) bool {
 	return false
 }
 
-// SSRPort returns the port the SSR server is listening on.
-func (s *SSRServer) SSRPort() int {
-	return s.port
-}
-
-// GetStylesheet returns the global CSS filename from the manifest, or "" if none.
-func (s *SSRServer) GetStylesheet() string {
-	if s.manifest == nil {
-		return ""
+// GetRevalidate returns the ISR revalidation interval (seconds) for a route,
+// falling back to the default when the page has no explicit value. Returns 0
+// for non-ISR routes (callers shouldn't emit ISR cache headers then).
+func (s *SSRServer) GetRevalidate(route string) int {
+	page, _ := s.FindPageForRoute(route)
+	if page == nil {
+		return 0
 	}
-	return s.manifest.Stylesheet
-}
-
-// GetRuntimeJS returns the shared runtime chunk path from the manifest, or "" if none.
-func (s *SSRServer) GetRuntimeJS() string {
-	if s.manifest == nil {
-		return ""
+	if page.Revalidate > 0 {
+		return page.Revalidate
 	}
-	return s.manifest.RuntimeJS
+	return defaultISRRevalidate
 }
 
 // ISRPage represents an ISR page with its revalidation interval.
@@ -318,6 +260,29 @@ func (s *SSRServer) findRendererScript() string {
 		return abs
 	}
 	return findServerRendererSource(s.root)
+}
+
+// ssrRuntimeCommand returns the exec command + args that launch the SSR
+// renderer script under the configured runtime. bun and deno get the flags the
+// renderer needs (network to listen, filesystem to read dist + the ISR cache).
+// When the script is raw TypeScript source (no staged driver), node runs it via
+// tsx (legacy dev path).
+func ssrRuntimeCommand(runtime, rendererPath string) (string, []string, error) {
+	isTS := strings.HasSuffix(strings.ToLower(rendererPath), ".ts")
+	switch runtime {
+	case "", "node":
+		if isTS {
+			return "npx", []string{"tsx", rendererPath}, nil
+		}
+		return "node", []string{rendererPath}, nil
+	case "bun":
+		return "bun", append([]string{"run"}, rendererPath), nil
+	case "deno":
+		flags := []string{"run", "--allow-net", "--allow-read", "--allow-env", "--allow-sys"}
+		return "deno", append(flags, rendererPath), nil
+	default:
+		return "", nil, fmt.Errorf("unsupported ssrRuntime %q (want node, bun, or deno)", runtime)
+	}
 }
 
 // findServerRendererSource locates the server-renderer source file in the

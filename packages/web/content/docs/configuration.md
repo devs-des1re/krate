@@ -92,12 +92,13 @@ csp: {
 When enabled, krate computes SHA-256 hashes of inline scripts and styles and
 emits them in the CSP meta tag.
 
-## SSR / Streaming
+## SSR / ISR / Streaming
 
 ```typescript
 ssr: {
-  streaming: false,          // force ALL pages to streaming SSR
-  rendererPort: 0,           // Node renderer port (0 = default)
+  streaming: false,          // force all *static* pages to streaming SSR
+  ssrRuntime: "node",        // sidecar runtime: "node" | "bun" | "deno"
+  rendererPort: 0,           // renderer sidecar port (0 = default)
   timeout: 5000,             // max render time (ms)
   maxCacheSize: 128,         // ISR in-memory cache size
   middlewareRuntime: "quickjs", // middleware.ts runtime
@@ -105,11 +106,19 @@ ssr: {
 }
 ```
 
+`ssrRuntime` picks which runtime launches the SSR sidecar that renders
+SSR/ISR/streaming regions: `"node"` (default) runs the staged driver with plain
+node, `"bun"` with `bun run`, and `"deno"` with the needed `--allow-*` flags.
+
 `middlewareRuntime` and `apiRuntime` select the runtime that executes
 middleware and API routes: `"quickjs"` (default) uses the embedded QuickJS
 runtime (no Node.js needed), while `"node"`, `"bun"`, or `"deno"` uses a
-sidecar process. The top-level `runtime` option controls which sidecar runtime
-API routes use.
+sidecar process.
+
+Rendering modes themselves are opted into **per page** via
+`export const config = { isr | ssr | streaming, revalidate }` — see
+[Rendering](/docs/core-concepts/rendering/). `ssr.streaming: true` forces all
+static (SSG) pages into streaming mode; explicit per-page `isr`/`ssr` still win.
 
 ## Redirects & rewrites
 

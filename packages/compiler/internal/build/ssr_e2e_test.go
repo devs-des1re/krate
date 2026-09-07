@@ -170,22 +170,42 @@ func renderForParams(t *testing.T, base, route, url string, params, query map[st
 		"method": "GET",
 		"params": params,
 		"query":  query,
+		"regions": []map[string]string{{"id": "page", "kind": "page"}},
 	}
 	data, _ := json.Marshal(body)
-	resp, err := http.Post(base+"/__krate/render", "application/json", bytes.NewReader(data))
+	resp, err := http.Post(base+"/__krate/regions", "application/json", bytes.NewReader(data))
 	if err != nil {
-		t.Fatalf("render request: %v", err)
+		t.Fatalf("regions request: %v", err)
 	}
 	defer resp.Body.Close()
 	out, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode != 200 {
-		t.Fatalf("render status %d: %s", resp.StatusCode, out)
+		t.Fatalf("regions status %d: %s", resp.StatusCode, out)
 	}
-	var rr SSRResponse
-	if err := json.Unmarshal(out, &rr); err != nil {
-		t.Fatalf("unmarshal render response: %v\n%s", err, out)
+	// NDJSON: one region frame + one end frame.
+	var frame struct {
+		Type string `json:"type"`
+		ID   string `json:"id,omitempty"`
+		HTML string `json:"html,omitempty"`
+		Err  string `json:"error,omitempty"`
 	}
-	return rr.HTML
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if err := json.Unmarshal([]byte(line), &frame); err != nil {
+			t.Fatalf("unmarshal region frame: %v\nline: %s", err, line)
+		}
+		if frame.Type == "region" && frame.ID == "page" {
+			return frame.HTML
+		}
+		if frame.Type == "error" {
+			t.Fatalf("region error: %s", frame.Err)
+		}
+	}
+	t.Fatalf("no page region frame in response:\n%s", out)
+	return ""
 }
 
 func freePort(t *testing.T) int {

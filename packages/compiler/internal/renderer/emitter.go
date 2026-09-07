@@ -1,10 +1,7 @@
 package renderer
 
 import (
-	"encoding/json"
 	"fmt"
-	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 
@@ -15,15 +12,14 @@ import (
 
 // EmitResult consolidates all page output from the emitter.
 type EmitResult struct {
-	HTML        string
-	HeadHTML    string
-	ScriptHTML  string
-	StyleHTML   string
-	RuntimeHTML string
-	Signatures  []irtree.ComponentSignature
-	HasLinks    bool
-	UsedFuncs   map[string]bool
-	UsedCSS     map[string]bool
+	HTML       string
+	HeadHTML   string
+	ScriptHTML string
+	StyleHTML  string
+	Signatures []irtree.ComponentSignature
+	HasLinks   bool
+	UsedFuncs  map[string]bool
+	UsedCSS    map[string]bool
 	// ListComponents are the client component functions referenced by dynamic
 	// list slots (e.g. <Toast> in a .map() body). They're emitted into the
 	// hydration scope so the runtime can re-render lists via h(Component, ...).
@@ -35,28 +31,21 @@ type EmitResult struct {
 }
 
 // SlotOutput is the result of emitting a single slot node. Beyond HTML and
-// signatures it carries subtree-local metadata (Head/Script/Style content),
-// orphan bindings, and runtime component props keyed by the subtree's LOCAL
-// numbering. Parallel emit merges these back in document order, re-keying
-// runtime props to the parent's numbering so output stays deterministic.
+// signatures it carries subtree-local metadata (Head/Script/Style content) and
+// orphan bindings, merged into the parent output in document order.
 type SlotOutput struct {
-	HTML         string
-	Signatures   []irtree.ComponentSignature
-	HeadHTML     string
-	ScriptHTML   string
-	StyleHTML    string
-	Orphans      []orphanBinding
-	RuntimeProps map[string]any
+	HTML       string
+	Signatures []irtree.ComponentSignature
+	HeadHTML   string
+	ScriptHTML string
+	StyleHTML  string
+	Orphans    []orphanBinding
 }
 
 // parallelMinChildren is the smallest sibling list worth spawning goroutines
 // for. Below this the sequential path is used to avoid goroutine overhead.
 // A var (not const) so tests can force one path or the other.
 var parallelMinChildren = 8
-
-// krateIDRe matches the placeholder emitted by emitRuntime so parallel emit
-// can re-key runtime component ids when merging a subtree.
-var krateIDRe = regexp.MustCompile(`krate-id="(\d+)"`)
 
 // orphanBinding pairs a slot binding (collected from a static component's
 // call-site children or a client component's call-site slots) with the ID of
@@ -68,8 +57,7 @@ type orphanBinding struct {
 
 // Emitter walks a ComponentTree and produces HTML + hydration metadata.
 type Emitter struct {
-	runtimeProps *irtree.RuntimePropStore
-	functions    map[string]*ast.FnDecl
+	functions map[string]*ast.FnDecl
 	// clientStack tracks the ComponentIDs of client components currently being
 	// emitted, so orphan bindings can be attached to the signature that owns
 	// the signals they reference.
@@ -118,16 +106,13 @@ func (e *Emitter) Errors() []error {
 
 // NewEmitter creates a new emitter.
 func NewEmitter() *Emitter {
-	return &Emitter{
-		runtimeProps: irtree.NewRuntimePropStore(),
-	}
+	return &Emitter{}
 }
 
 // Emit walks the ComponentTree and produces an EmitResult.
 func (e *Emitter) Emit(tree *irtree.ComponentTree) *EmitResult {
 	e.functions = tree.Functions
 	output := e.emitNode(tree.Root)
-	runtimeScript := e.buildRuntimeScript()
 
 	// Merge subtree-local metadata and orphans collected during emit.
 	e.headHTML += output.HeadHTML
@@ -157,7 +142,6 @@ func (e *Emitter) Emit(tree *irtree.ComponentTree) *EmitResult {
 		HeadHTML:       e.headHTML,
 		ScriptHTML:     e.scriptHTML,
 		StyleHTML:      e.styleHTML,
-		RuntimeHTML:    runtimeScript,
 		Signatures:     output.Signatures,
 		HasLinks:       tree.HasLinks,
 		UsedFuncs:      make(map[string]bool),
@@ -499,27 +483,18 @@ func (e *Emitter) emitClient(node *irtree.ComponentNode) SlotOutput {
 	return out
 }
 
-// ─── emitRuntime — runtime component SSR placeholder ───────────────────────
+// ─── emitRuntime — runtime component splice marker ────────────────────────
 
 func (e *Emitter) emitRuntime(node *irtree.ComponentNode) SlotOutput {
-	id := itoa(e.runtimeProps.Counter)
-	e.runtimeProps.Counter++
-	props := node.RuntimeProps
-	if props == nil {
-		props = map[string]any{}
-	}
-	// Copy props + record which component this placeholder is, so the serve
-	// path can render the right *.runtime.js bundle into the krate-id div.
-	scoped := make(map[string]any, len(props)+1)
-	for k, v := range props {
-		scoped[k] = v
-	}
-	scoped["__krate_component"] = node.Name
-	e.runtimeProps.Components[id] = scoped
-
+	// Standalone runtime components (not inside a <Suspense> boundary) become
+	// their own dynamic region. The shell carries an empty splice slot keyed by
+	// the region ID (region-<slotID>, matching the build's region registry); the
+	// Go server asks the SSR sidecar to render the component and splices the
+	// HTML in at request time. The component's build-time resolved props live in
+	// the region registry (RegionMeta.Props), so nothing is serialized inline.
+	id := "region-" + string(node.ID)
 	return SlotOutput{
-		HTML:         `<div krate-id="` + id + `"></div>`,
-		RuntimeProps: map[string]any{id: scoped},
+		HTML: fmt.Sprintf(`<!--region:%s--><!--/region:%s-->`, id, id),
 	}
 }
 
@@ -583,10 +558,9 @@ func mergeSlotOutput(acc *SlotOutput, out SlotOutput) {
 }
 
 // emitSlotsParallel emits sibling slots concurrently using fresh sub-emitters.
-// Each sub-emitter carries its own client-stack, orphan list, runtime counter,
-// and meta accumulators, so no shared state is ever mutated concurrently. After
-// the goroutines finish the results are merged back in document order and
-// runtime component ids are re-keyed to this emitter's local numbering, keeping
+// Each sub-emitter carries its own client-stack, orphan list, and meta
+// accumulators, so no shared state is ever mutated concurrently. After the
+// goroutines finish the results are merged back in document order, keeping
 // output byte-for-byte deterministic. Lists below parallelMinChildren are
 // emitted sequentially to avoid goroutine overhead.
 func (e *Emitter) emitSlotsParallel(slots []irtree.SlotNode) SlotOutput {
@@ -618,21 +592,14 @@ func (e *Emitter) emitSlotsParallel(slots []irtree.SlotNode) SlotOutput {
 	}
 	wg.Wait()
 
-	offset := e.runtimeProps.Counter
 	for _, out := range outputs {
-		merged.HTML += remapKrateIDs(out.HTML, offset)
+		merged.HTML += out.HTML
 		merged.Signatures = append(merged.Signatures, out.Signatures...)
 		merged.HeadHTML += out.HeadHTML
 		merged.ScriptHTML += out.ScriptHTML
 		merged.StyleHTML += out.StyleHTML
 		merged.Orphans = append(merged.Orphans, out.Orphans...)
-		for localID, props := range out.RuntimeProps {
-			lid, _ := strconv.Atoi(localID)
-			e.runtimeProps.Components[itoa(offset+lid)] = props
-		}
-		offset += len(out.RuntimeProps)
 	}
-	e.runtimeProps.Counter = offset
 	return merged
 }
 
@@ -667,18 +634,6 @@ func collectChildrenOrphans(children []irtree.SlotNode, owner irtree.SlotID) []o
 		}
 	}
 	return orphans
-}
-
-// remapKrateIDs rewrites runtime placeholder ids by the given offset so a
-// subtree's local numbering maps onto its parent's global numbering.
-func remapKrateIDs(html string, offset int) string {
-	if offset == 0 || !strings.Contains(html, "krate-id=") {
-		return html
-	}
-	return krateIDRe.ReplaceAllStringFunc(html, func(m string) string {
-		n, _ := strconv.Atoi(krateIDRe.FindStringSubmatch(m)[1])
-		return `krate-id="` + itoa(n+offset) + `"`
-	})
 }
 
 func (e *Emitter) emitTextSlot(s *irtree.TextSlot) SlotOutput {
@@ -788,23 +743,24 @@ func (e *Emitter) emitSuspenseSlot(s *irtree.SuspenseSlot) SlotOutput {
 		mergeSlotOutput(&out, e.emitSlotNode(child))
 	}
 
+	// ModeStatic: the primary was resolved at build time — bake it inside the
+	// markers so the shell contains the real resolved content (no streaming
+	// round-trip needed). ModeRegion/Default keep the fallback baked in.
+	inner := out.HTML
+	if s.Mode == irtree.SuspenseModeStatic {
+		inner = ""
+		for _, child := range s.Resolved {
+			inner += e.emitSlotNode(child).HTML
+		}
+	}
+
 	id := s.StreamID
 	html := fmt.Sprintf(
 		`<!--suspense:%s-->%s<!--/suspense:%s-->`,
-		id, out.HTML, id,
+		id, inner, id,
 	)
 	out.HTML = html
 	return out
-}
-
-// ─── Runtime props script ──────────────────────────────────────────────────
-
-func (e *Emitter) buildRuntimeScript() string {
-	if len(e.runtimeProps.Components) == 0 {
-		return ""
-	}
-	data, _ := json.Marshal(e.runtimeProps.Components)
-	return `<script type="application/krate-runtime">` + string(data) + `</script>`
 }
 
 // ─── EmitMeta — extract Head/Script/Style content from tree ────────────────

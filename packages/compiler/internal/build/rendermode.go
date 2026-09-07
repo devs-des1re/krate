@@ -1,7 +1,7 @@
 package build
 
 import (
-	"strings"
+	"strconv"
 
 	"github.com/kratejs/krate/packages/compiler/ast"
 )
@@ -19,6 +19,10 @@ const (
 	// RenderStreaming — SSR with Suspense-based streaming via HTTP chunked encoding.
 	RenderStreaming
 )
+
+// defaultISRRevalidate is the fallback revalidation interval when a page opts
+// into ISR without an explicit `revalidate` seconds value.
+const defaultISRRevalidate = 60
 
 func (m RenderMode) String() string {
 	switch m {
@@ -41,43 +45,258 @@ type PageMeta struct {
 	Revalidate int        `json:"revalidate,omitempty"` // ISR revalidation interval in seconds
 }
 
-// detectRenderMode inspects a page's AST and source to determine its rendering
-// mode. Returns the mode and revalidation interval.
-func detectRenderMode(prog *ast.Program, source string) (RenderMode, int) {
-	// Explicit opt-in: export const config = { streaming: true }
-	for _, stmt := range prog.Body {
-		if exp, ok := stmt.(*ast.ExportStmt); ok {
-			// Detect: export const config = { streaming: true }
-			if vs, ok := exp.Declaration.(*ast.VarStmt); ok {
-				for _, d := range vs.Decls {
-					if d.Name == "config" && d.Init != nil {
-						if obj, ok := d.Init.(*ast.ObjectExpr); ok {
-							for _, prop := range obj.Properties {
-								if prop.Key == "streaming" {
-									if lit, ok := prop.Value.(*ast.Literal); ok && lit.Kind == ast.BoolLit && lit.Value == "true" {
-										return RenderStreaming, 0
-									}
-								}
-							}
-						}
-					}
-				}
-			}
+// pageConfig holds the merged page-level render config extracted from
+// `export const config = { ... }`.
+type pageConfig struct {
+	streaming  bool
+	ssr        bool
+	isr        bool
+	revalidate int
+}
+
+// detectRenderMode inspects a page's AST to determine its rendering mode.
+// Returns the mode and revalidation interval.
+//
+// Precedence: explicit `isr` > `ssr` > `streaming` (config or <Suspense>).
+// ISR/SSR were previously unreachable — nothing in the build ever produced
+// them — so wiring the config keys here is what makes them real.
+func detectRenderMode(prog *ast.Program) (RenderMode, int) {
+	cfg := parsePageConfig(prog)
+
+	switch {
+	case cfg.isr:
+		if cfg.revalidate <= 0 {
+			cfg.revalidate = defaultISRRevalidate
 		}
+		return RenderISR, cfg.revalidate
+	case cfg.ssr:
+		return RenderSSR, 0
+	case cfg.streaming:
+		return RenderStreaming, 0
 	}
 
 	// Using <Suspense> implies a streaming boundary — resolved fallbacks are
 	// swapped in at request time, so such pages cannot be statically baked.
-	if hasSuspenseBoundaries(source) {
+	if usesSuspense(prog) {
 		return RenderStreaming, 0
 	}
 
 	return RenderSSG, 0
 }
 
-// hasSuspenseBoundaries checks if the page's source contains <Suspense> components.
-// This is a source-level check (string scan) since the AST may not have been fully
-// parsed when we need this info for streaming detection.
-func hasSuspenseBoundaries(source string) bool {
-	return strings.Contains(source, "<Suspense") || strings.Contains(source, "<suspense")
+// parsePageConfig reads the page-level render config from
+// `export const config = { ... }`.
+func parsePageConfig(prog *ast.Program) pageConfig {
+	var cfg pageConfig
+	for _, stmt := range prog.Body {
+		exp, ok := stmt.(*ast.ExportStmt)
+		if !ok {
+			continue
+		}
+		vs, ok := exp.Declaration.(*ast.VarStmt)
+		if !ok {
+			continue
+		}
+		for _, d := range vs.Decls {
+			if d.Name != "config" || d.Init == nil {
+				continue
+			}
+			obj, ok := d.Init.(*ast.ObjectExpr)
+			if !ok {
+				continue
+			}
+			for _, prop := range obj.Properties {
+				switch prop.Key {
+				case "streaming":
+					cfg.streaming = boolPropTrue(prop.Value)
+				case "ssr":
+					cfg.ssr = boolPropTrue(prop.Value)
+				case "isr":
+					cfg.isr = boolPropTrue(prop.Value)
+				case "revalidate":
+					if lit, ok := prop.Value.(*ast.Literal); ok && lit.Kind == ast.NumberLit {
+						if n, err := strconv.Atoi(lit.Value); err == nil {
+							cfg.revalidate = n
+						}
+					}
+				}
+			}
+		}
+	}
+	return cfg
+}
+
+func boolPropTrue(v ast.Expr) bool {
+	lit, ok := v.(*ast.Literal)
+	return ok && lit.Kind == ast.BoolLit && lit.Value == "true"
+}
+
+// usesSuspense reports whether the page AST contains a <Suspense> JSX element
+// anywhere (nested inside functions, conditionals, arrays, etc.). This is an
+// AST-based check — a prior string scan (`strings.Contains(source, "<Suspense")`)
+// could misfire on comments and string literals.
+func usesSuspense(prog *ast.Program) bool {
+	found := false
+
+	var walkStmt func([]ast.Stmt)
+	var walkExpr func(ast.Expr)
+	var walkJSXChild func(ast.JSXChild)
+
+	walkExpr = func(e ast.Expr) {
+		if found || e == nil {
+			return
+		}
+		switch v := e.(type) {
+		case *ast.CallExpr:
+			walkExpr(v.Callee)
+			for _, a := range v.Args {
+				walkExpr(a)
+			}
+		case *ast.MemberExpr:
+			walkExpr(v.Object)
+			walkExpr(v.Property)
+		case *ast.BinaryExpr:
+			walkExpr(v.Left)
+			walkExpr(v.Right)
+		case *ast.UnaryExpr:
+			walkExpr(v.Arg)
+		case *ast.ConditionalExpr:
+			walkExpr(v.Test)
+			walkExpr(v.Consequent)
+			walkExpr(v.Alternate)
+		case *ast.TemplateExpr:
+			for _, p := range v.Parts {
+				walkExpr(p)
+			}
+		case *ast.ArrowFn:
+			walkStmt(v.Body)
+		case *ast.AwaitExpr:
+			walkExpr(v.Arg)
+		case *ast.DynamicImport:
+			walkExpr(v.Arg)
+		case *ast.ImportMetaExpr:
+		case *ast.NewExpr:
+			walkExpr(v.Callee)
+			for _, a := range v.Args {
+				walkExpr(a)
+			}
+		case *ast.ObjectExpr:
+			for _, p := range v.Properties {
+				if p.Value != nil {
+					walkExpr(p.Value)
+				}
+			}
+		case *ast.ArrayExpr:
+			for _, el := range v.Elements {
+				walkExpr(el)
+			}
+		case *ast.JSXElement:
+			if v.Opening != nil {
+				name := v.Opening.Name
+				if name == "Suspense" || name == "suspense" {
+					found = true
+					return
+				}
+				for _, attr := range v.Opening.Attributes {
+					if attr.Value != nil {
+						walkExpr(attr.Value)
+					}
+				}
+			}
+			for _, c := range v.Children {
+				walkJSXChild(c)
+			}
+		case *ast.JSXFragment:
+			for _, c := range v.Children {
+				walkJSXChild(c)
+			}
+		}
+	}
+
+	walkJSXChild = func(c ast.JSXChild) {
+		if found {
+			return
+		}
+		switch ch := c.(type) {
+		case *ast.JSXExprContainer:
+			walkExpr(ch.Expression)
+		case *ast.JSXElementChild:
+			walkExpr(ch.Element)
+		case *ast.JSXFragmentChild:
+			walkExpr(ch.Fragment)
+		}
+	}
+
+	walkStmt = func(stmts []ast.Stmt) {
+		if found {
+			return
+		}
+		for _, stmt := range stmts {
+			if found {
+				return
+			}
+			switch s := stmt.(type) {
+			case *ast.ExprStmt:
+				walkExpr(s.Expression)
+			case *ast.VarStmt:
+				for _, d := range s.Decls {
+					if d.Init != nil {
+						walkExpr(d.Init)
+					}
+				}
+			case *ast.FnDecl:
+				walkStmt(s.Body)
+			case *ast.ReturnStmt:
+				if s.Value != nil {
+					walkExpr(s.Value)
+				}
+			case *ast.BlockStmt:
+				walkStmt(s.Body)
+			case *ast.IfStmt:
+				walkExpr(s.Test)
+				walkStmt(s.Consequent)
+				walkStmt(s.Alternate)
+			case *ast.ForStmt:
+				if s.Init != nil {
+					walkStmt([]ast.Stmt{s.Init})
+				}
+				if s.Test != nil {
+					walkExpr(s.Test)
+				}
+				walkStmt(s.Body)
+			case *ast.ForInStmt:
+				walkExpr(s.Right)
+				walkStmt(s.Body)
+			case *ast.WhileStmt:
+				walkExpr(s.Test)
+				walkStmt(s.Body)
+			case *ast.DoWhileStmt:
+				walkStmt(s.Body)
+				walkExpr(s.Test)
+			case *ast.SwitchStmt:
+				walkExpr(s.Discriminant)
+				for _, c := range s.Cases {
+					if c.Test != nil {
+						walkExpr(c.Test)
+					}
+					walkStmt(c.Body)
+				}
+			case *ast.TryStmt:
+				walkStmt(s.Body)
+				if s.Catch != nil {
+					walkStmt(s.Catch.Body)
+				}
+				walkStmt(s.Finally)
+			case *ast.ThrowStmt:
+				walkExpr(s.Value)
+			case *ast.ExportStmt:
+				if s.Declaration != nil {
+					walkStmt([]ast.Stmt{s.Declaration})
+				}
+			}
+		}
+	}
+
+	walkStmt(prog.Body)
+	return found
 }

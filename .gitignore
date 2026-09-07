@@ -49,3 +49,4 @@ Thumbs.db
 
 .fingerprint/
 packages/compiler/third_party/*/target/
+.opencode/

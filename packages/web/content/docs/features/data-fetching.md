@@ -27,9 +27,10 @@ render the result — ideal for data that doesn't change per request.
 
 ## Per-request data (runtime components)
 
-Mark a component with `// @runtime` (or a `*.runtime.tsx` file). It is evaluated
-at **request time** via the embedded QuickJS runtime and streamed to the client
-through a Suspense boundary:
+Mark a component with `// @runtime` (or a `*.runtime.tsx` file). It is rendered
+at **request time** by the SSR sidecar (Node/bun/deno) and spliced into the
+static shell as its own region — streamed to the client without a full-page
+re-render:
 
 ```tsx
 // @runtime
@@ -39,7 +40,31 @@ export default function PriceTag({ price }) {
 ```
 
 Runtime components cover the "changes per request" case that previously used
-page-level server-side data functions.
+page-level server-side data functions. A page that imports them is treated as
+**streaming**: its shell is baked (layout, server components, suspense
+fallbacks) and each runtime component resolves independently.
+
+## ISR / SSR page data
+
+For whole pages whose body is request-time (e.g. a dynamic route without known
+params), opt the page into ISR or SSR and read `params`/`query` from the page
+props:
+
+```tsx
+// src/pages/video/[id].tsx
+export const config = { isr: true, revalidate: 60 };
+
+export default function VideoPage({ params }) {
+  return <h1>Video {params.id}</h1>;
+}
+```
+
+- **ISR** caches the rendered page body per URL variant and revalidates it in
+  the background after `revalidate` seconds.
+- **SSR** renders the page body on every request with the live params/query.
+
+Both bake everything else (layout, head, static content) into a shell at build
+time; only the page body is dynamic.
 
 ## Dynamic route params (`generateStaticParams`)
 

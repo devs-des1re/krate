@@ -20,9 +20,9 @@ bundler subprocess, no Node.js required for core compilation.
 - **Signals, not React** — fine-grained reactivity with `createSignal` / `createEffect` / `createMemo`.
 - **SSG-first** — every page is pre-rendered to static HTML. Hydration binds signals to the DOM via `data-k`/`data-kh` markers.
 - **File-based routing** — `src/pages/` maps to URLs, with nested routes, dynamic segments (`[param]`), and `_layout.tsx` layouts.
-- **Component tiers** — static, client, server (`@server`), and runtime (`@runtime`, via embedded QuickJS) components in one page.
+- **Component tiers** — static, client, server (`@server`), and runtime (`@runtime`, rendered at request time by the sidecar) components in one page.
 - **Full CSS pipeline** — CSS Modules (FNV-32a scoping), Go-native Tailwind, minification, `@import` inlining.
-- **SSR, ISR & streaming** — revalidate-based ISR, and Suspense-based streaming SSR.
+- **SSR, ISR & streaming** — static-first shells with revalidate-based ISR and per-region streaming SSR.
 - **No external bundler** — esbuild is only used for a few auxiliary tasks (API routes, runtime component bundles); core compilation is 100% custom Go.
 - **SPA router** — client-side navigation with DOM tree reconciliation (state, focus, and scroll survive transitions).
 - **Plugin system** — Go plugin hooks plus community plugins written in JavaScript, executed inside the embedded QuickJS runtime.
@@ -98,7 +98,7 @@ export default function ServerTime() {
 ```
 
 ```tsx
-// @runtime — evaluated per request, streamed via Suspense
+// @runtime — rendered per request by the sidecar and spliced into the shell
 export default function PriceTag({ price }) {
   return <span>{price}</span>;
 }
@@ -169,7 +169,7 @@ Components are classified into four tiers that determine how they're rendered:
 | **Static** (`// @static` or `*.static.tsx`) | None | Evaluated at build time, pure HTML output |
 | **Client** (default) | Yes (hydration) | SSR/SSG + client hydration |
 | **Server** (`// @server` or `*.server.tsx`) | None | Evaluated at build time, HTML output only |
-| **Runtime** (`// @runtime` or `*.runtime.tsx`) | None | Serve-time via embedded QuickJS, streamed through Suspense |
+| **Runtime** (`// @runtime` or `*.runtime.tsx`) | None | Rendered at request time by the sidecar, spliced into the static shell |
 
 Detection priority: source directive → file convention → config name list →
 directory membership → default (client).

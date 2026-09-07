@@ -462,3 +462,133 @@ func TestRefBindingUseRefCallAssignsCurrent(t *testing.T) {
 		t.Errorf("expected target inputRef.current for ref={inputRef} from useRef(null), got %q", refs[0].Target)
 	}
 }
+
+// --- Suspense boundary construction -----------------------------------------
+
+func TestBuildSuspenseBoundaryStaticFallback(t *testing.T) {
+	// Static primary ? ModeStatic, fallback baked, resolved content captured.
+	tree := annotateAndBuild(t, `export default function App() {
+	return <Suspense fallback={<span>loading</span>}><div>ok</div></Suspense>;
+}`)
+	var susp *irtree.SuspenseSlot
+	for _, child := range tree.Root.Children {
+		if s, ok := child.(*irtree.SuspenseSlot); ok {
+			susp = s
+		}
+	}
+	if susp == nil {
+		t.Fatal("expected a SuspenseSlot in tree")
+	}
+	if susp.StreamID == "" {
+		t.Error("expected a StreamID")
+	}
+	if susp.Mode != irtree.SuspenseModeStatic {
+		t.Errorf("expected ModeStatic for a fully-static boundary, got %v", susp.Mode)
+	}
+	if susp.Primary != nil {
+		t.Errorf("expected nil Primary for static boundary, got %+v", susp.Primary)
+	}
+	if len(susp.Fallback) == 0 {
+		t.Error("expected fallback slot nodes")
+	}
+	if len(susp.Resolved) == 0 {
+		t.Error("expected resolved slot nodes for ModeStatic")
+	}
+}
+
+func TestBuildSuspenseBoundaryRuntimePrimary(t *testing.T) {
+	// Primary is a runtime-tier component (via config) → ModeRegion + Primary.
+	src := `function Live() { return <p>live</p>; }
+export default function App() {
+	return <Suspense fallback={<span>loading</span>}><Live /></Suspense>;
+}`
+	prog := parseProg(t, src)
+	cfg := configWithRuntime("Live")
+	ann := annotateWith(prog, cfg, "test.tsx", src)
+	tree := irtree.Build(prog, ann)
+	var susp *irtree.SuspenseSlot
+	for _, child := range tree.Root.Children {
+		if s, ok := child.(*irtree.SuspenseSlot); ok {
+			susp = s
+		}
+	}
+	if susp == nil {
+		t.Fatal("expected a SuspenseSlot in tree")
+	}
+	if susp.Mode != irtree.SuspenseModeRegion {
+		t.Errorf("expected ModeRegion for a runtime primary, got %v", susp.Mode)
+	}
+	if susp.Primary == nil {
+		t.Fatal("expected a Primary component node")
+	}
+	if susp.Primary.Name != "Live" {
+		t.Errorf("expected primary name Live, got %q", susp.Primary.Name)
+	}
+	if susp.Primary.Tier != irtree.TierRuntime {
+		t.Errorf("expected primary to be a runtime-tier component, got %v", susp.Primary.Tier)
+	}
+}
+
+func TestBuildSuspenseBoundaryDefaultNoFallback(t *testing.T) {
+	// No fallback, empty boundary → ModeDefault, empty fallback.
+	tree := annotateAndBuild(t, `export default function App() {
+	return <Suspense></Suspense>;
+}`)
+	var susp *irtree.SuspenseSlot
+	for _, child := range tree.Root.Children {
+		if s, ok := child.(*irtree.SuspenseSlot); ok {
+			susp = s
+		}
+	}
+	if susp == nil {
+		t.Fatal("expected a SuspenseSlot in tree")
+	}
+	if susp.Mode != irtree.SuspenseModeDefault {
+		t.Errorf("expected ModeDefault for an empty boundary, got %v", susp.Mode)
+	}
+	if len(susp.Fallback) != 0 {
+		t.Errorf("expected empty fallback, got %d nodes", len(susp.Fallback))
+	}
+}
+
+func TestBuildSuspenseBoundaryNestedRuntimeRegion(t *testing.T) {
+	// A runtime component nested inside a non-runtime wrapper element: the
+	// static wrappers are baked as the boundary's resolved content and the
+	// nested runtime component becomes its own standalone region — a boundary
+	// alone has no component/bundle identity the sidecar could render, so it
+	// must not be deferred as an anonymous whole.
+	src := `function Live() { return <p>live</p>; }
+export default function App() {
+	return <Suspense fallback={<span>loading</span>}><div><Live /></div></Suspense>;
+}`
+	prog := parseProg(t, src)
+	cfg := configWithRuntime("Live")
+	ann := annotateWith(prog, cfg, "test.tsx", src)
+	tree := irtree.Build(prog, ann)
+	var susp *irtree.SuspenseSlot
+	for _, child := range tree.Root.Children {
+		if s, ok := child.(*irtree.SuspenseSlot); ok {
+			susp = s
+		}
+	}
+	if susp == nil {
+		t.Fatal("expected a SuspenseSlot in tree")
+	}
+	if susp.Mode != irtree.SuspenseModeStatic {
+		t.Errorf("expected ModeStatic (resolved content baked) when a runtime component is nested in the boundary, got %v", susp.Mode)
+	}
+	if susp.Primary != nil {
+		t.Errorf("expected nil primary for a nested runtime boundary, got %+v", susp.Primary)
+	}
+	// The baked resolved content must contain the nested runtime component as a
+	// standalone region slot so it is independently renderable at serve time.
+	foundRuntime := false
+	for _, c := range susp.Resolved {
+		if cs, ok := c.(*irtree.ComponentSlot); ok && cs.Component != nil && cs.Component.Tier == irtree.TierRuntime {
+			foundRuntime = true
+		}
+	}
+	if !foundRuntime {
+		t.Errorf("expected a nested runtime ComponentSlot in the resolved content, got %#v", susp.Resolved)
+	}
+}

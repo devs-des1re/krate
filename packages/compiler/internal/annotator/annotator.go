@@ -330,18 +330,19 @@ func collectFunctionsWithSource(body []ast.Stmt, dest map[string]*ast.FnDecl, so
 			record(s)
 		case *ast.ExportStmt:
 			if s.Declaration != nil {
-				if fn, ok := s.Declaration.(*ast.FnDecl); ok {
-					record(fn)
+				switch decl := s.Declaration.(type) {
+				case *ast.FnDecl:
+					record(decl)
+				case *ast.VarStmt:
+					// `export const Live = () => <p/>` — the parser stores the
+					// variable statement in ExportStmt.Declaration, so named
+					// arrow/function-expression components exported like this
+					// get the same treatment as plain FnDecl components.
+					recordComponentVarDecls(decl, record)
 				}
 			}
 		case *ast.VarStmt:
-			for _, decl := range s.Decls {
-				if len(decl.Name) > 0 && decl.Name[0] >= 'A' && decl.Name[0] <= 'Z' {
-					if fn := extractComponentFromVar(decl); fn != nil {
-						record(fn)
-					}
-				}
-			}
+			recordComponentVarDecls(s, record)
 		case *ast.ForStmt:
 			collectFunctionsWithSource(s.Body, dest, sources, raws, sourcePath, rawSource)
 		case *ast.WhileStmt:
@@ -360,6 +361,19 @@ func collectFunctionsWithSource(body []ast.Stmt, dest map[string]*ast.FnDecl, so
 			collectFunctionsWithSource(s.Finally, dest, sources, raws, sourcePath, rawSource)
 		case *ast.BlockStmt:
 			collectFunctionsWithSource(s.Body, dest, sources, raws, sourcePath, rawSource)
+		}
+	}
+}
+
+// recordComponentVarDecls registers named function-expression/arrow components
+// from a variable statement (e.g. `const Live = () => <p/>`). Component names
+// start with an uppercase letter, mirroring how JSX resolves identifiers.
+func recordComponentVarDecls(stmt *ast.VarStmt, record func(*ast.FnDecl)) {
+	for _, decl := range stmt.Decls {
+		if len(decl.Name) > 0 && decl.Name[0] >= 'A' && decl.Name[0] <= 'Z' {
+			if fn := extractComponentFromVar(decl); fn != nil {
+				record(fn)
+			}
 		}
 	}
 }

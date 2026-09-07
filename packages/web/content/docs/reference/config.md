@@ -88,8 +88,9 @@ runtime: "node",              // "node" | "bun" | "deno"
 
 ```typescript
 ssr: {
-  streaming: false,           // force ALL pages to streaming SSR
-  rendererPort: 0,            // Node renderer port (0 = default)
+  streaming: false,           // force all *static* pages to streaming SSR
+  ssrRuntime: "node",         // sidecar runtime: "node" | "bun" | "deno"
+  rendererPort: 0,            // renderer sidecar port (0 = default)
   timeout: 5000,              // max render time (ms)
   maxCacheSize: 128,          // ISR in-memory cache size
   middlewareRuntime: "quickjs",  // middleware.ts runtime
@@ -97,12 +98,23 @@ ssr: {
 }
 ```
 
-`middlewareRuntime` and `apiRuntime` (`"quickjs"` | `"node"` | `"bun"` |
-`"deno"`) choose which runtime executes middleware and API routes.
-`"quickjs"` (default) uses the embedded QuickJS runtime with no Node.js
-dependency; `"node"`/`"bun"`/`"deno"` use a sidecar process. SSR/streaming
-pages always render in the Node renderer sidecar, and runtime components
-(`@runtime`) always render via the embedded QuickJS runtime.
+- **`ssrRuntime`** — which runtime launches the SSR sidecar that renders
+  SSR/ISR/streaming regions. `"node"` (default) runs the staged renderer driver
+  with plain `node`; `"bun"` runs it with `bun run`; `"deno"` runs it with
+  `deno run --allow-net --allow-read --allow-env --allow-sys`.
+- **`streaming`** — forces all *static* (SSG) pages into streaming mode.
+  Explicit per-page `isr`/`ssr` config still wins.
+- **`middlewareRuntime`** and **`apiRuntime`** (`"quickjs"` | `"node"` |
+  `"bun"` | `"deno"`) choose which runtime executes middleware and API routes.
+  `"quickjs"` (default) uses the embedded QuickJS runtime with no Node.js
+  dependency; `"node"`/`"bun"`/`"deno"` use a sidecar process.
+
+Page-level rendering is opted into per page via
+`export const config = { isr | ssr | streaming, revalidate }` — see
+[Rendering](/docs/core-concepts/rendering/). SSR/ISR/streaming pages render in
+the sidecar, which resolves only the page's dynamic regions against the baked
+static shell; the embedded QuickJS runtime is used for middleware, API routes,
+and community plugins.
 
 ## Plugins
 

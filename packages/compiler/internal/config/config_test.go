@@ -303,7 +303,6 @@ func TestParseTSConfigSSR(t *testing.T) {
 			maxCacheSize: 64,
 			middlewareRuntime: "node",
 			apiRuntime: "node",
-			serverComponentRuntime: "quickjs",
 			ssrRuntime: "node",
 			streaming: true,
 		},
@@ -326,9 +325,6 @@ func TestParseTSConfigSSR(t *testing.T) {
 	}
 	if cfg.SSR.APIRuntime != "node" {
 		t.Errorf("APIRuntime = %q, want node", cfg.SSR.APIRuntime)
-	}
-	if cfg.SSR.ServerComponentRuntime != "quickjs" {
-		t.Errorf("ServerComponentRuntime = %q, want quickjs", cfg.SSR.ServerComponentRuntime)
 	}
 	if cfg.SSR.SSRRuntime != "node" {
 		t.Errorf("SSRRuntime = %q, want node", cfg.SSR.SSRRuntime)

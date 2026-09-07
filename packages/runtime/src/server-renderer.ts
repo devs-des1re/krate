@@ -4,8 +4,9 @@
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
+import vm from "node:vm";
 import { pathToFileURL } from "node:url";
-import { renderToString, setStreamingResolved, resetBoundaryCounter } from "./server.js";
+import { renderToString } from "./server.js";
 
 // Force TCP_NODELAY on socket to prevent Nagle buffering chunks together.
 // Must be called BEFORE the first write for it to take effect.
@@ -26,10 +27,20 @@ interface ManifestPage {
   bundlePath?: string;
 }
 
+interface RegionMeta {
+  id: string;
+  component?: string;
+  sourcePath?: string;
+  bundlePath?: string;
+  suspense?: boolean;
+  props?: Record<string, any>;
+}
+
 interface ServerManifest {
   pages: ManifestPage[];
   stylesheet?: string;
   runtimeJS?: string;
+  regions?: Record<string, RegionMeta[]>;
 }
 
 interface CacheEntry {
@@ -46,7 +57,13 @@ interface RenderRequest {
   headers: Record<string, string>;
   params?: Record<string, string>;
   query?: Record<string, string>;
+  // regions is the explicit splice-marker list the Go server found in the
+  // baked shell, in document order. kind is "component" (default) for a
+  // runtime/Suspense region or "page" for a coarse whole-page region (SSR/ISR).
+  regions?: { id: string; kind?: "component" | "page" }[];
 }
+
+type CacheStatus = "hit" | "stale" | "miss";
 
 interface RenderResponse {
   html: string;
@@ -56,16 +73,31 @@ interface RenderResponse {
   redirect?: string;
   notFound?: boolean;
   cached?: boolean;
+  cacheStatus?: CacheStatus;
 }
 
-// ── ISR Cache ────────────────────────────────────────────────────────────────
+// ── ISR Cache (variant-aware, SWR, persisted) ────────────────────────────────
+
+// A page's cache key is the route plus its per-request variant (params +
+// query). Two dynamic-route requests (e.g. /video/a and /video/b) render
+// different HTML, so they must never share a cache slot.
+function variantKey(req: { route: string; params?: Record<string, string>; query?: Record<string, string> }): string {
+  const enc = (v: Record<string, string>) =>
+    Object.keys(v).sort().map((k) => `${encodeURIComponent(k)}=${encodeURIComponent(v[k])}`).join("&");
+  const params = req.params ? enc(req.params) : "";
+  const query = req.query ? enc(req.query) : "";
+  let key = req.route;
+  if (params) key += "?" + params;
+  if (query) key += "#" + query;
+  return key;
+}
 
 class ISRCache {
   private cache = new Map<string, CacheEntry>();
   private maxSize: number;
   private revalidationIntervals = new Map<string, number>(); // route → seconds
 
-  constructor(maxSize = 128) {
+  constructor(maxSize = 512) {
     this.maxSize = maxSize;
   }
 
@@ -73,27 +105,94 @@ class ISRCache {
     this.revalidationIntervals.set(route, seconds);
   }
 
-  get(route: string): CacheEntry | undefined {
-    return this.cache.get(route);
+  get(key: string): CacheEntry | undefined {
+    return this.cache.get(key);
   }
 
-  set(route: string, entry: CacheEntry) {
+  set(key: string, entry: CacheEntry) {
     if (this.cache.size >= this.maxSize) {
       const oldest = this.cache.keys().next().value;
       if (oldest) this.cache.delete(oldest);
     }
-    this.cache.set(route, entry);
+    this.cache.set(key, entry);
   }
 
-  isStale(route: string): boolean {
-    const entry = this.cache.get(route);
+  isStale(key: string): boolean {
+    const entry = this.cache.get(key);
+    const route = key.split("?")[0].split("#")[0];
     const interval = this.revalidationIntervals.get(route);
     if (!entry || !interval) return false;
     return (Date.now() - entry.timestamp) / 1000 > interval;
   }
 
-  delete(route: string) {
-    this.cache.delete(route);
+  // deleteRoute removes every variant of a route (used by revalidation/invalidation).
+  deleteRoute(route: string) {
+    for (const key of [...this.cache.keys()]) {
+      if (key === route || key.startsWith(route + "?") || key.startsWith(route + "#")) {
+        this.cache.delete(key);
+      }
+    }
+  }
+
+  serialize(): Record<string, unknown> {
+    return {
+      entries: [...this.cache.entries()].map(([key, entry]) => ({ key, ...entry })),
+    };
+  }
+
+  hydrate(data: any) {
+    if (!data || !Array.isArray(data.entries)) return;
+    for (const e of data.entries) {
+      if (e && typeof e.key === "string" && typeof e.html === "string") {
+        this.cache.set(e.key, {
+          html: e.html,
+          timestamp: typeof e.timestamp === "number" ? e.timestamp : Date.now(),
+          headHTML: e.headHTML,
+          scriptHTML: e.scriptHTML,
+        });
+      }
+    }
+  }
+}
+
+const isrCache = new ISRCache();
+
+// ISR cache persistence — survives renderer restarts so a bounce doesn't
+// cold-render every ISR variant. Written debounced (coalesced) to the build
+// output dir (.krate/isr-cache.json), overridable via KRATE_ISR_CACHE.
+let isrCacheFile = process.env.KRATE_ISR_CACHE || "";
+let persistTimer: NodeJS.Timeout | null = null;
+
+function isrCachePath(): string {
+  return isrCacheFile || path.join(root, "dist", ".krate", "isr-cache.json");
+}
+
+function scheduleIsrPersist() {
+  if (persistTimer) clearTimeout(persistTimer);
+  persistTimer = setTimeout(() => {
+    persistTimer = null;
+    try {
+      const data = isrCache.serialize();
+      const file = isrCachePath();
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, JSON.stringify(data));
+    } catch (err: any) {
+      console.error("[krate-ssr] ISR cache persist failed:", err.message);
+    }
+  }, 1000);
+}
+
+function loadIsrCache() {
+  try {
+    const file = isrCachePath();
+    if (fs.existsSync(file)) {
+      const data = JSON.parse(fs.readFileSync(file, "utf-8"));
+      isrCache.hydrate(data);
+      const n = (isrCache as any).cache.size;
+      if (n > 0) console.log(`[krate-ssr] Loaded ${n} persisted ISR entries`);
+    }
+  } catch (err: any) {
+    console.error("[krate-ssr] ISR cache load failed:", err.message);
   }
 }
 
@@ -131,7 +230,6 @@ async function loadPageModule(page: ManifestPage): Promise<any> {
 
 // ── Renderer ─────────────────────────────────────────────────────────────────
 
-const isrCache = new ISRCache();
 let manifest: ServerManifest | null = null;
 let projectRoot = "";
 
@@ -148,50 +246,31 @@ function findPage(route: string): ManifestPage | undefined {
   return page;
 }
 
-async function renderPage(req: RenderRequest): Promise<RenderResponse> {
-  const page = findPage(req.route);
-  if (!page) {
-    return { html: "", status: 404, notFound: true };
-  }
+function buildProps(req: RenderRequest): Record<string, any> {
+  // Page-level data fetching (getStaticProps/getServerSideProps) has been
+  // removed; per-request data is provided by server components (@server),
+  // runtime components (@runtime), and middleware instead. Dynamic-route
+  // params and query parameters extracted by the Go server are forwarded so
+  // `({ params }) => ...` pages receive their real values at render time.
+  const props: Record<string, any> = {};
+  if (req.params) props.params = req.params;
+  if (req.query) props.query = req.query;
+  return props;
+}
 
-  // ISR: serve from cache if available and not stale
-  if (page.mode === "isr") {
-    isrCache.setRevalidation(page.route, page.revalidate || 60);
-    const cached = isrCache.get(page.route);
-    if (cached && !isrCache.isStale(page.route)) {
-      return {
-        html: cached.html,
-        status: 200,
-        headHTML: cached.headHTML,
-        scriptHTML: cached.scriptHTML,
-        cached: true,
-      };
-    }
-  }
-
+// renderFresh renders a page component and — for ISR pages — stores the result.
+// Extracted so background revalidation shares exactly the same render path.
+async function renderFresh(page: ManifestPage, req: RenderRequest): Promise<RenderResponse> {
   try {
     const mod = await loadPageModule(page);
-
-    // Page-level data fetching (getStaticProps/getServerSideProps) has been
-    // removed; per-request data is provided by server components (@server),
-    // runtime components (@runtime), and middleware instead. Dynamic-route
-    // params and query parameters extracted by the Go server are forwarded so
-    // `({ params }) => ...` pages receive their real values at render time.
-    const props: Record<string, any> = {};
-    if (req.params) props.params = req.params;
-    if (req.query) props.query = req.query;
-
-    // Get the default export (the component)
     const Component = mod.default;
     if (!Component) {
       return { html: "", status: 500 };
     }
 
-    // Render the component to HTML
-    const jsxNode = Component(props);
+    const jsxNode = Component(buildProps(req));
     const html = renderToString(jsxNode);
 
-    // Extract head/script content from the render
     const headHTML = extractHeadHTML(html);
     const scriptHTML = extractScriptHTML(html);
 
@@ -202,14 +281,14 @@ async function renderPage(req: RenderRequest): Promise<RenderResponse> {
       scriptHTML,
     };
 
-    // ISR: cache the result
     if (page.mode === "isr") {
-      isrCache.set(page.route, {
+      isrCache.set(variantKey(req), {
         html,
         timestamp: Date.now(),
         headHTML,
         scriptHTML,
       });
+      scheduleIsrPersist();
     }
 
     return response;
@@ -217,6 +296,216 @@ async function renderPage(req: RenderRequest): Promise<RenderResponse> {
     console.error(`[krate] Error rendering ${req.route}:`, err);
     return { html: "", status: 500 };
   }
+}
+
+// Single-flight background revalidation for stale-while-revalidate. While a
+// revalidation for a given variant is in flight, concurrent requests share the
+// same promise instead of stampeding the renderer.
+const inFlightRevalidations = new Map<string, Promise<void>>();
+
+function revalidateInBackground(page: ManifestPage, req: RenderRequest) {
+  const key = variantKey(req);
+  if (inFlightRevalidations.has(key)) return;
+
+  const p = (async () => {
+    try {
+      const rendered = await renderFresh(page, req);
+      if (rendered.status === 200) {
+        console.log(`[krate-ssr] Revalidated ${key} (SWR)`);
+      }
+    } catch (err: any) {
+      console.error(`[krate-ssr] SWR revalidation failed ${key}:`, err.message);
+    } finally {
+      inFlightRevalidations.delete(key);
+    }
+  })();
+
+  inFlightRevalidations.set(key, p);
+}
+
+async function renderPage(req: RenderRequest): Promise<RenderResponse> {
+  const page = findPage(req.route);
+  if (!page) {
+    return { html: "", status: 404, notFound: true };
+  }
+
+  // ISR: serve from cache with stale-while-revalidate.
+  if (page.mode === "isr") {
+    const interval = page.revalidate || 60;
+    isrCache.setRevalidation(page.route, interval);
+    const key = variantKey(req);
+    const cached = isrCache.get(key);
+
+    if (cached && !isrCache.isStale(key)) {
+      return {
+        html: cached.html,
+        status: 200,
+        headHTML: cached.headHTML,
+        scriptHTML: cached.scriptHTML,
+        cached: true,
+        cacheStatus: "hit",
+      };
+    }
+
+    if (cached) {
+      // Entry is stale: serve it immediately and refresh in the background so
+      // the next request (and any concurrent ones) get fresh HTML. No stampede:
+      // revalidateInBackground is single-flight per variant key.
+      revalidateInBackground(page, req);
+      return {
+        html: cached.html,
+        status: 200,
+        headHTML: cached.headHTML,
+        scriptHTML: cached.scriptHTML,
+        cached: true,
+        cacheStatus: "stale",
+      };
+    }
+  }
+
+  const response = await renderFresh(page, req);
+  if (page.mode === "isr") response.cacheStatus = "miss";
+  return response;
+}
+
+// ── Region rendering (static-first) ──────────────────────────────────────────
+//
+// The Go server owns the page: it serves the build-time static shell with the
+// <!—suspense:ID—> markers and baked fallbacks, then asks the sidecar to render
+// ONLY the page's dynamic regions. Each region is rendered by its compiled
+// runtime component bundle (server-components/<Name>.runtime.js — an IIFE that
+// defines globalThis.__krate_render(propsJSON)) with the build-time baked props,
+// so nothing is re-derived at request time.
+
+const runtimeBundleCache = new Map<string, (propsJSON: string) => string>();
+
+// loadRuntimeRenderer loads a compiled runtime component bundle and returns its
+// __krate_render(propsJSON) function. Bundles are cached by bundle path.
+function loadRuntimeRenderer(relPath: string): (propsJSON: string) => string {
+  const cached = runtimeBundleCache.get(relPath);
+  if (cached) return cached;
+
+  const abs = path.resolve(root, "dist", relPath);
+  const code = fs.readFileSync(abs, "utf-8");
+  const ctx = vm.createContext({ console });
+  vm.runInContext(code, ctx, { filename: relPath });
+  const render = vm.runInContext(
+    "typeof globalThis.__krate_render === 'function' ? globalThis.__krate_render : typeof __krate_render === 'function' ? __krate_render : null",
+    ctx,
+  );
+  if (typeof render !== "function") {
+    throw new Error(`Runtime bundle ${relPath} does not expose __krate_render`);
+  }
+  runtimeBundleCache.set(relPath, render);
+  return render;
+}
+
+function regionProps(region: RegionMeta, req: RenderRequest): Record<string, any> {
+  const props: Record<string, any> = { ...(region.props || {}) };
+  if (req.params && Object.keys(req.params).length > 0) props.params = req.params;
+  if (req.query && Object.keys(req.query).length > 0) props.query = req.query;
+  return props;
+}
+
+// Region ISR cache: region-level stale-while-revalidate, separate from the
+// page ISR cache. Region HTML only depends on the baked props, so it is fully
+// determined by (route, region id, variant) and cacheable like a page variant.
+const regionCache = new Map<string, { html: string; timestamp: number }>();
+const regionRevalidation = new Map<string, number>();
+const inFlightRegionRevalidations = new Map<string, Promise<void>>();
+
+function regionCacheKey(page: ManifestPage, regionId: string, req: RenderRequest): string {
+  return variantKey({ route: page.route + "::" + regionId, params: req.params, query: req.query });
+}
+
+function renderRegionFresh(region: RegionMeta, req: RenderRequest): string {
+  const render = loadRuntimeRenderer(region.bundlePath!);
+  return render(JSON.stringify(regionProps(region, req)));
+}
+
+function revalidateRegionInBackground(page: ManifestPage, region: RegionMeta, req: RenderRequest, key: string) {
+  if (inFlightRegionRevalidations.has(key)) return;
+  const p = (async () => {
+    try {
+      const html = renderRegionFresh(region, req);
+      regionCache.set(key, { html, timestamp: Date.now() });
+      console.log(`[krate-ssr] Revalidated region ${key} (SWR)`);
+    } catch (err: any) {
+      console.error(`[krate-ssr] Region SWR revalidation failed ${key}:`, err.message);
+    } finally {
+      inFlightRegionRevalidations.delete(key);
+    }
+  })();
+  inFlightRegionRevalidations.set(key, p);
+}
+
+// renderRegion renders one region, applying region-level ISR caching for ISR
+// pages. Returns an NDJSON frame.
+async function renderRegion(page: ManifestPage, region: RegionMeta, req: RenderRequest): Promise<Record<string, any>> {
+  if (!region.bundlePath) {
+    return { type: "error", id: region.id, status: 400, error: "region has no runtime bundle" };
+  }
+
+  const key = regionCacheKey(page, region.id, req);
+  if (page.mode === "isr") {
+    const interval = page.revalidate || 60;
+    regionRevalidation.set(key, interval);
+    const cached = regionCache.get(key);
+    const stale = cached && (Date.now() - cached.timestamp) / 1000 > interval;
+    if (cached && !stale) {
+      return { type: "region", id: region.id, status: 200, html: cached.html, cached: true };
+    }
+    if (cached) {
+      revalidateRegionInBackground(page, region, req, key);
+      return { type: "region", id: region.id, status: 200, html: cached.html, cached: true, cacheStatus: "stale" };
+    }
+  }
+
+  try {
+    const html = renderRegionFresh(region, req);
+    if (page.mode === "isr") {
+      regionCache.set(key, { html, timestamp: Date.now() });
+    }
+    const frame: Record<string, any> = { type: "region", id: region.id, status: 200, html };
+    if (page.mode === "isr") frame.cacheStatus = "miss";
+    return frame;
+  } catch (err: any) {
+    console.error(`[krate-ssr] Region render failed ${page.route}::${region.id}:`, err.message);
+    return { type: "error", id: region.id, status: 500, error: err.message };
+  }
+}
+
+function writeJsonLine(res: http.ServerResponse, obj: unknown) {
+  res.write(JSON.stringify(obj) + "\n");
+}
+
+// renderPageRegion renders a coarse whole-page region (SSR/ISR pages whose
+// entire body is request-time dynamic). It reuses renderPage so the page-level
+// variant-aware ISR cache, stale-while-revalidate, and revalidation all apply.
+// Returns an NDJSON region frame; the Go server splices html into the shell at
+// the "page" marker and keeps the baked body when the render fails.
+async function renderPageRegion(page: ManifestPage, id: string, req: RenderRequest): Promise<Record<string, any>> {
+  const result = await renderPage(req);
+  const frame: Record<string, any> = {
+    type: "region",
+    id,
+    kind: "page",
+    status: result.status || 200,
+    html: result.html || "",
+  };
+  if (result.cacheStatus) frame.cacheStatus = result.cacheStatus;
+  if (result.notFound) frame.notFound = true;
+  if (result.redirect) frame.redirect = result.redirect;
+  // Title swap: the Go server replaces the baked <title> with the freshly
+  // rendered one so params-driven pages update the browser tab.
+  const title = extractTitle(result.html);
+  if (title !== "") frame.title = title;
+  return frame;
+}
+
+function extractTitle(html: string): string {
+  const match = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+  return match ? match[1].trim() : "";
 }
 
 function extractHeadHTML(html: string): string {
@@ -253,6 +542,16 @@ if (manifestPath && fs.existsSync(manifestPath)) {
   }
 }
 
+loadIsrCache();
+
+function parseBody(req: http.IncomingMessage): Promise<string> {
+  return new Promise((resolve) => {
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.on("end", () => resolve(body));
+  });
+}
+
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || "/", `http://${req.headers.host || "localhost"}`);
   const route = url.pathname;
@@ -266,20 +565,14 @@ const server = http.createServer(async (req, res) => {
 
   // ISR revalidation endpoint (called by Go server in background)
   if (route === "/__krate/ssr/revalidate" && req.method === "POST") {
-    let body = "";
-    for await (const chunk of req) body += chunk;
+    const body = await parseBody(req);
     try {
       const { route: targetRoute } = JSON.parse(body);
-      isrCache.delete(targetRoute);
-      // Trigger re-render
+      isrCache.deleteRoute(targetRoute);
+      // Trigger re-render of the base variant.
       const page = findPage(targetRoute);
       if (page) {
-        await renderPage({
-          route: targetRoute,
-          url: targetRoute,
-          method: "GET",
-          headers: {},
-        });
+        await renderFresh(page, { route: targetRoute, url: targetRoute, method: "GET", headers: {} });
       }
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
@@ -292,12 +585,11 @@ const server = http.createServer(async (req, res) => {
 
   // Module cache invalidation (called on file change in dev mode)
   if (route === "/__krate/ssr/invalidate" && req.method === "POST") {
-    let body = "";
-    for await (const chunk of req) body += chunk;
+    const body = await parseBody(req);
     try {
       const { route: targetRoute, source, bundlePath } = JSON.parse(body);
-      // Invalidate ISR cache for this route
-      isrCache.delete(targetRoute);
+      // Invalidate ISR cache for this route (all variants)
+      isrCache.deleteRoute(targetRoute);
       // Invalidate module cache for the source file or bundle
       const key = bundlePath || source;
       if (key && moduleCache.has(key)) {
@@ -313,11 +605,22 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // ── /__krate/render — called by Go server for SSR/ISR/Streaming ──────────
-  if (route === "/__krate/render" && req.method === "POST") {
-    let body = "";
-    for await (const chunk of req) body += chunk;
+  // ── /__krate/regions — render ONLY a page's dynamic regions ───────────────
+  // One NDJSON frame per region, written as its own chunk so the Go server
+  // forwards each region progressively and splices it into the static shell.
+  // The Go server sends the splice markers it parsed from the shell; the
+  // sidecar renders each one (a component region from the manifest, or a
+  // coarse "page" region that renders the whole page component for SSR/ISR).
+  if (route === "/__krate/regions" && req.method === "POST") {
+    res.writeHead(200, {
+      "Content-Type": "application/x-ndjson; charset=utf-8",
+      "Cache-Control": "no-store",
+      "X-Content-Type-Options": "nosniff",
+    });
+    setupStream(res);
+
     try {
+      const body = await parseBody(req);
       const parsed = JSON.parse(body) as RenderRequest;
       const renderReq: RenderRequest = {
         route: parsed.route,
@@ -326,79 +629,43 @@ const server = http.createServer(async (req, res) => {
         headers: parsed.headers || {},
         params: parsed.params,
         query: parsed.query,
+        regions: parsed.regions,
       };
 
       const page = findPage(renderReq.route);
-
-      // Streaming mode: two-phase render for real Suspense fallback
-      if (page?.mode === "streaming") {
-        res.writeHead(200, {
-          "Content-Type": "text/html; charset=utf-8",
-          "Transfer-Encoding": "chunked",
-          "X-Content-Type-Options": "nosniff",
-        });
-        setupStream(res);
-
-        const mod = await loadPageModule(page);
-        const Component = mod.default;
-        if (!Component) {
-          res.end();
-          return;
-        }
-
-        // Per-request props (dynamic-route params + query) for both phases.
-        const props: Record<string, any> = {};
-        if (renderReq.params) props.params = renderReq.params;
-        if (renderReq.query) props.query = renderReq.query;
-
-        // Phase 1: Render with empty props → Suspense shows fallback
-        resetBoundaryCounter();
-        setStreamingResolved(false);
-        const fallbackJsx = Component(props);
-        const fallbackHtml = renderToString(fallbackJsx);
-        res.write(fallbackHtml);
-
-        // Phase 2: Re-render with resolved props (no data-fetching needed)
-        resetBoundaryCounter();
-        setStreamingResolved(true);
-        const resolvedJsx = Component(props);
-        const resolvedHtml = renderToString(resolvedJsx);
-        setStreamingResolved(false);
-
-        // Extract resolved content per Suspense boundary from markers
-        const resolvedMap: Record<string, string> = {};
-        const markerRe = /<!--suspense-resolved:(\d+)-->([\s\S]*?)<!--\/suspense-resolved:\1-->/g;
-        let m: RegExpExecArray | null;
-        while ((m = markerRe.exec(resolvedHtml)) !== null) {
-          resolvedMap[m[1]] = m[2];
-        }
-
-        // Send targeted replacement script — only replaces fallback spans, preserves surrounding HTML
-        const script = `<script>(function(){var m=${JSON.stringify(resolvedMap)};Object.keys(m).forEach(function(id){var s=document.querySelector('span[data-suspense="'+id+'"]');if(s)s.outerHTML=m[id]});var t=document.querySelectorAll('template[data-suspense]');t.forEach(function(el){el.remove()})})()</script>`;
-        res.write(script);
+      if (!page) {
+        writeJsonLine(res, { type: "error", status: 404, error: "no such page" });
+        writeJsonLine(res, { type: "end", count: 0 });
         res.end();
         return;
       }
 
-      // SSR/ISR: standard single-phase render
-      const result = await renderPage(renderReq);
-
-      // Return JSON response
-      res.writeHead(result.status, {
-        "Content-Type": "application/json; charset=utf-8",
-      });
-      res.end(JSON.stringify(result));
-    } catch (err: any) {
-      console.error("[krate-ssr] Error in /__krate/render:", err.message);
-      if (res.headersSent) {
-        // Headers already sent (e.g. streaming mode) — write error inline
-        res.write(`<script>console.error("[krate-ssr]",${JSON.stringify(err.message)})</script>`);
-        res.end();
-      } else {
-        res.writeHead(500, { "Content-Type": "application/json" });
-        res.end(JSON.stringify({ html: "", status: 500 }));
+      // Explicit splice list from Go wins. When absent (older Go server or
+      // direct calls), fall back to the manifest's component regions.
+      let regions = renderReq.regions || [];
+      if (regions.length === 0) {
+        regions = (manifest?.regions?.[page.route] || []).map((r) => ({ id: r.id, kind: "component" as const }));
       }
+
+      for (const r of regions) {
+        if (r.kind === "page") {
+          writeJsonLine(res, await renderPageRegion(page, r.id, renderReq));
+        } else {
+          const region = (manifest?.regions?.[page.route] || []).find((m) => m.id === r.id);
+          if (region) {
+            writeJsonLine(res, await renderRegion(page, region, renderReq));
+          } else {
+            // Unknown region id — keep the baked content by sending no frame.
+            writeJsonLine(res, { type: "skip", id: r.id });
+          }
+        }
+      }
+      writeJsonLine(res, { type: "end", count: regions.length });
+    } catch (err: any) {
+      console.error("[krate-ssr] Error in /__krate/regions:", err.message);
+      writeJsonLine(res, { type: "error", status: 500, error: err.message });
     }
+    res.end();
     return;
   }
 
@@ -452,68 +719,12 @@ const server = http.createServer(async (req, res) => {
     return;
   }
 
-  // Streaming SSR: two-phase render for direct requests
-  const streamingPage = manifest?.pages?.find((p) => p.route === route);
-  if (streamingPage?.mode === "streaming") {
-    try {
-      const mod = await loadPageModule(streamingPage);
-      const Component = mod.default;
-      if (!Component) {
-        res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
-        res.end("<html><body><h1>500</h1></body></html>");
-        return;
-      }
-
-      res.writeHead(200, {
-        "Content-Type": "text/html; charset=utf-8",
-        "Transfer-Encoding": "chunked",
-        "X-Content-Type-Options": "nosniff",
-      });
-      setupStream(res);
-
-      // Phase 1: fallback
-      resetBoundaryCounter();
-      setStreamingResolved(false);
-      const fallbackHtml = renderToString(Component({}));
-      res.write(fallbackHtml);
-
-      // Phase 2: re-render with resolved props (no data-fetching needed)
-      resetBoundaryCounter();
-      setStreamingResolved(true);
-      const resolvedHtml = renderToString(Component({}));
-      setStreamingResolved(false);
-
-      // Extract resolved content per Suspense boundary from markers
-      const resolvedMap: Record<string, string> = {};
-      const markerRe = /<!--suspense-resolved:(\d+)-->([\s\S]*?)<!--\/suspense-resolved:\1-->/g;
-      let m: RegExpExecArray | null;
-      while ((m = markerRe.exec(resolvedHtml)) !== null) {
-        resolvedMap[m[1]] = m[2];
-      }
-
-      const script = `<script>(function(){var m=${JSON.stringify(resolvedMap)};Object.keys(m).forEach(function(id){var s=document.querySelector('span[data-suspense="'+id+'"]');if(s)s.outerHTML=m[id]});var t=document.querySelectorAll('template[data-suspense]');t.forEach(function(el){el.remove()})})()</script>`;
-      res.write(script);
-      res.end();
-      return;
-    } catch (err: any) {
-      console.error("[krate-ssr] Error in streaming direct render:", err.message);
-      if (res.headersSent) {
-        res.write(`<script>console.error("[krate-ssr]",${JSON.stringify(err.message)})</script>`);
-        res.end();
-      } else {
-        res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
-        res.end("<html><body><h1>Internal Server Error</h1></body></html>");
-      }
-      return;
-    }
-  }
-
   // Regular SSR/ISR response
   const headers_extra: Record<string, string> = {
     "Content-Type": "text/html; charset=utf-8",
   };
   if (result.cached) {
-    headers_extra["X-Krate-Cache"] = "HIT";
+    headers_extra["X-Krate-Cache"] = result.cacheStatus === "stale" ? "STALE" : "HIT";
   }
   res.writeHead(result.status, headers_extra);
   res.end(result.html);

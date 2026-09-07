@@ -218,7 +218,7 @@ func TestEmitExprSlotEscapesInitial(t *testing.T) {
 
 // ─── Runtime component emission ─────────────────────────────────────────────
 
-func TestEmitRuntimeResolvedPropsScript(t *testing.T) {
+func TestEmitRuntimeRegionMarkers(t *testing.T) {
 	src := `function RuntimeWidget(props) { return <div>{props.label}</div>; }
 export default function Page() {
   return <div><RuntimeWidget label="hello" /><RuntimeWidget label="world" /></div>;
@@ -228,11 +228,18 @@ export default function Page() {
 	tree := irtree.Build(prog, ann)
 	emitter := NewEmitter()
 	result := emitter.Emit(tree)
-	if strings.Count(result.HTML, "krate-id") != 2 {
-		t.Errorf("expected 2 krate-id placeholders, got:\n%s", result.HTML)
+
+	// Each standalone runtime component becomes an empty splice slot
+	// (<!--region:region-<slotID>--><!--/region:region-<slotID>-->), NOT a
+	// krate-id div. Props are carried by the region registry, not inline.
+	if strings.Contains(result.HTML, "krate-id") {
+		t.Errorf("krate-id placeholders should be gone, got:\n%s", result.HTML)
 	}
-	if !strings.Contains(result.RuntimeHTML, `"label":"hello"`) || !strings.Contains(result.RuntimeHTML, `"label":"world"`) {
-		t.Errorf("expected resolved props in runtime script, got %q", result.RuntimeHTML)
+	if strings.Count(result.HTML, "<!--region:") != 2 {
+		t.Errorf("expected 2 region splice markers, got:\n%s", result.HTML)
+	}
+	if !strings.Contains(result.HTML, "<!--region:region-") {
+		t.Errorf("region marker should carry the region- prefixed slot ID, got:\n%s", result.HTML)
 	}
 }
 
@@ -275,9 +282,6 @@ export default function Page() {
 
 	if seq.HTML != par.HTML {
 		t.Errorf("HTML mismatch (parallel != sequential):\n--- seq ---\n%s\n--- par ---\n%s", seq.HTML, par.HTML)
-	}
-	if seq.RuntimeHTML != par.RuntimeHTML {
-		t.Errorf("RuntimeHTML mismatch:\n--- seq ---\n%s\n--- par ---\n%s", seq.RuntimeHTML, par.RuntimeHTML)
 	}
 	if seq.HeadHTML != par.HeadHTML {
 		t.Errorf("HeadHTML mismatch: seq=%q par=%q", seq.HeadHTML, par.HeadHTML)

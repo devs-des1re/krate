@@ -55,11 +55,9 @@ type SSRConfig struct {
 	// APIRuntime controls which runtime executes API routes.
 	// "quickjs" (default) = embedded, "node"/"bun"/"deno" = sidecar.
 	APIRuntime string `json:"apiRuntime,omitempty"`
-	// ServerComponentRuntime controls which runtime executes @runtime server components.
-	// "quickjs" (default) = embedded, "node"/"bun"/"deno" = sidecar.
-	ServerComponentRuntime string `json:"serverComponentRuntime,omitempty"`
-	// SSRRuntime controls which runtime executes SSR/streaming pages.
-	// "quickjs" = embedded, "node"/"bun"/"deno" (default) = sidecar.
+	// SSRRuntime selects which runtime launches the SSR sidecar renderer.
+	// "node" (default) = plain node on the staged driver, "bun" = `bun run`,
+	// "deno" = `deno run --allow-net --allow-read --allow-env --allow-sys`.
 	SSRRuntime string `json:"ssrRuntime,omitempty"`
 	// Streaming forces ALL pages to render in streaming SSR mode,
 	// regardless of per-page `export const config = { streaming: true }`.

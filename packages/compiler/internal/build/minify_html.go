@@ -126,6 +126,10 @@ func stripHTMLComments(html string) string {
 			if strings.HasPrefix(comment, "<!--suspense:") || strings.HasPrefix(comment, "<!--/suspense:") {
 				b.WriteString(comment)
 			}
+			// Preserve runtime region splice markers
+			if strings.HasPrefix(comment, "<!--region:") || strings.HasPrefix(comment, "<!--/region:") {
+				b.WriteString(comment)
+			}
 			i += end + 3
 		} else {
 			b.WriteByte(html[i])

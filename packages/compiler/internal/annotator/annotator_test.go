@@ -83,6 +83,45 @@ export default function App() { return <Button label="x" />; }`
 
 // ─── Per-module source classification ───────────────────────────────────────
 
+func TestClassifyExportedConstArrow(t *testing.T) {
+	// `export const Live = () => ...` lands in ExportStmt.Declaration as a
+	// VarStmt — it must be collected just like `const Live = () => ...`.
+	src := `export const Live = ({ name }: any) => <p>live {name}</p>;
+export default function App() { return <Live name="world" />; }`
+	ann := Annotate(parseProg(t, src), &config.Config{}, "src/Live.tsx", src)
+	if _, ok := ann.Functions["Live"]; !ok {
+		t.Fatal("expected exported arrow-function component to be collected")
+	}
+}
+
+func TestImportedExportedConstRuntime(t *testing.T) {
+	// The Phase-1 region scenario: a runtime component file exporting a named
+	// arrow function via `export const`. Tier classification must see it as
+	// runtime from its own *.runtime.tsx file convention.
+	pageSrc := `// @server
+import { Live } from '../Live.runtime';
+export default function Page() {
+  return <Suspense fallback={<span>load</span>}><Live name="w" /></Suspense>;
+}`
+	pageProg := parseProg(t, pageSrc)
+	ann := Annotate(pageProg, &config.Config{}, "src/pages/live.tsx", pageSrc)
+
+	runtimeSrc := `export const Live = ({ name }: any) => <p>live {name}</p>;`
+	MergeModuleFunctions(ann, []ModuleSource{{
+		Program:   parseProg(t, runtimeSrc),
+		Path:      "src/Live.runtime.tsx",
+		RawSource: runtimeSrc,
+	}})
+	ReclassifyTiers(ann, &config.Config{})
+
+	if _, ok := ann.Functions["Live"]; !ok {
+		t.Fatal("expected exported const arrow component to be collected from merged module")
+	}
+	if got := ann.ComponentTiers["Live"]; got != irtree.TierRuntime {
+		t.Errorf("Live should be runtime from its own file, got %v", got)
+	}
+}
+
 func TestImportedRuntimeComponentUsesOwnFileConvention(t *testing.T) {
 	// The page is @server, but the imported component lives in a *.runtime.tsx
 	// file. Its tier must come from ITS OWN file, not the page directive.

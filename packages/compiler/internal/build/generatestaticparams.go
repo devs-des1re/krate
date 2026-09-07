@@ -251,10 +251,12 @@ func (b *Builder) buildStaticParamsPage(spp staticParamsPage) (*PageResult, stri
 		return nil, "", fmt.Errorf("no entry module found")
 	}
 
-	renderMode, revalidate := detectRenderMode(entryModule.Program, entryModule.SourceCode)
+	renderMode, revalidate := detectRenderMode(entryModule.Program)
 
-	// Global streaming override: if configured, force all pages to stream.
-	if b.Cfg.SSR.Streaming && renderMode != RenderStreaming {
+	// Global streaming override: if configured, all *static* pages stream.
+	// Explicit ssr/isr opts win — forcing them to streaming would silently
+	// defeat a page author's per-page config.
+	if b.Cfg.SSR.Streaming && renderMode == RenderSSG {
 		renderMode = RenderStreaming
 		fmt.Fprintf(os.Stderr, "  %s⚡%s %s → streaming (global override)\n", cCyan, cReset, filepath.Base(spp.PagePath))
 	}

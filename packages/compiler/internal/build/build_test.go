@@ -311,7 +311,7 @@ func TestStageServerRenderer(t *testing.T) {
 	}
 
 	// The SSR server manager must prefer the staged driver over the TS source.
-	server := NewSSRServer(fakeRoot, 0)
+	server := NewSSRServer(fakeRoot, 0, "node")
 	got := server.findRendererScript()
 	if got == "" {
 		t.Fatal("findRendererScript returned empty path")

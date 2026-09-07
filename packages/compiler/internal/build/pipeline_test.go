@@ -78,8 +78,8 @@ func TestBuildLoadingPageRendered(t *testing.T) {
 
 // TestBuildMixedTierPage verifies the server-runtime-demo page demonstrates the
 // server/runtime split: server components are baked with a real QuickJS
-// Date.now() timestamp, runtime components are deferred krate-id placeholders
-// backed by a props script.
+// Date.now() timestamp, runtime components are deferred region splice markers
+// (the sidecar renders them at request time and Go splices the HTML in).
 func TestBuildMixedTierPage(t *testing.T) {
 	outDir := buildTestProject(t)
 	html := readOut(t, outDir, filepath.Join("server-runtime-demo", "index.html"))
@@ -92,20 +92,17 @@ func TestBuildMixedTierPage(t *testing.T) {
 		t.Fatalf("expected a 13-digit QuickJS Date.now() timestamp baked at build, got:\n%.600s", html)
 	}
 
-	// Runtime components are NOT baked — they produce krate-id placeholders.
-	if !strings.Contains(html, `<div krate-id=0>`) || !strings.Contains(html, `<div krate-id=1>`) {
-		t.Errorf("expected runtime component placeholders, got:\n%.600s", html)
+	// Runtime components are NOT baked — each becomes a region splice marker
+	// (<!--region:region-<slotID>--><!--/region:region-<slotID>-->) that the
+	// sidecar fills at request time.
+	if !strings.Contains(html, "<!--region:") {
+		t.Errorf("expected runtime component region markers, got:\n%.600s", html)
 	}
-
-	// The runtime props script carries resolved props for each placeholder.
-	if !strings.Contains(html, `application/krate-runtime`) {
-		t.Errorf("expected runtime props script, got:\n%.600s", html)
+	if strings.Contains(html, "krate-id") {
+		t.Errorf("krate-id placeholders should be gone, got:\n%.600s", html)
 	}
-	if !strings.Contains(html, `"label":"Interactive Widget"`) {
-		t.Errorf("expected resolved RuntimeWidget props in script, got:\n%.600s", html)
-	}
-	if !strings.Contains(html, `"title":"Runtime Card"`) {
-		t.Errorf("expected resolved RuntimeCard props in script, got:\n%.600s", html)
+	if strings.Contains(html, "application/krate-runtime") {
+		t.Errorf("inline runtime props script should be gone, got:\n%.600s", html)
 	}
 }
 

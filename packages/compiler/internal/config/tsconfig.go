@@ -385,10 +385,6 @@ func applyConfigProp(cfg *Config, key string, val interface{}) error {
 				if s, ok := v.(string); ok {
 					cfg.SSR.APIRuntime = s
 				}
-			case "serverComponentRuntime":
-				if s, ok := v.(string); ok {
-					cfg.SSR.ServerComponentRuntime = s
-				}
 			case "ssrRuntime":
 				if s, ok := v.(string); ok {
 					cfg.SSR.SSRRuntime = s

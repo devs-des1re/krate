@@ -407,8 +407,8 @@ function Page() {
 }
 export default Page;`
 	result, _ := fullPipeline(t, src)
-	if !strings.Contains(result.HTML, "krate-id") {
-		t.Errorf("expected krate-id placeholder in HTML:\n%s", result.HTML)
+	if !strings.Contains(result.HTML, "<!--region:") {
+		t.Errorf("expected runtime component region splice marker in HTML:\n%s", result.HTML)
 	}
 }
 

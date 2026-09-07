@@ -3,11 +3,29 @@ title: Rendering
 order: 5
 ---
 
-# Rendering: SSG & Streaming
+# Rendering Modes
 
-Krate is **SSG-first**: every page is pre-rendered to static HTML at build time.
-On top of that base, pages can opt into Streaming SSR — including per-request
-data via runtime components.
+Krate is **SSG-first**: every page is pre-rendered to static HTML at build
+time. On top of that base, pages can opt into ISR, SSR, or Streaming via a small
+per-page config or by using the components that imply them.
+
+The architecture is **static-first**: the Go compiler bakes as much as possible
+into a static shell (layout, `<head>`, server components, resolved suspense
+content). Only genuinely dynamic pieces — the "regions" of a page — are
+rendered at request time by a small sidecar and spliced into the shell. Krate
+never re-renders an entire page just to update one dynamic part, and it never
+renders a page twice.
+
+## Modes at a glance
+
+| Mode | Config | Output |
+|------|--------|--------|
+| **SSG** (default) | — | Fully static HTML, no request-time work |
+| **ISR** | `export const config = { isr: true, revalidate: 60 }` | Static shell; page body cached per URL variant and revalidated in the background |
+| **SSR** | `export const config = { ssr: true }` | Static shell; page body rendered fresh on every request |
+| **Streaming** | `export const config = { streaming: true }`, `<Suspense>`, or runtime components | Static shell; each dynamic region streamed in as it resolves |
+
+Precedence when several apply: `isr` > `ssr` > `streaming` > `ssg`.
 
 ## SSG (default)
 
@@ -25,17 +43,45 @@ Server components (`// @server`) are evaluated at build time and their output is
 baked into the static HTML, so build-time data needs no special page-level
 function. See [Data Fetching](/docs/features/data-fetching/).
 
-## Streaming SSR
+## ISR (Incremental Static Regeneration)
 
-Streaming uses Suspense-based two-phase rendering for pages that import runtime
-components, or when `ssr.streaming` forces all pages into streaming mode:
+Opt a page in with the `isr` flag. `revalidate` (seconds) controls how often the
+page body is regenerated in the background:
 
-1. **Phase 1 (fallback)** — renders the page with fallback content.
-2. **Phase 2 (resolved)** — streams resolved content via
-   `<!--suspense-resolved:N-->` markers with chunked transfer encoding.
+```tsx
+export const config = { isr: true, revalidate: 60 };
 
-This is the recommended path for per-request data, which lives in runtime
-components (`// @runtime`):
+export default function PricesPage() {
+  return <p>Latest prices</p>;
+}
+```
+
+ISR responses are cacheable: Krate emits
+`Cache-Control: public, s-maxage=…, stale-while-revalidate=…` so CDNs hold
+fresh HTML while the sidecar revalidates stale entries in the background.
+`revalidate` defaults to 60 seconds when omitted.
+
+For **dynamic routes** with `generateStaticParams`
+([Data Fetching](/docs/features/data-fetching/)), known variants are baked as
+static files at build time. Unknown variants render on demand through the page
+region and are cached per variant (URL params and query string are part of the
+cache key).
+
+## SSR
+
+```tsx
+export const config = { ssr: true };
+```
+
+The page shell is baked, and the page body is rendered by the sidecar on every
+request with the live URL params/query. Responses are `no-store`.
+
+## Streaming
+
+Streaming pages use Suspense boundaries and runtime components. The shell is
+baked with each dynamic boundary's **fallback** in place; as each region
+resolves it is streamed to the client and spliced in — one render per region,
+no two-phase full-page render.
 
 ```tsx
 // @runtime
@@ -45,26 +91,39 @@ export default function PriceTag({ price }) {
 ```
 
 ```tsx
-// Force ALL pages to streaming SSR
-export default defineConfig({
-  ssr: { streaming: true },
-});
-```
-
-Or opt in per page:
-
-```tsx
 export const config = { streaming: true };
 ```
 
-## How streaming works
+Pages that render a runtime component or use `<Suspense>` are automatically
+treated as streaming even without the config:
 
-- Pages are built to static HTML where possible.
-- Pages with runtime components are compiled into server bundles and rendered
-  at request time by the Node renderer server.
-- The renderer resolves runtime component props and streams resolved content
-  through Suspense boundaries.
-- `manifest.json` records each page's mode and metadata.
+```tsx
+export default function LivePage() {
+  return (
+    <Suspense fallback={<p>Loading…</p>}>
+      <LiveStatus />
+    </Suspense>
+  );
+}
+```
+
+## How it works
+
+- The Go compiler builds every page to a static shell. Server components are
+  baked; static suspense content is baked as its resolved HTML; dynamic
+  boundaries become splice markers (`<!--suspense:…-->` for Suspense regions,
+  `<!--region:…-->` for standalone runtime components).
+- SSR/ISR pages carry one coarse "page" region marker around the whole body.
+- The Node (or bun/deno) sidecar renders **only** the regions the Go server asks
+  for — via `/__krate/regions` — using the compiled page bundle
+  (`dist/.krate/server-bundles/…`) or the compiled runtime-component bundles
+  (`dist/server-components/…`). The Go server splices the returned HTML into the
+  shell and streams it.
+- The Go server resolves the concrete URL to the page's canonical route
+  (e.g. `/video/abc` → `/video/[id]`), forwards the URL params, and keys ISR
+  caching by route + params + query.
+- `manifest.json` records each page's mode, and `server-manifest.json` lists the
+  page bundles and each page's region registry for the sidecar.
 
 ## Choosing an approach
 
@@ -72,7 +131,9 @@ export const config = { streaming: true };
 |------|----------|
 | Static content, fastest | SSG (default) |
 | Data at build time | Server component (`@server`) |
-| Per-request data | Runtime component (`@runtime`) + Streaming SSR |
+| Per-request data | Runtime component (`@runtime`) + Streaming |
+| Content that updates on a schedule | ISR (`isr` + `revalidate`) |
+| Fully per-request page | SSR (`ssr`) |
 | Static + dynamic route URLs | `generateStaticParams` |
 
 See [Component Tiers](/docs/core-concepts/component-tiers/) for how server and

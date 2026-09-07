@@ -58,14 +58,19 @@ imports/primitives to Krate equivalents for gradual migration.
 
 ## Rendering modes
 
-Every page is pre-rendered at build time. Depending on the page's exports and
-config, the final HTML can be:
+Every page is pre-rendered at build time into a static shell. Depending on the
+page's exports and config, the final HTML can be:
 
-- **SSG** (default) — static HTML, no runtime data.
-- **Streaming** — Suspense-based two-phase rendering (runtime components),
-  which also covers per-request data.
+- **SSG** (default) — fully static HTML, no runtime data.
+- **ISR** — static shell; the page body is cached per URL variant and
+  revalidated in the background.
+- **SSR** — static shell; the page body is rendered fresh per request.
+- **Streaming** — static shell with dynamic regions (runtime components /
+  Suspense) that the sidecar renders and splices in, streaming as they resolve.
 
-See [Rendering](/docs/core-concepts/rendering/) for details.
+All four modes are static-first: only the page's dynamic regions (or its whole
+body, for ISR/SSR) are rendered at request time. See
+[Rendering](/docs/core-concepts/rendering/) for details.
 
 ## Component tiers
 
@@ -78,6 +83,6 @@ runtime — that determine how and where they render. See
 | [Reactivity](/docs/core-concepts/reactivity/) | Signals, effects, memos, context, resources |
 | [Routing & Layouts](/docs/core-concepts/routing/) | File-based routing, dynamic routes, layouts |
 | [Component Tiers](/docs/core-concepts/component-tiers/) | Static / client / server / runtime |
-| [Rendering](/docs/core-concepts/rendering/) | SSG & streaming |
+| [Rendering](/docs/core-concepts/rendering/) | SSG, ISR, SSR & streaming |
 | [Styling](/docs/core-concepts/styling/) | CSS Modules, Tailwind, the CSS pipeline |
 | [Markdown & MDX](/docs/core-concepts/markdown/) | Content authoring |

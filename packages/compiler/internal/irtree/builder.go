@@ -42,9 +42,9 @@ func Build(prog *ast.Program, ann *Annotations) *ComponentTree {
 		idCounter:      make(map[string]int),
 		instanceCounts: make(map[string]int),
 		elementCounts:  make(map[string]int),
-		slotIDMap:      make(map[string]SlotID),
-		slotCounts:     make(map[string]int),
-		moduleConsts:   collectModuleConsts(prog),
+		slotIDMap:    make(map[string]SlotID),
+		slotCounts:   make(map[string]int),
+		moduleConsts: collectModuleConsts(prog),
 	}
 
 	root := builder.buildComponentNode(entryFn, "")
@@ -80,6 +80,7 @@ type builder struct {
 	refObjectVars    map[string]bool     // component-local names bound to a useRef {current:...} object
 	callSiteChildren []ast.JSXChild      // call-site children of the current component
 	moduleConsts     map[string]string   // module-level const values (name → resolved literal)
+	suspenseCount    int                 // monotonic counter for stable StreamID generation
 }
 
 // sigMap returns the signal context for the current component being built.
@@ -588,6 +589,8 @@ func (b *builder) buildJSXSlot(el *ast.JSXElement, parentID string) []SlotNode {
 		return b.buildSyntaxHighlightSlots(el, parentID)
 	case "Icon", "Image":
 		return []SlotNode{&StaticHTML{HTML: ""}}
+	case "Suspense":
+		return []SlotNode{b.buildSuspenseSlot(el, parentID)}
 	}
 
 	// Uppercase = component
@@ -603,8 +606,261 @@ func (b *builder) buildJSXSlot(el *ast.JSXElement, parentID string) []SlotNode {
 	return b.buildStaticElementSlots(el, parentID)
 }
 
-// ─── buildLinkSlots — <Link> → <a> with SPA navigation ────────────────────
+// buildSuspenseSlot builds a <Suspense fallback={...}><Primary/></Suspense>
+// boundary. The fallback is always baked into the static shell inside suspense
+// markers (emitter emits them). Whether the primary is ALSO baked (ModeStatic)
+// or deferred to a request-time region render (ModeRegion) is decided by the
+// boundary's contents:
+//
+//   - TierRuntime primaries (or runtime/server children) are deferred: they
+//     carry fresh props/params per request and must render in the sidecar.
+//   - Pure static primaries are fully resolved at build time (ModeStatic).
+//   - A missing primary falls back to the fallback alone (ModeDefault).
+func (b *builder) buildSuspenseSlot(el *ast.JSXElement, parentID string) *SuspenseSlot {
+	_, fallbackExpr := findSuspenseFallback(el)
+	id := joinSlotID(parentID, "suspense")
 
+	slotID := b.assignSlotID(id)
+	streamID := b.nextSuspenseStreamID(string(slotID))
+
+	// Bake the fallback content. If absent, empty boundaries render nothing.
+	var fallback []SlotNode
+	if fallbackExpr != nil {
+		fallback = b.buildSlotNodes(fallbackExpr, string(id))
+	} else {
+		fallback = []SlotNode{}
+	}
+
+	s := &SuspenseSlot{
+		ID:       id,
+		Fallback: fallback,
+		StreamID: streamID,
+		Mode:     SuspenseModeDefault,
+	}
+
+	// Resolve the primary region: a possible top-level runtime component plus
+	// the mode and the buildable static content to bake when static.
+	primary, mode, resolved := b.resolveSuspensePrimary(el.Children, string(id))
+	s.Primary = primary
+	s.Mode = mode
+	s.Resolved = resolved
+
+	return s
+}
+
+// nextSuspenseStreamID returns a stable, unique stream ID for a suspense
+// boundary. It derives from the compact slot ID (which the emitter marks with)
+// and a per-component counter so repeated builds of the same boundary reuse the
+// same ID (deterministic output) while sibling boundaries stay distinct.
+func (b *builder) nextSuspenseStreamID(slotID string) string {
+	b.suspenseCount++
+	return fmt.Sprintf("%s-%d", slotID, b.suspenseCount)
+}
+
+// resolveSuspensePrimary walks the suspense children and decides how to emit the
+// boundary's primary region:
+//
+//   - If a direct TierRuntime child component is found, it becomes the Primary
+//     (region render) — the streaming boundary's whole point.
+//   - Otherwise, if any direct or deeply-nested runtime component appears, the
+//     boundary must still be a region (we defer those sub-regions), so choose
+//     ModeRegion with no single top-level Primary.
+//   - Otherwise everything is static: the buildable children are returned as
+//     Resolved content (ModeStatic).
+//
+// The third return value holds the slot nodes to bake into the shell when the
+// mode is static (the resolved primary content), or nil for region modes.
+func (b *builder) resolveSuspensePrimary(children []ast.JSXChild, parentID string) (*ComponentNode, SuspenseMode, []SlotNode) {
+	if len(children) == 0 {
+		return nil, SuspenseModeDefault, nil
+	}
+
+	var directStatic []ast.JSXChild
+
+	for _, c := range children {
+		elc, ok := c.(*ast.JSXElementChild)
+		if !ok {
+			directStatic = append(directStatic, c)
+			continue
+		}
+		name := elc.Element.Opening.Name
+		fn := b.functions[name]
+		if fn == nil {
+			directStatic = append(directStatic, c)
+			continue
+		}
+		if b.ann.ComponentTiers[name] == TierRuntime {
+			childID := joinSlotID(parentID, name)
+			attrs := extractPropsAST(elc.Element)
+			props := make(map[string]any, len(attrs))
+			for pn, pe := range attrs {
+				props[pn] = evalConstWithSignals(pe, b.sigMap(), b.localProps)
+			}
+			node := &ComponentNode{
+				ID:           childID,
+				Name:         name,
+				Tier:         TierRuntime,
+				Props:        attrs,
+				RuntimeProps: props,
+				SourceFile:   b.ann.ComponentSources[name],
+				Line:         fn.Position.Line,
+			}
+			// Build the remaining (static) children as resolved fallback-in-place
+			// content so a shell without the runtime region still shows them.
+			resolved := b.buildSuspenseResolved(directStatic, parentID)
+			return node, SuspenseModeRegion, resolved
+		}
+		directStatic = append(directStatic, c)
+	}
+
+	// No direct runtime primary. If a runtime component is nested deeper inside
+	// the boundary's static direct children, bake the resolved content anyway:
+	// the static wrappers become part of the shell and each nested runtime
+	// component is emitted as its own standalone region (region-<slotID>), which
+	// the sidecar renders independently. A boundary cannot be resolved as an
+	// anonymous whole (it has no component/bundle identity), so deferring the
+	// whole boundary would leave nothing renderable at serve time.
+	if b.childrenContainRuntime(directStatic) {
+		resolved := b.buildSuspenseResolved(directStatic, parentID)
+		return nil, SuspenseModeStatic, resolved
+	}
+
+	// Fully static boundary — bake the resolved primary content.
+	resolved := b.buildSuspenseResolved(directStatic, parentID)
+	return nil, SuspenseModeStatic, resolved
+}
+
+// buildSuspenseResolved builds a set of suspense children as static slot nodes
+// to bake into the shell as the boundary's resolved (primary) content.
+func (b *builder) buildSuspenseResolved(children []ast.JSXChild, parentID string) []SlotNode {
+	var out []SlotNode
+	for _, c := range children {
+		switch ch := c.(type) {
+		case *ast.JSXElementChild:
+			out = append(out, b.buildSlotNodes(ch.Element, parentID)...)
+		case *ast.JSXFragmentChild:
+			out = append(out, b.buildFragmentSlots(ch.Fragment, parentID)...)
+		case *ast.JSXExprContainer:
+			out = append(out, b.buildExprContainerChildren(ch, parentID)...)
+		case *ast.JSXText:
+			if ch.Value != "" {
+				out = append(out, &StaticHTML{HTML: ch.Value})
+			}
+		}
+	}
+	return out
+}
+
+// childrenContainRuntime reports whether any nested component within the given
+// suspense children is a TierRuntime component (direct or deeply nested).
+func (b *builder) childrenContainRuntime(children []ast.JSXChild) bool {
+	for _, c := range children {
+		switch ch := c.(type) {
+		case *ast.JSXElementChild:
+			if b.elementContainRuntime(ch.Element) {
+				return true
+			}
+		case *ast.JSXFragmentChild:
+			if b.fragmentContainRuntime(ch.Fragment) {
+				return true
+			}
+		case *ast.JSXExprContainer:
+			if b.exprContainRuntime(ch.Expression) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (b *builder) elementContainRuntime(el *ast.JSXElement) bool {
+	name := el.Opening.Name
+	if name != "" && name[0] >= 'A' && name[0] <= 'Z' {
+		if fn := b.ann.Functions[name]; fn != nil {
+			if b.ann.ComponentTiers[name] == TierRuntime {
+				return true
+			}
+		}
+	}
+	for _, child := range el.Children {
+		switch c := child.(type) {
+		case *ast.JSXElementChild:
+			if b.elementContainRuntime(c.Element) {
+				return true
+			}
+		case *ast.JSXFragmentChild:
+			if b.fragmentContainRuntime(c.Fragment) {
+				return true
+			}
+		case *ast.JSXExprContainer:
+			if b.exprContainRuntime(c.Expression) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (b *builder) fragmentContainRuntime(frag *ast.JSXFragment) bool {
+	for _, child := range frag.Children {
+		switch c := child.(type) {
+		case *ast.JSXElementChild:
+			if b.elementContainRuntime(c.Element) {
+				return true
+			}
+		case *ast.JSXFragmentChild:
+			if b.fragmentContainRuntime(c.Fragment) {
+				return true
+			}
+		case *ast.JSXExprContainer:
+			if b.exprContainRuntime(c.Expression) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func (b *builder) exprContainRuntime(expr ast.Expr) bool {
+	switch e := expr.(type) {
+	case *ast.JSXElement:
+		return b.elementContainRuntime(e)
+	case *ast.JSXFragment:
+		return b.fragmentContainRuntime(e)
+	case *ast.ConditionalExpr:
+		return b.exprContainRuntime(e.Consequent) || b.exprContainRuntime(e.Alternate)
+	case *ast.ArrayExpr:
+		for _, el := range e.Elements {
+			if b.exprContainRuntime(el) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// findSuspenseFallback extracts the JSX expression bound to the `fallback`
+// prop of a <Suspense> element. Returns the JSXChild list if the fallback value
+// is a JSX element/fragment, else nil. (Children of the expression container
+// that build through buildSlotNodes handle nesting.)
+func findSuspenseFallback(el *ast.JSXElement) (bool, ast.Expr) {
+	for _, attr := range el.Opening.Attributes {
+		if attr.Spread || attr.Name != "fallback" || attr.Value == nil {
+			continue
+		}
+		switch v := attr.Value.(type) {
+		case *ast.JSXElement:
+			return true, v
+		case *ast.JSXFragment:
+			return true, v
+		default:
+			return false, nil
+		}
+	}
+	return false, nil
+}
+
+// ─── buildLinkSlots — <Link> → <a> with SPA navigation ────────────────────
 // buildLinkSlots compiles <Link> into a real <a> element wired for client-side
 // navigation (data-krate-link) with Next.js-style props:
 //
@@ -1001,7 +1257,7 @@ func (b *builder) buildComponentSlot(el *ast.JSXElement, parentID string) []Slot
 				Tier:         TierRuntime,
 				Props:        attrs,
 				RuntimeProps: props,
-				SourceFile:   b.ann.SourceFile,
+				SourceFile:   b.ann.ComponentSources[childName],
 				Line:         childFn.Position.Line,
 			},
 		}}

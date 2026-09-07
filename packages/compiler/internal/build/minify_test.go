@@ -31,6 +31,25 @@ func TestMinifyJSKeepsRUNTIME_CHUNK_RE(t *testing.T) {
 	}
 }
 
+// TestMinifyHTMLPreservesRegionMarkers guards the comment stripper: suspense
+// AND runtime region splice markers must survive minification or the Go server
+// has nothing to splice region HTML into at serve time.
+func TestMinifyHTMLPreservesRegionMarkers(t *testing.T) {
+	in := `<div id=root><!--suspense:1-1--><span>loading</span><!--/suspense:1-1--><!--region:region-1.Widget_c0--><!--/region:region-1.Widget_c0--><p>static</p></div>`
+	out := minifyHTML(in)
+	for _, marker := range []string{
+		"<!--suspense:1-1-->", "<!--/suspense:1-1-->",
+		"<!--region:region-1.Widget_c0-->", "<!--/region:region-1.Widget_c0-->",
+	} {
+		if !strings.Contains(out, marker) {
+			t.Errorf("minifyHTML dropped splice marker %q:\n  out: %s", marker, out)
+		}
+	}
+	if !strings.Contains(out, "<p>static</p>") {
+		t.Errorf("minifyHTML dropped page content:\n  out: %s", out)
+	}
+}
+
 // TestRemoveOptionalQuotesPreservesCSP guards the quote stripper against
 // corrupting quoted attribute values that contain quotes and spaces, such as a
 // Content-Security-Policy: the inner 'self' quotes must survive unminified and

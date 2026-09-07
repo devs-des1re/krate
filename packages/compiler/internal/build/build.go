@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -58,6 +59,10 @@ type PageResult struct {
 	Revalidate       int
 	SourcePath       string // relative path to source file
 	ServerBundlePath string // path to server bundle (for SSR/ISR pages)
+
+	// Regions lists this page's dynamic regions (Suspense primaries + runtime
+	// components) discovered from the IR tree. Populated for non-SSG pages.
+	Regions []Region
 }
 
 type Builder struct {
@@ -524,10 +529,6 @@ func (b *Builder) BuildAll() error {
 	}
 	manifest.SetRuntimeComponents(runtimeCompBundles)
 
-	// Compile SSR bundles for QuickJS rendering
-	ssrBundles := CompileSSRPageBundles(results, b.Root, b.Cfg.OutDir)
-	_ = ssrBundles // used by embedded QuickJS runtime
-
 	if err := WriteManifest(manifest, b.Cfg.OutDir, serverBundles); err != nil {
 		fmt.Fprintf(os.Stderr, "  %sWarning: failed to write manifest:%s %v\n", cYellow, cReset, err)
 	}
@@ -769,7 +770,7 @@ func (b *Builder) buildPage(page string) (*PageResult, string, error) {
 	entryModule.Program = parseCtx.Program
 
 	// Detect rendering mode (SSR/ISR/Streaming) from AST exports + <Suspense> usage
-	renderMode, revalidate := detectRenderMode(entryModule.Program, entryModule.SourceCode)
+	renderMode, revalidate := detectRenderMode(entryModule.Program)
 
 	// If the page imports any runtime components, force streaming mode.
 	// Runtime components (*.runtime.tsx) must be rendered at request time,
@@ -784,8 +785,10 @@ func (b *Builder) buildPage(page string) (*PageResult, string, error) {
 		}
 	}
 
-	// Global streaming override: if configured, force all pages to stream.
-	if b.Cfg.SSR.Streaming && renderMode != RenderStreaming {
+	// Global streaming override: if configured, all *static* pages stream.
+	// Explicit ssr/isr opts win — forcing them to streaming would silently
+	// defeat a page author's per-page config.
+	if b.Cfg.SSR.Streaming && renderMode == RenderSSG {
 		renderMode = RenderStreaming
 		fmt.Fprintf(os.Stderr, "  %s⚡%s %s → streaming (global override)\n", cCyan, cReset, filepath.Base(page))
 	}
@@ -809,6 +812,7 @@ func (b *Builder) buildPage(page string) (*PageResult, string, error) {
 	// Re-classify tiers for any newly discovered components
 	annotator.ReclassifyTiers(ann, b.Cfg)
 	tree := irtree.Build(entryModule.Program, ann)
+	regions := enumerateRegions(tree)
 	emitter := renderer.NewEmitter()
 	emitter.IconResolver = b.iconResolver
 	emitter.EvalJS = b.jsExprEvaluator()
@@ -822,12 +826,6 @@ func (b *Builder) buildPage(page string) (*PageResult, string, error) {
 	// Compile-time reactive dependency validation. Surfaced as warnings so
 	// dead signals / circular effects are caught before hydration ships.
 	b.printReactiveDiags(reactive.Build(emitResult.Signatures).Validate())
-
-	// Include the runtime component props script (krate-id → props JSON) so
-	// serve-time rendering can resolve runtime component props from the page.
-	if emitResult.RuntimeHTML != "" {
-		emitResult.ScriptHTML += emitResult.RuntimeHTML
-	}
 
 	// Run AfterRender hooks (pre-layout, plugins can modify HTML/head/CSS)
 	renderCtx := &plugin.RenderHookCtx{
@@ -847,6 +845,18 @@ func (b *Builder) buildPage(page string) (*PageResult, string, error) {
 	emitResult.HTML = renderCtx.HTML
 	emitResult.HeadHTML = renderCtx.HeadHTML
 	bundle.CSS = renderCtx.RawCSS
+
+	// SSR/ISR pages have no component-level regions (any runtime component or
+	// <Suspense> forces streaming). Their whole page body is therefore ONE
+	// coarse region: the shell is baked with the page body wrapped in a splice
+	// marker, and the Go server replaces that body with a request-time render
+	// from the sidecar (/__krate/regions). Wrapping before the layout merge
+	// places the marker around the page body wherever the layout injects
+	// {children}. Reuses the suspense marker kind so a failed region render
+	// falls back to the baked (stale/placeholder) body.
+	if renderMode == RenderSSR || renderMode == RenderISR {
+		emitResult.HTML = "<!--suspense:page-->" + emitResult.HTML + "<!--/suspense:page-->"
+	}
 
 	layoutPath := findLayout(page, b.Cfg.PagesDir)
 	if layoutPath != "" {
@@ -937,6 +947,7 @@ func (b *Builder) buildPage(page string) (*PageResult, string, error) {
 		Mode:       renderMode,
 		Revalidate: revalidate,
 		SourcePath: relSrc,
+		Regions:    regions,
 	}, bundle.CSS, nil
 }
 
@@ -1183,7 +1194,6 @@ func (b *Builder) NewRenderPipeline(entryModule *bundler.Module, page string) (*
 	ann := annotator.Annotate(entryModule.Program, b.Cfg, page, entryModule.SourceCode)
 
 	tree := irtree.Build(entryModule.Program, ann)
-
 	emitter := renderer.NewEmitter()
 	result := emitter.Emit(tree)
 
@@ -1576,12 +1586,17 @@ func pageToOutput(page, pagesDir string) string {
 	if err != nil {
 		return ""
 	}
-	name := strings.TrimSuffix(rel, filepath.Ext(rel))
+	// Normalize to forward slashes so the returned OutName is a portable URL
+	// path ("video/[id]" on every OS) — it feeds manifest routes, shell reads,
+	// and region requests. Callers that touch the filesystem join it with
+	// filepath.Join, which re-applies the OS separator.
+	name := filepath.ToSlash(strings.TrimSuffix(rel, filepath.Ext(rel)))
 	if name == "index" || name == "home" {
 		return "."
 	}
-	// Error pages output at root level (like index)
-	base := filepath.Base(name)
+	// Error pages output at root level (like index). name is slash-normalized,
+	// so use path.Base (slash-aware), not filepath.Base.
+	base := path.Base(name)
 	if base == "404" || base == "500" {
 		return "."
 	}

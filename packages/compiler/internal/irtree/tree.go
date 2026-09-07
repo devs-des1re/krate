@@ -160,12 +160,40 @@ type ComponentSlot struct {
 func (s *ComponentSlot) slotNode()     {}
 func (s *ComponentSlot) GetID() SlotID { return s.ID }
 
+// ─── SuspenseMode — how a Suspense boundary is emitted ─────────────────────
+type SuspenseMode int
+
+const (
+	// SuspenseModeDefault falls back to baking the fallback inside markers.
+	SuspenseModeDefault SuspenseMode = iota
+	// SuspenseModeStatic bakes the resolved (primary) content inside markers
+	// because everything in the boundary is statically renderable at build time.
+	SuspenseModeStatic
+	// SuspenseModeRegion bakes the fallback inside markers and defers the
+	// primary to a per-region request-time render (runtime/server components
+	// or props driven by params/query). Go splices the region result in place.
+	SuspenseModeRegion
+)
+
+func (m SuspenseMode) String() string {
+	switch m {
+	case SuspenseModeStatic:
+		return "static"
+	case SuspenseModeRegion:
+		return "region"
+	default:
+		return "default"
+	}
+}
+
 // ─── SuspenseSlot — streaming boundary ─────────────────────────────────────
 type SuspenseSlot struct {
 	ID       SlotID
 	Fallback []SlotNode
+	Resolved []SlotNode
 	Primary  *ComponentNode
 	StreamID string
+	Mode     SuspenseMode
 }
 
 func (s *SuspenseSlot) slotNode()     {}

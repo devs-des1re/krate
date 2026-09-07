@@ -14,6 +14,8 @@ type Manifest struct {
 	RuntimeJS         string                 `json:"runtimeJS,omitempty"`         // shared runtime chunk path (relative to outDir)
 	Routes            map[string]PageMeta    `json:"-"`                           // URL route → PageMeta (in-memory only)
 	RuntimeComponents []RuntimeComponentMeta `json:"runtimeComponents,omitempty"` // runtime server components
+	// Regions maps each server-rendered page route to its dynamic regions.
+	Regions map[string][]RegionMeta `json:"regions,omitempty"`
 }
 
 // RuntimeComponentMeta describes a compiled runtime component bundle.
@@ -38,6 +40,7 @@ type ServerManifest struct {
 	Stylesheet        string                 `json:"stylesheet,omitempty"`
 	RuntimeJS         string                 `json:"runtimeJS,omitempty"`         // shared runtime chunk path
 	RuntimeComponents []RuntimeComponentMeta `json:"runtimeComponents,omitempty"` // runtime server components
+	Regions           map[string][]RegionMeta `json:"regions,omitempty"`
 }
 
 // BuildManifest constructs the manifest from page results.
@@ -61,6 +64,25 @@ func BuildManifest(results []*PageResult, cssFile string, runtimeJS string) *Man
 		}
 		m.Pages = append(m.Pages, meta)
 		m.Routes[meta.Route] = meta
+
+		// Record dynamic regions for this page (Suspense primaries + runtime
+		// components) so the sidecar knows which regions to render.
+		if len(r.Regions) > 0 {
+			if m.Regions == nil {
+				m.Regions = make(map[string][]RegionMeta)
+			}
+			regs := make([]RegionMeta, 0, len(r.Regions))
+			for _, reg := range r.Regions {
+				regs = append(regs, RegionMeta{
+					ID:         reg.ID,
+					Component:  reg.ComponentName,
+					SourcePath: reg.SourcePath,
+					Props:      reg.Props,
+					Suspense:   reg.Suspense,
+				})
+			}
+			m.Regions[meta.Route] = regs
+		}
 	}
 
 	return m
@@ -78,6 +100,33 @@ func (m *Manifest) SetRuntimeComponents(bundles []RuntimeComponentBundle) {
 			SourcePath: b.SourcePath,
 			BundlePath: b.BundlePath,
 		})
+	}
+	linkRegionBundles(m, bundles)
+}
+
+// linkRegionBundles resolves each region's BundlePath to the already-compiled
+// runtime component bundle that backs it. A suspense-primary region renders
+// that single runtime component, so the per-runtime-component bundle (a
+// self-contained __krate_render IIFE) is exactly the renderer the sidecar
+// needs — no per-region esbuild pass required.
+func linkRegionBundles(m *Manifest, bundles []RuntimeComponentBundle) {
+	if m == nil || len(bundles) == 0 {
+		return
+	}
+	bySource := make(map[string]string, len(bundles))
+	for _, b := range bundles {
+		bySource[filepath.Clean(b.SourcePath)] = b.BundlePath
+	}
+	for route, regs := range m.Regions {
+		for i := range regs {
+			if regs[i].Component == "" || regs[i].BundlePath != "" {
+				continue
+			}
+			if bp, ok := bySource[filepath.Clean(regs[i].SourcePath)]; ok {
+				regs[i].BundlePath = bp
+			}
+		}
+		m.Regions[route] = regs
 	}
 }
 
@@ -115,6 +164,7 @@ func WriteManifest(m *Manifest, outDir string, serverBundles map[string]string) 
 			Stylesheet:        m.Stylesheet,
 			RuntimeJS:         m.RuntimeJS,
 			RuntimeComponents: m.RuntimeComponents,
+			Regions:           m.Regions,
 		}
 		smData, err := json.MarshalIndent(sm, "", "  ")
 		if err != nil {
