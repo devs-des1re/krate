@@ -124,16 +124,19 @@ jobs:
 
           : > /tmp/krate-nodes.tsv
           if [ "${TOTAL_SHAS}" -gt 0 ]; then
-            QUERY='query($owner:String!,$repo:String!,$oid:GitObjectID!,$cursor:String,$count:Int!){ repository(owner:$owner,name:$repo){ object(oid:$oid){ ... on Commit { history(first:$count,after:$cursor){ pageInfo{ hasNextPage endCursor } nodes{ oid messageHeadline associatedPullRequests(first:1){ nodes{ number title url } } } } } } } }'
+            QUERY='query($owner:String!,$repo:String!,$oid:GitObjectID!,$cursor:String){ repository(owner:$owner,name:$repo){ object(oid:$oid){ ... on Commit { history(first:100,after:$cursor){ pageInfo{ hasNextPage endCursor } nodes{ oid messageHeadline associatedPullRequests(first:1){ nodes{ number title url } } } } } } } }'
             CURSOR=""
             REACHED=false
             while :; do
-              RESPONSE="$(gh api graphql -f query="$QUERY" -F owner="$REPO_OWNER" -F repo="$REPO_NAME" -F oid="$GITHUB_SHA" -F count:=100 -f cursor="$CURSOR")"
+              RESPONSE="$(gh api graphql -f query="$QUERY" -F owner="$REPO_OWNER" -F repo="$REPO_NAME" -F oid="$GITHUB_SHA" -f cursor="$CURSOR")"
               echo "$RESPONSE" \
                 | jq -r '.data.repository.object.history.nodes[] | [.oid, .messageHeadline, (.associatedPullRequests.nodes[0].number // ""), (.associatedPullRequests.nodes[0].title // ""), (.associatedPullRequests.nodes[0].url // "")] | @tsv' \
                 >> /tmp/krate-nodes.tsv
               if [ -n "${OLDEST}" ]; then
-                grep -qxF -- "${OLDEST}" /tmp/krate-nodes.tsv && REACHED=true
+                # OLDEST is a bare SHA; the TSV's first column is the oid, so
+                # compare against column 1 (a bare-SHA grep can never match a
+                # full TSV line and pagination would never stop early).
+                cut -f1 /tmp/krate-nodes.tsv | grep -qxF -- "${OLDEST}" && REACHED=true
               fi
               HAS_NEXT="$(echo "$RESPONSE" | jq -r '.data.repository.object.history.pageInfo.hasNextPage')"
               CURSOR="$(echo "$RESPONSE" | jq -r '.data.repository.object.history.pageInfo.endCursor')"
