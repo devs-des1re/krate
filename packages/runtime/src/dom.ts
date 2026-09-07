@@ -70,13 +70,6 @@ export function clearNodes(start: Node, end: Node): void {
   }
 }
 
-/** Coerce a value to a DOM node for insertion. */
-function toNode(value: unknown): Node | null {
-  if (value == null || value === false || value === true) return null;
-  if (value instanceof Node) return value;
-  return document.createTextNode(String(value));
-}
-
 /**
  * Insert content into a dynamic region delimited by two <!--k--> comment markers.
  * The start marker is located by the caller (comment-based slot lookup); the

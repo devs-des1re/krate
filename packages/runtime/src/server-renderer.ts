@@ -46,8 +46,6 @@ interface ServerManifest {
 interface CacheEntry {
   html: string;
   timestamp: number;
-  headHTML?: string;
-  scriptHTML?: string;
 }
 
 interface RenderRequest {
@@ -68,8 +66,6 @@ type CacheStatus = "hit" | "stale" | "miss";
 interface RenderResponse {
   html: string;
   status: number;
-  headHTML?: string;
-  scriptHTML?: string;
   redirect?: string;
   notFound?: boolean;
   cached?: boolean;
@@ -147,8 +143,6 @@ class ISRCache {
         this.cache.set(e.key, {
           html: e.html,
           timestamp: typeof e.timestamp === "number" ? e.timestamp : Date.now(),
-          headHTML: e.headHTML,
-          scriptHTML: e.scriptHTML,
         });
       }
     }
@@ -271,22 +265,15 @@ async function renderFresh(page: ManifestPage, req: RenderRequest): Promise<Rend
     const jsxNode = Component(buildProps(req));
     const html = renderToString(jsxNode);
 
-    const headHTML = extractHeadHTML(html);
-    const scriptHTML = extractScriptHTML(html);
-
     const response: RenderResponse = {
       html,
       status: 200,
-      headHTML,
-      scriptHTML,
     };
 
     if (page.mode === "isr") {
       isrCache.set(variantKey(req), {
         html,
         timestamp: Date.now(),
-        headHTML,
-        scriptHTML,
       });
       scheduleIsrPersist();
     }
@@ -340,8 +327,6 @@ async function renderPage(req: RenderRequest): Promise<RenderResponse> {
       return {
         html: cached.html,
         status: 200,
-        headHTML: cached.headHTML,
-        scriptHTML: cached.scriptHTML,
         cached: true,
         cacheStatus: "hit",
       };
@@ -355,8 +340,6 @@ async function renderPage(req: RenderRequest): Promise<RenderResponse> {
       return {
         html: cached.html,
         status: 200,
-        headHTML: cached.headHTML,
-        scriptHTML: cached.scriptHTML,
         cached: true,
         cacheStatus: "stale",
       };
@@ -506,16 +489,6 @@ async function renderPageRegion(page: ManifestPage, id: string, req: RenderReque
 function extractTitle(html: string): string {
   const match = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
   return match ? match[1].trim() : "";
-}
-
-function extractHeadHTML(html: string): string {
-  const match = html.match(/<!--head-start-->(.*?)<!--head-end-->/s);
-  return match ? match[1] : "";
-}
-
-function extractScriptHTML(html: string): string {
-  const match = html.match(/<!--script-start-->(.*?)<!--script-end-->/s);
-  return match ? match[1] : "";
 }
 
 // ── HTTP Server ──────────────────────────────────────────────────────────────

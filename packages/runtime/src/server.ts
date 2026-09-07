@@ -259,32 +259,3 @@ export function SyntaxHighlight(props: { lang?: string; children?: any }): JSXNo
   const cls = lang ? `chroma language-${lang}` : "chroma";
   return raw(`<pre class="chroma"><code class="${escapeHTML(cls)}">${escapeHTML(code)}</code></pre>`);
 }
-
-// ── Data Fetching (server-side) ───────────────────────────────────────────────
-
-export interface GetServerSidePropsContext {
-  params?: Record<string, string>;
-  query?: Record<string, string>;
-  req: {
-    url: string;
-    method: string;
-    headers: Record<string, string>;
-  };
-  res: {
-    statusCode: number;
-    setHeader(name: string, value: string): void;
-  };
-}
-
-export interface GetServerSidePropsResult<P> {
-  props: P;
-  redirect?: { destination: string; permanent?: boolean };
-  notFound?: true;
-}
-
-export interface GetStaticPropsResult<P> {
-  props: P;
-  revalidate?: number;
-  redirect?: { destination: string; permanent?: boolean };
-  notFound?: true;
-}
