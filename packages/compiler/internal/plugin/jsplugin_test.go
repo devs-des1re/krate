@@ -63,6 +63,29 @@ export default {
 	}
 }
 
+func TestJSPluginAfterMarkdownParseModifiesHTML(t *testing.T) {
+	root, outDir, cfg := writeTestPlugin(t, `
+export default {
+  name: "test-plugin",
+  order: 10,
+  hooks: {
+    AfterMarkdownParse(ctx, options, krate) {
+      return { html: "<section>" + ctx.html + "</section>" };
+    },
+  },
+};
+`)
+
+	ctx := &MarkdownHookCtx{Page: "docs/readme.md", HTML: "<p>parsed</p>", Route: "docs/readme"}
+	if err := RunCommunityPlugins("AfterMarkdownParse", []config.PluginConfig{cfg}, root, outDir, ctx); err != nil {
+		t.Fatalf("RunCommunityPlugins: %v", err)
+	}
+
+	if want := "<section><p>parsed</p></section>"; ctx.HTML != want {
+		t.Errorf("HTML = %q, want %q", ctx.HTML, want)
+	}
+}
+
 func TestJSPluginAfterRenderModifiesContext(t *testing.T) {
 	root, outDir, cfg := writeTestPlugin(t, `
 export default {

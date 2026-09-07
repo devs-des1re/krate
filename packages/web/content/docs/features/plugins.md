@@ -70,11 +70,15 @@ Community plugins can also be **Go programs** run as a subprocess via HashiCorp
 module.exports = function () {
   return {
     name: "my-plugin",
+    module: (typeof import.meta !== 'undefined' && import.meta.url) ? import.meta.url : '',
     runtime: "go",
     binaries: { "linux-amd64": "bin/my-plugin-linux-amd64" },
   };
 };
 ```
+
+`module` points at the descriptor module itself so the `binaries` paths resolve
+against the package root.
 
 Go plugins are trusted dependencies and run with full subprocess access. They
 can edit the parsed AST (`ctx.Program` is a live `*ast.Program`), and their
@@ -104,7 +108,7 @@ export default defineConfig({
 
 Each factory returns a **serializable descriptor**: `{ name, order, options }`
 (built-ins), `{ name, order, module, options }` (JS community plugins), or
-`{ name, order, runtime: "go", hooks, binaries }` (Go plugins).
+`{ name, order, module, runtime: "go", hooks, binaries }` (Go plugins).
 
 ## Built-in plugins
 

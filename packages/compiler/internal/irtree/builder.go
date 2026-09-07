@@ -2272,9 +2272,80 @@ func (b *builder) collectSignalDecls(body []ast.Stmt) []SignalDecl {
 			Initial:     initial,
 			IsString:    isStr,
 			InitialExpr: d.Initial,
+			RawInit:     signalRawInit(d.Initial, initial, b.sigMap(), b.localProps),
 		})
 	}
 	return decls
+}
+
+// signalRawInit decides whether a signal initializer must be emitted verbatim
+// rather than const-folded. evalConstWithSignals returns "" for non-constant
+// expressions (calls like Math.random(), Date.now(), or unknown identifiers).
+// Dropping those would hydrate the signal to undefined even though the client
+// should evaluate the real expression. This returns the JS source of the
+// initializer when it's a genuine runtime expression we can't fold, and ""
+// otherwise (so newhydrate emits the folded literal).
+func signalRawInit(expr ast.Expr, folded string, signals map[string]ast.Expr, props map[string]string) string {
+	if expr == nil {
+		return ""
+	}
+	// If the expression folded to a usable literal, prefer it.
+	if folded != "" {
+		return ""
+	}
+	// A literal that folded to "" is a null/empty sentinel — keep that behavior.
+	if lit, ok := expr.(*ast.Literal); ok {
+		_ = lit
+		return ""
+	}
+	// Signals resolve through the signals map (folded), props too. A bare
+	// identifier that isn't resolvable would reference an undefined global at
+	// runtime — leave it dropped rather than emit a broken reference.
+	if id, ok := expr.(*ast.Identifier); ok {
+		_ = id
+		return ""
+	}
+	// Resource getters and member access on resources are SSR-sentinels.
+	if isResourceSentinelExpr(expr, signals) {
+		return ""
+	}
+	// Remaining expressions (calls, member access on non-resources, binary
+	// expressions with unknowns, etc.) are real runtime values; emit them so
+	// the client evaluates them at hydration time.
+	return generateExprJS(expr, signals)
+}
+
+// isResourceSentinelExpr reports whether an expression is a resource access or
+// resource getter call whose value is intentionally unresolved during SSR.
+func isResourceSentinelExpr(expr ast.Expr, signals map[string]ast.Expr) bool {
+	if expr == nil {
+		return false
+	}
+	switch e := expr.(type) {
+	case *ast.CallExpr:
+		if id, ok := e.Callee.(*ast.Identifier); ok {
+			if initial, ok := signals[id.Name]; ok && isResourceSentinel(initial) {
+				return true
+			}
+		}
+		return false
+	case *ast.Identifier:
+		if e.Name == "__krate_resource__" {
+			return true
+		}
+		if initial, ok := signals[e.Name]; ok {
+			return isResourceSentinel(initial)
+		}
+		return false
+	case *ast.MemberExpr:
+		if id, ok := e.Object.(*ast.Identifier); ok {
+			if initial, ok := signals[id.Name]; ok && isResourceSentinel(initial) {
+				return true
+			}
+		}
+		return false
+	}
+	return false
 }
 
 // collectRefObjectVars returns the set of local variable names bound to a

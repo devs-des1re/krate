@@ -6,15 +6,15 @@ A community Krate plugin written in Go, demonstrating:
 - The `BeforeBuild`, `AfterParse` (editing the live AST), and `AfterRender`
   build hooks.
 - The request-time `ServeRequest` and `ServeResponse` serve hooks.
-- A static npm-style descriptor (`index.js`) that reports `runtime: "go"` and
-  per-platform binaries in `bin/`.
+- A static npm-style descriptor (`index.js`) that reports `runtime: "go"`, its
+  own `module` URL, and per-platform binaries in `bin/`.
 
 ## Layout
 
 ```
 main.go     Plugin source; calls plug.Serve("krate-plugin-demo-go", plug.Hooks{...})
 go.mod      Standalone module (replaces github.com/kratejs/krate/packages/compiler to the local SDK)
-index.js    Descriptor factory Krate runs to discover runtime + binaries
+index.js    Descriptor factory Krate runs to discover runtime, module, + binaries
 bin/        Per-platform plugin binaries (built, not committed)
 ```
 

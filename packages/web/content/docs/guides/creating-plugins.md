@@ -237,13 +237,17 @@ Version semantics follow Go's rules:
 
 Build one binary per platform and ship them in an npm package. The package's
 `index.js` is a **static descriptor factory** that reports the `runtime` and
-the per-platform binary paths (resolved relative to the package root):
+the per-platform binary paths (resolved relative to the package root). Set
+`module` to the manifest's own URL so Krate can resolve those relative paths
+(`import.meta.url` is a `file://` URL in ESM; the compiler converts it to a
+filesystem path):
 
 ```javascript
 module.exports = function () {
   return {
     name: 'my-plugin',
     order: 10,
+    module: (typeof import.meta !== 'undefined' && import.meta.url) ? import.meta.url : '',
     runtime: 'go',
     hooks: { AfterRender: null, ServeRequest: null, ServeResponse: null },
     binaries: {

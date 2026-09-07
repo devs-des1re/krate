@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 
 	"github.com/kratejs/krate/packages/compiler/internal/config"
 	"github.com/kratejs/krate/packages/compiler/internal/plugin"
@@ -73,6 +74,15 @@ func wirePluginServeHandlers(root string, cfg *config.Config, next http.Handler)
 			copyHeaders(w.Header(), cap.header)
 			for k, v := range resp.Headers {
 				w.Header().Set(k, v)
+			}
+			// The buffered response may carry a stale Content-Length from the
+			// static-file chain; a plugin that rewrites the body changes its
+			// length, so reconcile the header with what we actually write to
+			// avoid ERR_CONTENT_LENGTH_MISMATCH.
+			if resp.Body != "" {
+				w.Header().Set("Content-Length", strconv.Itoa(len(resp.Body)))
+			} else {
+				w.Header().Del("Content-Length")
 			}
 			w.WriteHeader(resp.Status)
 			if resp.Body != "" {

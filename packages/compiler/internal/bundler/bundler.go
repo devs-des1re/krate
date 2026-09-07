@@ -39,14 +39,15 @@ type CSSModuleInfo struct {
 }
 
 type Bundle struct {
-	EntryPath   string
-	Modules     []*Module
-	CSS         string
-	CSSModules  map[string]*CSSModuleInfo
-	AssetFiles  map[string]string // resolved source path → hashed site URL (/assets/…)
-	WorkerFiles map[string]string // worker source path → hashed site URL (/workers/…)
-	WorkerEsm   map[string]bool   // worker source path → true when built with `type: 'module'`
-	Frontmatter map[string]string // .mdx frontmatter, if any
+	EntryPath      string
+	Modules        []*Module
+	CSS            string
+	CSSModules     map[string]*CSSModuleInfo
+	AssetFiles     map[string]string // resolved source path → hashed site URL (/assets/…)
+	WorkerFiles    map[string]string // worker source path → hashed site URL (/workers/…)
+	WorkerEsm      map[string]bool   // worker source path → true when built with `type: 'module'`
+	DynImportFiles map[string]string // dynamic-import source path → hashed site URL (/chunks/…)
+	Frontmatter    map[string]string // .mdx frontmatter, if any
 }
 
 type Bundler struct {
@@ -58,6 +59,7 @@ type Bundler struct {
 	assets            map[string]string // resolved source path → hashed site URL
 	workers           map[string]string // worker source path → hashed site URL (/workers/…)
 	workerEsm         map[string]bool   // worker source path → built as ES module
+	dynImports        map[string]string // dynamic-import source path → hashed site URL (/chunks/…)
 	frontmatter       map[string]string // from .mdx frontmatter
 	emitReact         bool
 	pathAliases       []pathAlias
@@ -98,11 +100,12 @@ var reactNames = map[string]string{
 
 func New(root string) *Bundler {
 	return &Bundler{
-		root:      root,
-		seen:      make(map[string]bool),
-		assets:    make(map[string]string),
-		workers:   make(map[string]string),
-		workerEsm: make(map[string]bool),
+		root:       root,
+		seen:       make(map[string]bool),
+		assets:     make(map[string]string),
+		workers:    make(map[string]string),
+		workerEsm:  make(map[string]bool),
+		dynImports: make(map[string]string),
 	}
 }
 
@@ -175,19 +178,25 @@ func (b *Bundler) Bundle(entry string) (*Bundle, error) {
 	// to the hashed /workers/… URL the worker is emitted at.
 	b.rewriteWorkerRefs()
 
+	// Rewrite `import('./x.ts')` to the hashed /chunks/… URL the module is
+	// emitted at, so dynamic imports are reachable in the built site instead of
+	// pointing at a stray source file.
+	b.rewriteDynamicImportRefs()
+
 	if err := b.CheckCompositionRules(); err != nil {
 		return nil, err
 	}
 
 	return &Bundle{
-		EntryPath:   entry,
-		Modules:     b.order,
-		CSS:         strings.Join(b.css, "\n"),
-		CSSModules:  b.cssModules,
-		AssetFiles:  b.assets,
-		WorkerFiles: b.workers,
-		WorkerEsm:   b.workerEsm,
-		Frontmatter: b.frontmatter,
+		EntryPath:      entry,
+		Modules:        b.order,
+		CSS:            strings.Join(b.css, "\n"),
+		CSSModules:     b.cssModules,
+		AssetFiles:     b.assets,
+		WorkerFiles:    b.workers,
+		WorkerEsm:      b.workerEsm,
+		DynImportFiles: b.dynImports,
+		Frontmatter:    b.frontmatter,
 	}, nil
 }
 
@@ -1797,6 +1806,279 @@ func workerOptionsModuleStyle(args []ast.Expr) bool {
 // resolveWorkerPath resolves a Worker argument target to an absolute source
 // path, appending common source extensions when the literal has none.
 func resolveWorkerPath(importer, candidate, root string) string {
+	abs := candidate
+	if !filepath.IsAbs(abs) {
+		abs = filepath.Join(filepath.Dir(importer), abs)
+		if !filepath.IsAbs(abs) {
+			abs = filepath.Join(root, abs)
+		}
+	}
+	abs = filepath.Clean(abs)
+	if fileExists(abs) {
+		return abs
+	}
+	for _, ext := range []string{".ts", ".tsx", ".js", ".jsx"} {
+		if fileExists(abs + ext) {
+			return abs + ext
+		}
+	}
+	return ""
+}
+
+// dynamicImportSourceExts are the source extensions a dynamic `import()`
+// target may have. Anything else (css, assets, json, bare packages) is left
+// untouched so we never rewrite an import to a chunk we can't build.
+var dynamicImportSourceExts = map[string]bool{".ts": true, ".tsx": true, ".js": true, ".jsx": true}
+
+// rewriteDynamicImportRefs scans every bundled module for a dynamic
+// `import('<spec>')` whose specifier resolves to a real source file. The target
+// is registered as a chunk (emitted at /chunks/<name>-<hash>.js) and the import
+// argument is rewritten to that URL, so the built site fetches a bundled module
+// instead of a stray source file (which would 404 or be unreachable).
+func (b *Bundler) rewriteDynamicImportRefs() {
+	for _, mod := range b.order {
+		if mod.Program == nil {
+			continue
+		}
+		for _, stmt := range mod.Program.Body {
+			rewriteDynamicImportStmt(stmt, b, mod.Path)
+		}
+	}
+}
+
+func rewriteDynamicImportStmt(stmt ast.Stmt, b *Bundler, importer string) {
+	if stmt == nil {
+		return
+	}
+	switch s := stmt.(type) {
+	case *ast.ReturnStmt:
+		s.Value = rewriteDynamicImportExpr(s.Value, b, importer)
+	case *ast.VarStmt:
+		for _, decl := range s.Decls {
+			if decl.Init != nil {
+				decl.Init = rewriteDynamicImportExpr(decl.Init, b, importer)
+			}
+		}
+	case *ast.ExprStmt:
+		s.Expression = rewriteDynamicImportExpr(s.Expression, b, importer)
+	case *ast.FnDecl:
+		for _, p := range s.Params {
+			if p.Default != nil {
+				p.Default = rewriteDynamicImportExpr(p.Default, b, importer)
+			}
+		}
+		for _, body := range s.Body {
+			rewriteDynamicImportStmt(body, b, importer)
+		}
+	case *ast.ExportStmt:
+		if s.Declaration != nil {
+			rewriteDynamicImportStmt(s.Declaration, b, importer)
+		}
+	case *ast.IfStmt:
+		s.Test = rewriteDynamicImportExpr(s.Test, b, importer)
+		rewriteDynamicImportStmts(s.Consequent, b, importer)
+		rewriteDynamicImportStmts(s.Alternate, b, importer)
+	case *ast.BlockStmt:
+		rewriteDynamicImportStmts(s.Body, b, importer)
+	case *ast.ForStmt:
+		if s.Init != nil {
+			rewriteDynamicImportStmt(s.Init, b, importer)
+		}
+		s.Test = rewriteDynamicImportExpr(s.Test, b, importer)
+		s.Update = rewriteDynamicImportExpr(s.Update, b, importer)
+		rewriteDynamicImportStmts(s.Body, b, importer)
+	case *ast.WhileStmt:
+		s.Test = rewriteDynamicImportExpr(s.Test, b, importer)
+		rewriteDynamicImportStmts(s.Body, b, importer)
+	case *ast.DoWhileStmt:
+		s.Test = rewriteDynamicImportExpr(s.Test, b, importer)
+		rewriteDynamicImportStmts(s.Body, b, importer)
+	case *ast.SwitchStmt:
+		s.Discriminant = rewriteDynamicImportExpr(s.Discriminant, b, importer)
+		for _, c := range s.Cases {
+			c.Test = rewriteDynamicImportExpr(c.Test, b, importer)
+			rewriteDynamicImportStmts(c.Body, b, importer)
+		}
+	case *ast.TryStmt:
+		rewriteDynamicImportStmts(s.Body, b, importer)
+		if s.Catch != nil {
+			rewriteDynamicImportStmts(s.Catch.Body, b, importer)
+		}
+		rewriteDynamicImportStmts(s.Finally, b, importer)
+	case *ast.ThrowStmt:
+		s.Value = rewriteDynamicImportExpr(s.Value, b, importer)
+	}
+}
+
+func rewriteDynamicImportStmts(stmts []ast.Stmt, b *Bundler, importer string) {
+	for _, stmt := range stmts {
+		rewriteDynamicImportStmt(stmt, b, importer)
+	}
+}
+
+// rewriteDynamicImportExpr walks an expression, rewriting `import(<literal>)`
+// arguments. It recurses through every expression position so a dynamic import
+// can appear anywhere (effect bodies, event handlers, JSX expr containers, …).
+func rewriteDynamicImportExpr(expr ast.Expr, b *Bundler, importer string) ast.Expr {
+	if expr == nil {
+		return nil
+	}
+	switch e := expr.(type) {
+	case *ast.DynamicImport:
+		rewriteDynamicImportCallee(&e.Arg, b, importer)
+		return e
+	case *ast.Identifier:
+		return e
+	case *ast.MemberExpr:
+		e.Object = rewriteDynamicImportExpr(e.Object, b, importer)
+		if e.Computed {
+			e.Property = rewriteDynamicImportExpr(e.Property, b, importer)
+		}
+		return e
+	case *ast.CallExpr:
+		e.Callee = rewriteDynamicImportExpr(e.Callee, b, importer)
+		for i, arg := range e.Args {
+			e.Args[i] = rewriteDynamicImportExpr(arg, b, importer)
+		}
+		return e
+	case *ast.NewExpr:
+		e.Callee = rewriteDynamicImportExpr(e.Callee, b, importer)
+		for i, arg := range e.Args {
+			e.Args[i] = rewriteDynamicImportExpr(arg, b, importer)
+		}
+		return e
+	case *ast.AwaitExpr:
+		e.Arg = rewriteDynamicImportExpr(e.Arg, b, importer)
+		return e
+	case *ast.UnaryExpr:
+		e.Arg = rewriteDynamicImportExpr(e.Arg, b, importer)
+		return e
+	case *ast.BinaryExpr:
+		e.Left = rewriteDynamicImportExpr(e.Left, b, importer)
+		e.Right = rewriteDynamicImportExpr(e.Right, b, importer)
+		return e
+	case *ast.ConditionalExpr:
+		e.Test = rewriteDynamicImportExpr(e.Test, b, importer)
+		e.Consequent = rewriteDynamicImportExpr(e.Consequent, b, importer)
+		e.Alternate = rewriteDynamicImportExpr(e.Alternate, b, importer)
+		return e
+	case *ast.TypeAssertion:
+		e.Expr = rewriteDynamicImportExpr(e.Expr, b, importer)
+		return e
+	case *ast.ThisExpr:
+		return e
+	case *ast.ArrowFn:
+		for i, p := range e.Params {
+			if p.Default != nil {
+				e.Params[i].Default = rewriteDynamicImportExpr(p.Default, b, importer)
+			}
+		}
+		rewriteDynamicImportStmts(e.Body, b, importer)
+		return e
+	case *ast.ArrayExpr:
+		for i, el := range e.Elements {
+			e.Elements[i] = rewriteDynamicImportExpr(el, b, importer)
+		}
+		return e
+	case *ast.ObjectExpr:
+		for _, prop := range e.Properties {
+			if prop.Value != nil {
+				prop.Value = rewriteDynamicImportExpr(prop.Value, b, importer)
+			}
+		}
+		return e
+	case *ast.TemplateExpr:
+		for i, p := range e.Parts {
+			e.Parts[i] = rewriteDynamicImportExpr(p, b, importer)
+		}
+		return e
+	case *ast.JSXElement:
+		if e.Opening != nil {
+			for _, attr := range e.Opening.Attributes {
+				if attr.Value != nil {
+					attr.Value = rewriteDynamicImportExpr(attr.Value, b, importer)
+				}
+			}
+		}
+		for i, child := range e.Children {
+			e.Children[i] = rewriteDynamicImportJSXChild(child, b, importer)
+		}
+		return e
+	case *ast.JSXFragment:
+		for i, child := range e.Children {
+			e.Children[i] = rewriteDynamicImportJSXChild(child, b, importer)
+		}
+		return e
+	}
+	return expr
+}
+
+func rewriteDynamicImportJSXChild(child ast.JSXChild, b *Bundler, importer string) ast.JSXChild {
+	switch c := child.(type) {
+	case *ast.JSXExprContainer:
+		c.Expression = rewriteDynamicImportExpr(c.Expression, b, importer)
+		return c
+	case *ast.JSXElementChild:
+		c.Element = rewriteDynamicImportExpr(c.Element, b, importer).(*ast.JSXElement)
+		return c
+	case *ast.JSXFragmentChild:
+		c.Fragment = rewriteDynamicImportExpr(c.Fragment, b, importer).(*ast.JSXFragment)
+		return c
+	}
+	return child
+}
+
+// rewriteDynamicImportCallee resolves a dynamic import target to a registered
+// chunk URL and replaces the argument with the URL literal.
+func rewriteDynamicImportCallee(arg *ast.Expr, b *Bundler, importer string) {
+	if arg == nil || *arg == nil {
+		return
+	}
+	candidate := ""
+	switch a := (*arg).(type) {
+	case *ast.Literal:
+		if a.Kind == ast.StringLit {
+			candidate = a.Value
+		}
+	case *ast.TemplateExpr:
+		if len(a.Parts) == 1 {
+			if lit, ok := a.Parts[0].(*ast.Literal); ok && lit.Kind == ast.StringLit {
+				candidate = lit.Value
+			}
+		}
+	}
+	if candidate == "" {
+		return
+	}
+	abs := resolveDynamicImportPath(importer, candidate, b.root)
+	if abs == "" {
+		return
+	}
+	ext := strings.ToLower(filepath.Ext(abs))
+	if !dynamicImportSourceExts[ext] {
+		return
+	}
+	base := filepath.Base(abs)
+	name := strings.TrimSuffix(base, filepath.Ext(base))
+	data, err := os.ReadFile(abs)
+	if err != nil {
+		return
+	}
+	url := "/chunks/" + name + "-" + hashBytes(data) + ".js"
+	if existing, ok := b.dynImports[abs]; ok {
+		url = existing
+	} else {
+		b.dynImports[abs] = url
+	}
+	// Keep the argument literal for single-expression imports so
+	// `import(...)` still reads as a module specifier; a plain string literal
+	// is what we produce for worker/asset rewrites as well.
+	*arg = &ast.Literal{Kind: ast.StringLit, Value: url}
+}
+
+// resolveDynamicImportPath resolves a dynamic import specifier to an absolute
+// source path, appending common source extensions when the literal has none.
+func resolveDynamicImportPath(importer, candidate, root string) string {
 	abs := candidate
 	if !filepath.IsAbs(abs) {
 		abs = filepath.Join(filepath.Dir(importer), abs)

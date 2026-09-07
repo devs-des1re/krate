@@ -20,6 +20,10 @@ module.exports = function() {
   return {
     name: "demo-go",
     order: 10,
+    // Points Krate at this manifest module itself so relative binary paths can
+    // be resolved against the package root. In ESM contexts import.meta.url is
+    // a file:// URL; the compiler converts it to a filesystem path.
+    module: (typeof import.meta !== "undefined" && import.meta.url) ? import.meta.url : "",
     runtime: "go",
     hooks: { BeforeBuild: null, AfterParse: null, AfterRender: null, ServeRequest: null, ServeResponse: null },
     binaries: {

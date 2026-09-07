@@ -423,6 +423,53 @@ func TestPathAliasStruct(t *testing.T) {
 	}
 }
 
+func TestPathAliasesObjectForm(t *testing.T) {
+	var pas PathAliases
+	if err := json.Unmarshal([]byte(`{ "@/*": ["./src/*"], "@/utils": "./src/utils" }`), &pas); err != nil {
+		t.Fatal(err)
+	}
+	if len(pas) != 2 {
+		t.Fatalf("expected 2 aliases, got %d", len(pas))
+	}
+	got := map[string]PathAlias{}
+	for _, a := range pas {
+		got[a.Prefix] = a
+	}
+	if a, ok := got["@/*"]; !ok || len(a.Targets) != 1 || a.Targets[0] != "./src/*" {
+		t.Errorf("unexpected @/* alias: %+v", got["@/*"])
+	}
+	if a, ok := got["@/utils"]; !ok || len(a.Targets) != 1 || a.Targets[0] != "./src/utils" {
+		t.Errorf("string value not wrapped in array: %+v", got["@/utils"])
+	}
+}
+
+func TestPathAliasesArrayForm(t *testing.T) {
+	var pas PathAliases
+	if err := json.Unmarshal([]byte(`[{"prefix":"@/*","targets":["./src/*"]},{"prefix":"@x","targets":["./x"]}]`), &pas); err != nil {
+		t.Fatal(err)
+	}
+	if len(pas) != 2 || pas[0].Prefix != "@/*" || pas[1].Targets[0] != "./x" {
+		t.Errorf("array form decode failed: %+v", pas)
+	}
+}
+
+func TestPathAliasesInvalidValue(t *testing.T) {
+	var pas PathAliases
+	if err := json.Unmarshal([]byte(`{ "@/*": 42 }`), &pas); err == nil {
+		t.Error("expected error for non-string non-array value")
+	}
+}
+
+func TestPathAliasesInsideConfig(t *testing.T) {
+	var cfg Config
+	if err := json.Unmarshal([]byte(`{ "pathAliases": { "@/*": "./src/*" } }`), &cfg); err != nil {
+		t.Fatalf("config-level decode failed: %v", err)
+	}
+	if len(cfg.PathAliases) != 1 || cfg.PathAliases[0].Prefix != "@/*" {
+		t.Errorf("config pathAliases decode failed: %+v", cfg.PathAliases)
+	}
+}
+
 func TestRedirectStruct(t *testing.T) {
 	r := Redirect{
 		Source:      "/old",

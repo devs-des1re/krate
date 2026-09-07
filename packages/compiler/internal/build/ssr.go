@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/evanw/esbuild/pkg/api"
 )
 
 // SSRServer manages the Node.js SSR renderer process.
@@ -71,8 +73,13 @@ func (s *SSRServer) Start() error {
 	s.manifest = &ServerManifest{}
 	json.Unmarshal(data, s.manifest)
 
-	runtimeCmd := "npx"
-	runtimeArgs := []string{"tsx", rendererPath}
+	runtimeCmd := "node"
+	runtimeArgs := []string{rendererPath}
+	if strings.HasSuffix(strings.ToLower(rendererPath), ".ts") {
+		// Legacy path: no staged driver, run the TS source through tsx.
+		runtimeCmd = "npx"
+		runtimeArgs = []string{"tsx", rendererPath}
+	}
 
 	env := os.Environ()
 	env = append(env,
@@ -303,14 +310,27 @@ func (s *SSRServer) FindPageForRoute(urlPath string) (*ManifestPage, map[string]
 }
 
 func (s *SSRServer) findRendererScript() string {
+	// Prefer the bundled driver staged into dist by the build (runs with plain
+	// node, no npx/tsx dependency at serve time).
+	staged := filepath.Join(s.root, "dist", ".krate", "server-renderer.mjs")
+	if _, err := os.Stat(staged); err == nil {
+		abs, _ := filepath.Abs(staged)
+		return abs
+	}
+	return findServerRendererSource(s.root)
+}
+
+// findServerRendererSource locates the server-renderer source file in the
+// @krate/runtime package, searching the monorepo and install layouts.
+func findServerRendererSource(root string) string {
 	// Search for the server-renderer file in the runtime package
 	candidates := []string{
 		// Monorepo: packages/runtime/src/server-renderer.ts
-		filepath.Join(s.root, "packages", "runtime", "src", "server-renderer.ts"),
+		filepath.Join(root, "packages", "runtime", "src", "server-renderer.ts"),
 		// Monorepo from compiler dir
-		filepath.Join(s.root, "..", "runtime", "src", "server-renderer.ts"),
+		filepath.Join(root, "..", "runtime", "src", "server-renderer.ts"),
 		// npm installed
-		filepath.Join(s.root, "node_modules", "@krate", "runtime", "src", "server-renderer.ts"),
+		filepath.Join(root, "node_modules", "@krate", "runtime", "src", "server-renderer.ts"),
 		// Go binary relative
 		filepath.Join(filepath.Dir(os.Args[0]), "..", "runtime", "src", "server-renderer.ts"),
 	}
@@ -323,7 +343,7 @@ func (s *SSRServer) findRendererScript() string {
 	}
 
 	// Walk up looking for packages/runtime
-	dir := s.root
+	dir := root
 	for i := 0; i < 5; i++ {
 		candidate := filepath.Join(dir, "packages", "runtime", "src", "server-renderer.ts")
 		if _, err := os.Stat(candidate); err == nil {
@@ -338,6 +358,58 @@ func (s *SSRServer) findRendererScript() string {
 	}
 
 	return ""
+}
+
+// stageServerRenderer bundles the @krate/runtime server-renderer entrypoint into
+// a standalone node-runnable ESM driver at <outDir>/.krate/server-renderer.mjs.
+// The driver bundles the SSR runtime (server.ts) so `krate serve` only needs a
+// plain `node <driver>` process instead of `npx tsx <source>.ts`. Returns the
+// absolute staged path, or "" if the source couldn't be located or bundled.
+func stageServerRenderer(root, outDir string) string {
+	source := findServerRendererSource(root)
+	if source == "" {
+		return ""
+	}
+
+	stageDir := filepath.Join(outDir, ".krate")
+	if err := os.MkdirAll(stageDir, 0755); err != nil {
+		return ""
+	}
+	outPath := filepath.Join(stageDir, "server-renderer.mjs")
+
+	result := api.Build(api.BuildOptions{
+		AbsWorkingDir: root,
+		Bundle:        true,
+		Format:        api.FormatESModule,
+		Platform:      api.PlatformNode,
+		Outfile:       outPath,
+		Write:         true,
+		LogLevel:      api.LogLevelSilent,
+		Stdin: &api.StdinOptions{
+			Loader:     api.LoaderTS,
+			Contents:   readFileString(source),
+			ResolveDir: filepath.Dir(source),
+			Sourcefile: filepath.Base(source),
+		},
+	})
+
+	if len(result.Errors) > 0 {
+		for _, e := range result.Errors {
+			fmt.Fprintf(os.Stderr, "  %sSSR renderer bundle error:%s %s\n", cYellow, cReset, e.Text)
+		}
+		return ""
+	}
+
+	abs, _ := filepath.Abs(outPath)
+	return abs
+}
+
+func readFileString(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return ""
+	}
+	return string(data)
 }
 
 func matchRoute(urlPath, pattern string) (map[string]string, bool) {

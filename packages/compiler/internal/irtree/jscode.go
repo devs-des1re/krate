@@ -317,6 +317,32 @@ func renderStmtJS(stmt ast.Stmt, signals map[string]ast.Expr) string {
 		}
 		b.WriteString("}")
 		return b.String()
+	case *ast.TryStmt:
+		var b strings.Builder
+		b.WriteString("try{")
+		for _, stmt := range s.Body {
+			b.WriteString(renderStmtJS(stmt, signals))
+		}
+		b.WriteString("}")
+		if s.Catch != nil {
+			b.WriteString("catch(")
+			b.WriteString(s.Catch.Param)
+			b.WriteString("){")
+			for _, stmt := range s.Catch.Body {
+				b.WriteString(renderStmtJS(stmt, signals))
+			}
+			b.WriteString("}")
+		}
+		if len(s.Finally) > 0 {
+			b.WriteString("finally{")
+			for _, stmt := range s.Finally {
+				b.WriteString(renderStmtJS(stmt, signals))
+			}
+			b.WriteString("}")
+		}
+		return b.String()
+	case *ast.ThrowStmt:
+		return "throw " + generateExprJS(s.Value, signals) + ";"
 	default:
 		return ""
 	}

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -72,6 +73,57 @@ type PathAlias struct {
 	Targets []string `json:"targets"` // e.g. ["./src/*"]
 }
 
+// PathAliases is a []PathAlias that also unmarshals the tsconfig-style object
+// form used in krate.config.ts, e.g. `{ "@/*": ["./src/*"], "@/x": "./src/x" }`.
+// The array form (`[{ prefix, targets }]`) remains supported.
+type PathAliases []PathAlias
+
+func (p *PathAliases) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		*p = nil
+		return nil
+	}
+	switch trimmed[0] {
+	case '[':
+		var arr []PathAlias
+		if err := json.Unmarshal(data, &arr); err != nil {
+			return err
+		}
+		*p = arr
+		return nil
+	case '{':
+		var obj map[string]json.RawMessage
+		if err := json.Unmarshal(data, &obj); err != nil {
+			return err
+		}
+		var out PathAliases
+		for prefix, raw := range obj {
+			var targets []string
+			switch raw[0] {
+			case '"':
+				var s string
+				if err := json.Unmarshal(raw, &s); err != nil {
+					return err
+				}
+				targets = []string{s}
+			case '[':
+				if err := json.Unmarshal(raw, &targets); err != nil {
+					return err
+				}
+			default:
+				return fmt.Errorf("pathAliases value for %q must be a string or string[]", prefix)
+			}
+			if len(targets) > 0 {
+				out = append(out, PathAlias{Prefix: prefix, Targets: targets})
+			}
+		}
+		*p = out
+		return nil
+	}
+	return fmt.Errorf("pathAliases must be an object or an array of { prefix, targets }")
+}
+
 type Redirect struct {
 	Source      string `json:"source"`      // e.g. "/old-page"
 	Destination string `json:"destination"` // e.g. "/new-page"
@@ -114,7 +166,7 @@ type Config struct {
 	CSP         CSPConfig       `json:"csp,omitempty"`
 	Runtime     string          `json:"runtime,omitempty"`
 	SSR         SSRConfig       `json:"ssr,omitempty"`
-	PathAliases []PathAlias     `json:"pathAliases,omitempty"` // from tsconfig.json paths
+	PathAliases PathAliases     `json:"pathAliases,omitempty"` // from tsconfig.json paths or config object
 	TSBaseDir   string          `json:"tsBaseDir,omitempty"`   // baseUrl resolved to absolute path
 	Redirects   []Redirect      `json:"redirects,omitempty"`   // config-based redirects
 	Rewrites    []Rewrite       `json:"rewrites,omitempty"`    // config-based rewrites

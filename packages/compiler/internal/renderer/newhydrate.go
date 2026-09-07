@@ -84,7 +84,12 @@ func GenerateNewHydrationJS(result *EmitResult) string {
 
 		for _, s := range sig.Signals {
 			val := s.Initial
-			if s.IsString {
+			if s.RawInit != "" {
+				// Non-constant initializer (e.g. createSignal(Math.random())):
+				// emit the real expression so the client evaluates it instead of
+				// hydrating the signal to undefined.
+				val = s.RawInit
+			} else if s.IsString {
 				val = "'" + escapeJSString(val) + "'"
 			} else if isBareStringToken(val) {
 				// Resolved string initial values that weren't type-inferred as

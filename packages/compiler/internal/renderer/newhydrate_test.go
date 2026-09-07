@@ -7,6 +7,31 @@ import (
 
 // ─── Slot bindings in hydration JS ──────────────────────────────────────────
 
+func TestHydrationSignalNonConstantInitializer(t *testing.T) {
+	src := `export default function Page() {
+  const [rand, setRand] = createSignal(Math.random());
+  return <div>{rand()}</div>;
+}`
+	_, js := fullPipeline(t, src)
+	if !strings.Contains(js, "=createSignal(Math.random())") {
+		t.Errorf("expected non-constant signal initializer preserved, got:\n%s", js)
+	}
+	if strings.Contains(js, "]=createSignal();") {
+		t.Errorf("non-constant initializer dropped to undefined:\n%s", js)
+	}
+}
+
+func TestHydrationSignalConstantInitializerUnchanged(t *testing.T) {
+	src := `export default function Page() {
+  const [count, setCount] = createSignal(0);
+  return <div>{count()}</div>;
+}`
+	_, js := fullPipeline(t, src)
+	if !strings.Contains(js, "=createSignal(0)") {
+		t.Errorf("expected constant initializer still folded, got:\n%s", js)
+	}
+}
+
 func TestHydrationTextSlotBinding(t *testing.T) {
 	src := `export default function Page() {
   const [count, setCount] = createSignal(0);

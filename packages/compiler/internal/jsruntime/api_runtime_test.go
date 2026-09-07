@@ -114,6 +114,48 @@ func TestAPIRouteNotFound(t *testing.T) {
 	}
 }
 
+// TestAPIRouteHeadersInstanceNotLeaked guards against the Headers polyfill
+// copying its own _keys/_vals bookkeeping into the real header set when a
+// Headers instance is reused (e.g. Response.json(data, { headers: h })).
+func TestAPIRouteHeadersInstanceNotLeaked(t *testing.T) {
+	tmpDir := t.TempDir()
+	apiDir := filepath.Join(tmpDir, "api")
+	os.MkdirAll(apiDir, 0755)
+
+	routeCode := `
+function GET(request) {
+	var base = new Headers({ "x-custom": "1" });
+	return Response.json({ ok: true }, { headers: base });
+}
+`
+	if err := os.WriteFile(filepath.Join(apiDir, "test.js"), []byte(routeCode), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	rt := NewAPIRouteRuntime(apiDir)
+	result := rt.Execute(APIRequest{
+		URL:     "http://localhost:3000/api/test",
+		Method:  "GET",
+		Path:    "/api/test",
+		Headers: map[string]string{},
+	})
+
+	if result.Status != 200 {
+		t.Fatalf("Expected 200, got %d (%s)", result.Status, result.Error)
+	}
+	for _, internal := range []string{"_keys", "_vals"} {
+		if _, leaked := result.Headers[internal]; leaked {
+			t.Errorf("Headers internals leaked into response headers: %v", result.Headers)
+		}
+	}
+	if result.Headers["x-custom"] != "1" {
+		t.Errorf("expected x-custom header preserved, got %v", result.Headers)
+	}
+	if result.Headers["content-type"] != "application/json" {
+		t.Errorf("expected content-type application/json, got %v", result.Headers)
+	}
+}
+
 func TestAPIRoutePathTraversalRejected(t *testing.T) {
 	tmpDir := t.TempDir()
 	apiDir := filepath.Join(tmpDir, "api")

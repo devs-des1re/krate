@@ -321,3 +321,41 @@ func TestBuildDoesNotPanic(t *testing.T) {
 		t.Fatal("tree is nil")
 	}
 }
+
+func TestRenderComponentFnTryCatchFinally(t *testing.T) {
+	prog := parseProg(t, `export default function App() {
+	try {
+		run();
+		if (!ok) throw new Error('bad');
+	} catch (e) {
+		handle(e);
+	} finally {
+		cleanup();
+	}
+	return <div>done</div>;
+}`)
+	fn, ok := prog.Body[0].(*ast.ExportStmt)
+	if !ok {
+		t.Fatalf("expected ExportStmt, got %T", prog.Body[0])
+	}
+	fdecl, ok := fn.Declaration.(*ast.FnDecl)
+	if !ok {
+		t.Fatalf("expected FnDecl, got %T", fn.Declaration)
+	}
+	js := irtree.RenderComponentFnJS(fdecl)
+	if !strings.Contains(js, "try{") {
+		t.Errorf("expected try block in rendered JS:\n%s", js)
+	}
+	if !strings.Contains(js, "catch(e){") {
+		t.Errorf("expected catch block in rendered JS:\n%s", js)
+	}
+	if !strings.Contains(js, "finally{") {
+		t.Errorf("expected finally block in rendered JS:\n%s", js)
+	}
+	if !strings.Contains(js, "run()") || !strings.Contains(js, "handle(e)") || !strings.Contains(js, "cleanup()") {
+		t.Errorf("expected body statements preserved in rendered JS:\n%s", js)
+	}
+	if !strings.Contains(js, "throw ") {
+		t.Errorf("expected throw statement in rendered JS:\n%s", js)
+	}
+}

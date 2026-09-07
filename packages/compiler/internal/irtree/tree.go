@@ -223,6 +223,11 @@ type SignalDecl struct {
 	Initial     string
 	IsString    bool
 	InitialExpr ast.Expr
+	// RawInit is a JS expression source to emit as the signal's initial value
+	// when the initializer is non-constant (e.g. createSignal(Math.random())).
+	// When non-empty it takes precedence over Initial/IsString so the client
+	// evaluates the real expression instead of a dropped/undefined value.
+	RawInit string
 }
 
 // ─── ComponentNode — a single component instance in the tree ───────────────

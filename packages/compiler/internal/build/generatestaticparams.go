@@ -327,6 +327,7 @@ func (b *Builder) buildStaticParamsPage(spp staticParamsPage) (*PageResult, stri
 		return nil, "", fmt.Errorf("writing assets for %s: %w", spp.PagePath, err)
 	}
 	b.registerWorkers(bundle.WorkerFiles, bundle.WorkerEsm)
+	b.registerDynamicChunks(bundle.DynImportFiles)
 	return &PageResult{
 		Page:        spp.PagePath,
 		OutName:     spp.OutPath,

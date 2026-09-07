@@ -1,6 +1,7 @@
 package build
 
 import (
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -151,6 +152,51 @@ func TestServeHooksNoHooksConfig(t *testing.T) {
 	}
 	if body := rec.Body.String(); body != "<h1>intact</h1>" {
 		t.Errorf("body = %q, want %q (serve hooks must not wipe the response)", body, "<h1>intact</h1>")
+	}
+}
+
+// TestServeResponseContentLengthReconciled guards against the stale
+// Content-Length bug: the buffered chain may record a length that no longer
+// matches after a plugin rewrites the body, causing ERR_CONTENT_LENGTH_MISMATCH.
+// The wiring must reconcile Content-Length with the bytes actually written.
+func TestServeResponseContentLengthReconciled(t *testing.T) {
+	root := t.TempDir()
+	pluginDir := filepath.Join(root, "plugins", "js-clen")
+	os.MkdirAll(pluginDir, 0755)
+	js := `export default {
+  name: "js-clen",
+  hooks: {
+    ServeResponse(ctx, options, krate) {
+      return { status: ctx.status, body: ctx.body + "\n<!-- rewritten -->", headers: ctx.headers || {} };
+    },
+  },
+};
+`
+	if err := os.WriteFile(filepath.Join(pluginDir, "index.js"), []byte(js), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.PluginConfig{Name: "js-clen", Module: filepath.Join(pluginDir, "index.js"), Options: map[string]interface{}{}}
+
+	body := "<p>original</p>"
+	next := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Simulate a static-file handler that stamped a Content-Length before
+		// buffering; the plugin then rewrites the body to a different length.
+		w.Header().Set("Content-Length", "99999")
+		w.WriteHeader(200)
+		w.Write([]byte(body))
+	})
+
+	h := wirePluginServeHandlers(root, &config.Config{Plugins: []config.PluginConfig{cfg}}, next)
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/", nil)
+	h.ServeHTTP(rec, req)
+
+	wantLen := len(body) + len("\n<!-- rewritten -->")
+	if got := rec.Header().Get("Content-Length"); got != fmt.Sprintf("%d", wantLen) {
+		t.Errorf("Content-Length = %q, want %d (must match rewritten body)", got, wantLen)
+	}
+	if got := len(rec.Body.Bytes()); got != wantLen {
+		t.Errorf("recorded body length = %d, want %d", got, wantLen)
 	}
 }
 

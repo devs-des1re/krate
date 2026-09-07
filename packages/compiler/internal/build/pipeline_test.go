@@ -362,9 +362,16 @@ func TestBuildImageResponsive(t *testing.T) {
 		t.Fatalf("image output dir: %v", err)
 	}
 	var webpFound bool
+	// Each variant must carry a hex cache-key tag followed by a width, e.g.
+	// `<tag>_640.webp` — the "tag verification" that the emitted filenames are
+	// content-hashed (cache key) rather than unversioned.
+	tagRe := regexp.MustCompile(`^[0-9a-f]{16}_\d+\.webp$`)
 	for _, e := range entries {
 		if strings.HasSuffix(e.Name(), ".webp") {
 			webpFound = true
+			if !tagRe.MatchString(e.Name()) {
+				t.Errorf("webp variant name %q lacks 8-hex cache-key tag + width", e.Name())
+			}
 			data, err := os.ReadFile(filepath.Join(imgDir, e.Name()))
 			if err != nil {
 				t.Fatal(err)

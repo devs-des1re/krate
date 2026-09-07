@@ -174,9 +174,12 @@ async function renderPage(req: RenderRequest): Promise<RenderResponse> {
 
     // Page-level data fetching (getStaticProps/getServerSideProps) has been
     // removed; per-request data is provided by server components (@server),
-    // runtime components (@runtime), and middleware instead. The default export
-    // is rendered here with no injected page props.
+    // runtime components (@runtime), and middleware instead. Dynamic-route
+    // params and query parameters extracted by the Go server are forwarded so
+    // `({ params }) => ...` pages receive their real values at render time.
     const props: Record<string, any> = {};
+    if (req.params) props.params = req.params;
+    if (req.query) props.query = req.query;
 
     // Get the default export (the component)
     const Component = mod.default;
@@ -343,17 +346,22 @@ const server = http.createServer(async (req, res) => {
           return;
         }
 
+        // Per-request props (dynamic-route params + query) for both phases.
+        const props: Record<string, any> = {};
+        if (renderReq.params) props.params = renderReq.params;
+        if (renderReq.query) props.query = renderReq.query;
+
         // Phase 1: Render with empty props → Suspense shows fallback
         resetBoundaryCounter();
         setStreamingResolved(false);
-        const fallbackJsx = Component({});
+        const fallbackJsx = Component(props);
         const fallbackHtml = renderToString(fallbackJsx);
         res.write(fallbackHtml);
 
         // Phase 2: Re-render with resolved props (no data-fetching needed)
         resetBoundaryCounter();
         setStreamingResolved(true);
-        const resolvedJsx = Component({});
+        const resolvedJsx = Component(props);
         const resolvedHtml = renderToString(resolvedJsx);
         setStreamingResolved(false);
 

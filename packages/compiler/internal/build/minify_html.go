@@ -208,6 +208,7 @@ func removeOptionalQuotes(s string) string {
 	inTag := false
 	inAttr := false
 	attrQuote := byte(0)
+	dropQuotes := false
 
 	for i := 0; i < len(s); i++ {
 		ch := s[i]
@@ -236,22 +237,27 @@ func removeOptionalQuotes(s string) string {
 				if canDrop && !isEmpty {
 					inAttr = true
 					attrQuote = ch
+					dropQuotes = true
 					continue // skip opening quote; closing quote will be skipped too
 				}
 				if !isEmpty {
 					// Non-empty but can't drop (contains spaces, >, or =):
-					// enter attr mode to prevent premature > detection inside value
+					// keep the open+close quotes. Stay in attr mode until the
+					// closing quote so inner quote chars (e.g. CSP 'self',
+					// style '...', data URI "...") and spaces are preserved.
 					inAttr = true
 					attrQuote = ch
+					dropQuotes = false
 				}
 				// Empty value (="") — never drop quotes; dropping creates a bare name=
 				// which the HTML parser may merge with the next attribute
 				// (e.g. onerror="" onload="" → onerror=onload=)
 			} else if inAttr && ch == attrQuote {
 				inAttr = false
-				continue // skip closing quote
-			} else if inAttr && ch == ' ' {
-				inAttr = false
+				if dropQuotes {
+					continue // skip closing quote
+				}
+				// kept-quote value: fall through and write the closing quote
 			}
 		}
 

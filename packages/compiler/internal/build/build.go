@@ -72,6 +72,9 @@ type Builder struct {
 	workerMu  sync.Mutex
 	workers   map[string]string // worker source path → hashed site URL (/workers/…)
 	workerEsm map[string]bool   // worker source path → built as ES module
+
+	chunkMu sync.Mutex
+	chunks  map[string]string // dynamic-import source path → hashed site URL (/chunks/…)
 }
 
 func New(root string, cfg *config.Config) *Builder {
@@ -458,6 +461,13 @@ func (b *Builder) BuildAll() error {
 		errorCount++
 	}
 
+	// Compile and emit any registered dynamic-import chunks to /chunks/.
+	if err := b.writeDynamicChunkBundles(); err != nil {
+		fmt.Fprintf(os.Stderr, "  %sDynamic import chunk error:%s %v\n", cYellow, cReset, err)
+		failureMessages = append(failureMessages, "  chunks: "+err.Error())
+		errorCount++
+	}
+
 	if b.Cfg.PublicDir != "" {
 		if info, err := os.Stat(b.Cfg.PublicDir); err == nil && info.IsDir() {
 			copyDirToOut(b.Cfg.PublicDir, b.Cfg.OutDir)
@@ -500,6 +510,11 @@ func (b *Builder) BuildAll() error {
 	serverBundles := CompileServerBundles(results, b.Root, b.Cfg.OutDir)
 	if len(serverBundles) > 0 {
 		fmt.Printf("  %s⚡%s Compiled %d server bundles\n", cCyan, cReset, len(serverBundles))
+		// Stage the bundled SSR renderer driver so `krate serve` runs it with
+		// plain node instead of npx tsx on the TS source.
+		if staged := stageServerRenderer(b.Root, b.Cfg.OutDir); staged != "" {
+			fmt.Printf("  %s⚡%s Staged SSR renderer driver\n", cCyan, cReset)
+		}
 	}
 
 	// Compile runtime server components (*.runtime.tsx, // @runtime, runtimeDirs)
@@ -894,6 +909,7 @@ func (b *Builder) buildPage(page string) (*PageResult, string, error) {
 		return nil, "", fmt.Errorf("writing assets for %s: %w", page, err)
 	}
 	b.registerWorkers(bundle.WorkerFiles, bundle.WorkerEsm)
+	b.registerDynamicChunks(bundle.DynImportFiles)
 
 	printResult(outName, jsFile)
 
@@ -1350,6 +1366,8 @@ func findLoading(pagePath, pagesDir string) string {
 	return findLayoutFile(pagePath, pagesDir, loadingNames)
 }
 
+// findLayout returns the layout .tsx|.ts|.jsx|.js nearest to pagePath, walking
+// up from the page's directory toward pagesDir.
 func findLayout(pagePath, pagesDir string) string {
 	return findLayoutFile(pagePath, pagesDir, layoutNames)
 }
@@ -1685,6 +1703,88 @@ func (b *Builder) writeWorkerBundles() error {
 	if len(built) > 0 {
 		idx, _ := json.MarshalIndent(built, "", "  ")
 		os.WriteFile(filepath.Join(b.Cfg.OutDir, "workers.json"), idx, 0644)
+	}
+	return nil
+}
+
+// registerDynamicChunks collects dynamic-import chunk registrations from a page
+// bundle into the build-wide chunk set. Safe to call concurrently from page
+// goroutines.
+func (b *Builder) registerDynamicChunks(files map[string]string) {
+	if len(files) == 0 {
+		return
+	}
+	b.chunkMu.Lock()
+	defer b.chunkMu.Unlock()
+	if b.chunks == nil {
+		b.chunks = make(map[string]string)
+	}
+	for src, url := range files {
+		b.chunks[src] = url
+	}
+}
+
+// writeDynamicChunkBundles compiles every registered dynamic-import chunk into
+// the output directory at its hashed /chunks/… URL. Chunks are produced with
+// esbuild as ES modules (the browser's `import()` returns their namespace), with
+// their own relative imports bundled into a single browser-safe file.
+func (b *Builder) writeDynamicChunkBundles() error {
+	b.chunkMu.Lock()
+	chunks := make(map[string]string, len(b.chunks))
+	for src, url := range b.chunks {
+		chunks[src] = url
+	}
+	b.chunkMu.Unlock()
+
+	if len(chunks) == 0 {
+		return nil
+	}
+
+	for src, url := range chunks {
+		rel := strings.TrimPrefix(url, "/")
+		if rel == "" || strings.HasPrefix(rel, "..") {
+			continue
+		}
+		outPath := filepath.Join(b.Cfg.OutDir, filepath.FromSlash(rel))
+		if _, err := os.Stat(outPath); err == nil {
+			continue
+		}
+		parent := filepath.Dir(outPath)
+		if err := os.MkdirAll(parent, 0755); err != nil {
+			return err
+		}
+
+		loader := api.LoaderJS
+		ext := strings.ToLower(filepath.Ext(src))
+		switch ext {
+		case ".ts":
+			loader = api.LoaderTS
+		case ".tsx":
+			loader = api.LoaderTSX
+		case ".jsx":
+			loader = api.LoaderJSX
+		}
+
+		result := api.Build(api.BuildOptions{
+			AbsWorkingDir:    b.Root,
+			EntryPoints:      []string{src},
+			Bundle:           true,
+			Format:           api.FormatESModule,
+			Platform:         api.PlatformBrowser,
+			Target:           api.ES2020,
+			Outfile:          outPath,
+			Write:            true,
+			Loader:           map[string]api.Loader{ext: loader},
+			MinifyWhitespace: b.Cfg.ShouldMinifyJS(),
+			LogLevel:         api.LogLevelSilent,
+		})
+		if len(result.Errors) > 0 {
+			msgs := make([]string, 0, len(result.Errors))
+			for _, e := range result.Errors {
+				msgs = append(msgs, e.Text)
+			}
+			return fmt.Errorf("dynamic import chunk (%s): %s", src, strings.Join(msgs, "; "))
+		}
 	}
 	return nil
 }

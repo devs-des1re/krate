@@ -1,7 +1,9 @@
 package build
 
 import (
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -263,4 +265,71 @@ export default function Page() {
 	if !strings.Contains(err.Error(), "render failed") {
 		t.Errorf("expected render-failed error, got: %v", err)
 	}
+}
+
+func TestStageServerRenderer(t *testing.T) {
+	// Stage from the monorepo runtime source (repo root discovered by walking up).
+	repoRoot, err := repoRootPath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	src := findServerRendererSource(repoRoot)
+	if src == "" {
+		t.Skipf("server-renderer source not found under %s", repoRoot)
+	}
+
+	// Fake project root so findRendererScript locates dist/.krate/ exactly as
+	// it would after a real build with OutDir=dist.
+	fakeRoot := t.TempDir()
+	outDir := filepath.Join(fakeRoot, "dist")
+	staged := stageServerRenderer(repoRoot, outDir)
+	if staged == "" {
+		t.Fatal("stageServerRenderer returned empty path")
+	}
+	if _, err := os.Stat(staged); err != nil {
+		t.Fatalf("staged driver missing: %v", err)
+	}
+	data, err := os.ReadFile(staged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "createServer") {
+		t.Errorf("staged driver missing node:http server, got:\n%s", content[:200])
+	}
+	if !strings.Contains(content, "renderToString") {
+		t.Errorf("staged driver missing bundled SSR runtime (renderToString)")
+	}
+
+	// Node must be able to parse the driver without tsx.
+	node, err := exec.LookPath("node")
+	if err != nil {
+		t.Skipf("node not available: %v", err)
+	}
+	if out, err := exec.Command(node, "--check", staged).CombinedOutput(); err != nil {
+		t.Fatalf("node --check failed: %v\n%s", err, out)
+	}
+
+	// The SSR server manager must prefer the staged driver over the TS source.
+	server := NewSSRServer(fakeRoot, 0)
+	got := server.findRendererScript()
+	if got == "" {
+		t.Fatal("findRendererScript returned empty path")
+	}
+	if got != staged {
+		t.Errorf("findRendererScript = %q, want staged driver %q", got, staged)
+	}
+}
+
+func repoRootPath() (string, error) {
+	pkgDir, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	// from packages/compiler/internal/build/ -> repo root
+	root := filepath.Clean(filepath.Join(pkgDir, "..", "..", "..", ".."))
+	if _, err := os.Stat(filepath.Join(root, "packages")); err != nil {
+		return "", fmt.Errorf("repo root not found at %s", root)
+	}
+	return root, nil
 }

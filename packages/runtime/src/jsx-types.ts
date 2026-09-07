@@ -176,8 +176,8 @@ declare global {
     interface DOMAttributes {
       children?: unknown[] | unknown;
       key?: string | number;
-      /** Assigns the mounted DOM element. Pass a mutable holder (`ref={myRef}`) or a callback (`ref={el => ...}`). */
-      ref?: ((el: Element) => void) | Element | null;
+      /** Assigns the mounted DOM element. Pass a mutable holder (`ref={myRef}`), a callback (`ref={el => ...}`), or an element. */ 
+      ref?: ((el: Element) => void) | { current: Element | null } | Element | null;
       slot?: string;
       style?: CSSProperties | string;
       part?: string;
@@ -629,7 +629,7 @@ declare global {
     interface SVGAttributes extends AriaAttributes {
       children?: unknown[] | unknown;
       key?: string | number;
-      ref?: ((el: Element) => void) | Element | null;
+      ref?: ((el: Element) => void) | { current: Element | null } | Element | null;
       style?: CSSProperties | string;
       class?: string;
       className?: string;

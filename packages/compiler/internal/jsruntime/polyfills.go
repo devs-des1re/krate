@@ -474,7 +474,12 @@ func (r *Runtime) injectWebAPIs() error {
 				this._vals = {};
 				if (init) {
 					if (typeof init === 'object') {
-						if (Array.isArray(init)) {
+						if (init instanceof Headers) {
+							var ent = init.entries();
+							for (var i = 0; i < ent.length; i++) {
+								this.set(ent[i][0], ent[i][1]);
+							}
+						} else if (Array.isArray(init)) {
 							for (var i = 0; i < init.length; i++) {
 								this.set(init[i][0], init[i][1]);
 							}
