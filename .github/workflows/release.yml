@@ -128,7 +128,13 @@ jobs:
             CURSOR=""
             REACHED=false
             while :; do
-              RESPONSE="$(gh api graphql -f query="$QUERY" -F owner="$REPO_OWNER" -F repo="$REPO_NAME" -F oid="$GITHUB_SHA" -f cursor="$CURSOR")"
+              # The cursor must be omitted on the first page: GitHub rejects an
+              # explicit empty `after` cursor ("" is not a valid cursor).
+              API_ARGS=(api graphql -f query="$QUERY" -F owner="$REPO_OWNER" -F repo="$REPO_NAME" -F oid="$GITHUB_SHA")
+              if [ -n "${CURSOR}" ]; then
+                API_ARGS+=(-f cursor="$CURSOR")
+              fi
+              RESPONSE="$(gh "${API_ARGS[@]}")"
               echo "$RESPONSE" \
                 | jq -r '.data.repository.object.history.nodes[] | [.oid, .messageHeadline, (.associatedPullRequests.nodes[0].number // ""), (.associatedPullRequests.nodes[0].title // ""), (.associatedPullRequests.nodes[0].url // "")] | @tsv' \
                 >> /tmp/krate-nodes.tsv
