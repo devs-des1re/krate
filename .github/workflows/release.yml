@@ -86,34 +86,142 @@ jobs:
       - name: Compute compiler SDK changelog
         id: sdk
         shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -e
-          VERSION="v${GITHUB_REF_NAME#v}"
-          PREV="$(
-            git tag -l 'packages/compiler/v*' \
-              | grep -v -F -- "packages/compiler/${VERSION}" \
+          VERSION="${GITHUB_REF_NAME#v}"
+          RVERSION="v${VERSION}"
+          REPO_OWNER="${GITHUB_REPOSITORY%/*}"
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+
+          PREV_RELEASE="$(
+            git tag -l 'v*' \
+              | grep -v -x -F -- "${GITHUB_REF_NAME}" \
               | sort -V \
               | tail -n 1 || true
           )"
-          if [ -n "${PREV}" ]; then
-            echo "prev=${PREV}" >> "$GITHUB_OUTPUT"
-            COMMITS="$(git log --format='- %s' "${PREV}..HEAD" -- packages/compiler || true)"
+          PREV_COMPILER="$(
+            git tag -l 'packages/compiler/v*' \
+              | grep -v -F -- "packages/compiler/${RVERSION}" \
+              | sort -V \
+              | tail -n 1 || true
+          )"
+          echo "prev_release=${PREV_RELEASE}" >> "$GITHUB_OUTPUT"
+          echo "prev_compiler=${PREV_COMPILER:-NONE}" >> "$GITHUB_OUTPUT"
+
+          if [ -n "${PREV_RELEASE}" ]; then
+            RANGE="${PREV_RELEASE}..HEAD"
           else
-            echo "prev=NONE" >> "$GITHUB_OUTPUT"
-            COMMITS="$(git log --format='- %s' HEAD -- packages/compiler || true)"
+            RANGE="HEAD"
           fi
-          if [ -z "${COMMITS}" ]; then
-            COMMITS="- No changes in this release."
+
+          SHAS="$(git log --no-merges --format='%H' "${RANGE}")"
+          : > /tmp/krate-sha-set.txt
+          printf '%s\n' "${SHAS}" > /tmp/krate-sha-set.txt
+          OLDEST="$(tail -n 1 /tmp/krate-sha-set.txt || true)"
+          TOTAL_SHAS="$(printf '%s' "${SHAS}" | grep -c '^' || true)"
+
+          : > /tmp/krate-nodes.tsv
+          if [ "${TOTAL_SHAS}" -gt 0 ]; then
+            QUERY='query($owner:String!,$repo:String!,$oid:GitObjectID!,$cursor:String,$count:Int!){ repository(owner:$owner,name:$repo){ object(oid:$oid){ ... on Commit { history(first:$count,after:$cursor){ pageInfo{ hasNextPage endCursor } nodes{ oid messageHeadline associatedPullRequests(first:1){ nodes{ number title url } } } } } } } }'
+            CURSOR=""
+            REACHED=false
+            while :; do
+              RESPONSE="$(gh api graphql -f query="$QUERY" -F owner="$REPO_OWNER" -F repo="$REPO_NAME" -F oid="$GITHUB_SHA" -F count:=100 -f cursor="$CURSOR")"
+              echo "$RESPONSE" \
+                | jq -r '.data.repository.object.history.nodes[] | [.oid, .messageHeadline, (.associatedPullRequests.nodes[0].number // ""), (.associatedPullRequests.nodes[0].title // ""), (.associatedPullRequests.nodes[0].url // "")] | @tsv' \
+                >> /tmp/krate-nodes.tsv
+              if [ -n "${OLDEST}" ]; then
+                grep -qxF -- "${OLDEST}" /tmp/krate-nodes.tsv && REACHED=true
+              fi
+              HAS_NEXT="$(echo "$RESPONSE" | jq -r '.data.repository.object.history.pageInfo.hasNextPage')"
+              CURSOR="$(echo "$RESPONSE" | jq -r '.data.repository.object.history.pageInfo.endCursor')"
+              if [ "${REACHED}" = true ] || [ "${HAS_NEXT}" != "true" ] || [ -z "${CURSOR}" ]; then
+                break
+              fi
+            done
           fi
-          printf '## Compiler SDK released %s\n\n' "${VERSION}" > compiler-sdk-notes.md
-          MAJOR="$(echo "${VERSION}" | cut -d. -f1 | sed 's/v//')"
+
+          : > /tmp/krate-entries.txt
+          : > /tmp/krate-seen-pr.txt
+          while IFS=$'\t' read -r OID HEADLINE PRNUM PRTITLE PRURL; do
+            grep -qxF -- "${OID}" /tmp/krate-sha-set.txt || continue
+            if [ -n "${PRNUM}" ]; then
+              if grep -qxF -- "${PRNUM}" /tmp/krate-seen-pr.txt; then
+                continue
+              fi
+              printf '%s\n' "${PRNUM}" >> /tmp/krate-seen-pr.txt
+              printf -- '- %s ([#%s](%s))\n' "${PRTITLE}" "${PRNUM}" "${PRURL}" >> /tmp/krate-entries.txt
+            else
+              printf -- '- %s ([%s](https://github.com/%s/commit/%s))\n' "${HEADLINE}" "$(printf '%s' "$OID" | cut -c1-7)" "${GITHUB_REPOSITORY}" "${OID}" >> /tmp/krate-entries.txt
+            fi
+          done < /tmp/krate-nodes.tsv
+
+          : > /tmp/grp-feat.txt
+          : > /tmp/grp-fix.txt
+          : > /tmp/grp-other.txt
+          while IFS= read -r LINE; do
+            case "${LINE}" in
+              "- feat"*)  printf '%s\n' "${LINE}" >> /tmp/grp-feat.txt ;;
+              "- fix"*)   printf '%s\n' "${LINE}" >> /tmp/grp-fix.txt ;;
+              *)          printf '%s\n' "${LINE}" >> /tmp/grp-other.txt ;;
+            esac
+          done < /tmp/krate-entries.txt
+
+          AUTHORS="$(git shortlog -sn "${RANGE}" || true)"
+          DIFF_LINK=""
+          if [ -n "${PREV_RELEASE}" ]; then
+            PREV_SHA="$(git rev-parse "${PREV_RELEASE}")"
+            DIFF_LINK="**Full diff:** [${PREV_RELEASE}...${GITHUB_REF_NAME}](https://github.com/${GITHUB_REPOSITORY}/compare/${PREV_SHA}...${GITHUB_SHA})"
+          fi
+
+          : > /tmp/pkg-list.txt
+          {
+            printf -- '- `@krate/core@%s`\n' "${VERSION}"
+            printf -- '- `@krate/runtime@%s`\n' "${VERSION}"
+            printf -- '- `@krate/components@%s`\n' "${VERSION}"
+            printf -- '- `@krate/create-krate-app@%s`\n' "${VERSION}"
+            printf -- '- `@krate/create-krate-docs@%s`\n' "${VERSION}"
+            printf -- '- `@krate/core-win32-x64@%s`\n' "${VERSION}"
+            printf -- '- `@krate/core-win32-arm64@%s`\n' "${VERSION}"
+            printf -- '- `@krate/core-linux-x64@%s`\n' "${VERSION}"
+            printf -- '- `@krate/core-linux-x64-musl@%s`\n' "${VERSION}"
+            printf -- '- `@krate/core-linux-arm64@%s`\n' "${VERSION}"
+            printf -- '- `@krate/core-darwin-x64@%s`\n' "${VERSION}"
+            printf -- '- `@krate/core-darwin-arm64@%s`\n' "${VERSION}"
+            printf -- '- Go module `github.com/kratejs/krate/packages/compiler@%s`\n' "${RVERSION}"
+          } > /tmp/pkg-list.txt
+
+          MAJOR="$(echo "${RVERSION}" | sed -E 's/^v?([0-9]+).*/\1/')"
           MODULE_PATH="github.com/kratejs/krate/packages/compiler"
-          if [ "${MAJOR}" -gt 1 ]; then
+          if [ "${MAJOR}" -gt 1 ] 2>/dev/null; then
             MODULE_PATH="${MODULE_PATH}/v${MAJOR}"
           fi
-          printf 'The Go module `%s` is published at tag `packages/compiler/%s`.\n\n' "${MODULE_PATH}" "${VERSION}" >> compiler-sdk-notes.md
-          printf '```sh\ngo get %s@%s\n```\n\n' "${MODULE_PATH}" "${VERSION}" >> compiler-sdk-notes.md
-          printf '### Changelog\n\n%s\n\n---\n\n' "${COMMITS}" >> compiler-sdk-notes.md
+
+          {
+            printf '## Released packages\n\n'
+            cat /tmp/pkg-list.txt
+            printf '\n---\n\n'
+            printf '## Compiler SDK released %s\n\n' "${RVERSION}"
+            printf 'The Go module `%s` is published at tag `packages/compiler/%s`.\n\n' "${MODULE_PATH}" "${RVERSION}"
+            printf '```sh\ngo get %s@%s\n```\n\n' "${MODULE_PATH}" "${RVERSION}"
+            printf '## Changelog\n\n'
+            HAVE=false
+            if [ -s /tmp/grp-feat.txt ]; then HAVE=true; printf '### Features\n\n'; cat /tmp/grp-feat.txt; printf '\n'; fi
+            if [ -s /tmp/grp-fix.txt ]; then HAVE=true; printf '### Bug Fixes\n\n'; cat /tmp/grp-fix.txt; printf '\n'; fi
+            if [ -s /tmp/grp-other.txt ]; then HAVE=true; printf '### Other Changes\n\n'; cat /tmp/grp-other.txt; printf '\n'; fi
+            if [ "${HAVE}" = false ]; then printf -- '- No changes in this release.\n\n'; fi
+            if [ -n "${AUTHORS}" ]; then
+              printf '### Authors\n\n'
+              echo "${AUTHORS}" | sed -E 's/^[[:space:]]*([0-9]+)[[:space:]]+(.*)$/- **\2** (\1 commits)/'
+              printf '\n'
+            fi
+            if [ -n "${DIFF_LINK}" ]; then
+              printf '%s\n\n' "${DIFF_LINK}"
+            fi
+            printf '\n---\n\n'
+          } > compiler-sdk-notes.md
 
       - name: Tag Go module
         shell: bash
