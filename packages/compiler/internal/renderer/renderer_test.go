@@ -375,7 +375,7 @@ func TestHydrationJSPropsDeclPrecedesSignalInits(t *testing.T) {
 	// vars, so the `var props=__krate_props[...]` decl must be hoisted above
 	// them.
 	src := `function RadioGroup(props) {
-  var [selected, setSelected] = createSignal(props.defaultValue || "");
+  var [selected, setSelected] = createSignal((props.defaultValue || "").trim());
   function handleChange(v) {
     setSelected(v);
     if (props.onValueChange) props.onValueChange(v);
@@ -391,7 +391,7 @@ export default function Page() {
 }`
 	_, js := fullPipeline(t, src)
 	propsDecl := "var props=__krate_props["
-	sigIdx := strings.Index(js, "createSignal(props.defaultValue")
+	sigIdx := strings.Index(js, "props.defaultValue")
 	declIdx := strings.Index(js, propsDecl)
 	if sigIdx == -1 {
 		t.Fatalf("expected signal init to reference props verbatim, got:\n%s", js)
