@@ -98,6 +98,7 @@ export function ToggleGroup(props: ToggleGroupProps) {
 
   return (
     <div
+      ref={(el) => { rootRef = el as HTMLElement; }}
       class={"krate-toggle-group" + (props.size ? " krate-toggle-group-" + props.size : "")}
       data-krate-toggle-group="true"
       role="group"

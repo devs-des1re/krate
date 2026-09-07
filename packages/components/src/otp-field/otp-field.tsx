@@ -1,5 +1,5 @@
 import './otp-field.css';
-import { createSignal, onMount, onCleanup } from '@krate/runtime';
+import { createSignal } from '@krate/runtime';
 
 export interface OTPFieldProps {
   length?: number;
@@ -12,7 +12,7 @@ export interface OTPFieldProps {
 
 export function OTPField(props: OTPFieldProps) {
   var length = props.length || 6;
-  var [values, setValues] = createSignal<string[]>(["", "", "", "", "", ""]);
+  var [values, setValues] = createSignal<string[]>(Array.from({ length: length }, function () { return ""; }));
 
   function handleInputAt(index: number, e: Event) {
     var target = e.target as HTMLInputElement;

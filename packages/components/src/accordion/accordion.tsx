@@ -82,7 +82,7 @@ export function Accordion(props: AccordionProps) {
   }
 
   return (
-    <div class="krate-accordion" data-krate-accordion="true" data-type={type} data-collapsible={collapsible} onClick={handleClick}>
+    <div ref={(el) => { rootRef = el as HTMLElement; }} class="krate-accordion" data-krate-accordion="true" data-type={type} data-collapsible={collapsible} onClick={handleClick}>
       {props.children}
     </div>
   );

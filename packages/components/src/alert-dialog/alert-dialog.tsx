@@ -1,5 +1,5 @@
 import './alert-dialog.css';
-import { createSignal, createEffect, onCleanup } from '@krate/runtime';
+import { createSignal, createEffect } from '@krate/runtime';
 
 export interface AlertDialogProps {
   children?: any;
@@ -49,9 +49,9 @@ export function AlertDialog(props: AlertDialogProps) {
   }
 
   createEffect(function () {
-    if (open()) {
-      document.addEventListener("click", handleClick);
-    }
+    // handleClick opens the dialog from the trigger, so it must be attached
+    // even while the dialog is closed — otherwise the trigger can never open it.
+    document.addEventListener("click", handleClick);
     return function () {
       document.removeEventListener("click", handleClick);
     };

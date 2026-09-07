@@ -15,7 +15,6 @@ export function Avatar(props: AvatarProps) {
   var fallback = props.fallback || "?";
   var size = props.size || "md";
   var [imageError, setImageError] = createSignal(false);
-  var [loaded, setLoaded] = createSignal(false);
 
   createEffect(function () {
     if (src === "") {
@@ -25,10 +24,6 @@ export function Avatar(props: AvatarProps) {
 
   function handleError() {
     setImageError(true);
-  }
-
-  function handleLoad() {
-    setLoaded(true);
   }
 
   var className = "krate-avatar krate-avatar-" + size;
@@ -41,7 +36,6 @@ export function Avatar(props: AvatarProps) {
           src={src}
           alt={alt}
           onError={handleError}
-          onLoad={handleLoad}
         />
       ) : null}
       {(src === "" || imageError()) ? (

@@ -63,6 +63,7 @@ export function RadioGroup(props: RadioGroupProps) {
 
   return (
     <div
+      ref={(el) => { rootRef = el as HTMLElement; }}
       class="krate-radio-group"
       data-krate-radio-group="true"
       role="radiogroup"

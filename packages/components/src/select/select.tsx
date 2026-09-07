@@ -181,7 +181,7 @@ export function Select(props: SelectProps) {
   });
 
   return (
-    <div class={"krate-select" + (props.disabled ? " krate-select-disabled" : "")} data-state={open() ? "open" : "closed"} onClick={handleClick}>
+    <div ref={(el) => { rootRef = el as HTMLElement; }} class={"krate-select" + (props.disabled ? " krate-select-disabled" : "")} data-state={open() ? "open" : "closed"} onClick={handleClick}>
       <button
         class="krate-select-trigger"
         type="button"

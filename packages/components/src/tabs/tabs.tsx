@@ -1,5 +1,5 @@
 import './tabs.css';
-import { createSignal, createEffect, onMount } from '@krate/runtime';
+import { createSignal, createEffect } from '@krate/runtime';
 
 export interface TabsProps {
   children?: any;
@@ -12,6 +12,7 @@ export interface TabsProps {
 export function Tabs(props: TabsProps) {
   var orientation = props.orientation || "horizontal";
   var [active, setActive] = createSignal(props.defaultValue || "");
+  var rootRef: HTMLElement | null = null;
 
   createEffect(function () {
     if (props.value !== undefined) {
@@ -37,9 +38,9 @@ export function Tabs(props: TabsProps) {
   }
 
   createEffect(function () {
-    var activeValue = active();
-    var tabs = document.querySelector(".krate-tabs");
+    var tabs = rootRef;
     if (!tabs) return;
+    var activeValue = active();
     var triggers = tabs.querySelectorAll("[data-krate-tabs-trigger]");
     for (var i = 0; i < triggers.length; i++) {
       var el = triggers[i] as HTMLElement;
@@ -55,7 +56,7 @@ export function Tabs(props: TabsProps) {
   });
 
   return (
-    <div class="krate-tabs" data-orientation={orientation} data-state="active" data-active-tab={active()} onClick={handleClick}>
+    <div ref={(el) => { rootRef = el as HTMLElement; }} class="krate-tabs" data-orientation={orientation} data-state="active" data-active-tab={active()} onClick={handleClick}>
       {props.children}
     </div>
   );
