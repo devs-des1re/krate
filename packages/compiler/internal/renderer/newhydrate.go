@@ -82,6 +82,17 @@ func GenerateNewHydrationJS(result *EmitResult) string {
 		}
 		b.WriteString("(function(){\n")
 
+		// The component's own props object declaration must precede signal
+		// initializers: signal RawInits like `createSignal(props.x || "")`
+		// evaluate props at hydration time (they can't be const-folded when the
+		// props are runtime values hoisted from the parent scope).
+		for _, ev := range sig.ExtraVars {
+			if strings.HasPrefix(ev, "var props=__krate_props[") {
+				b.WriteString(ev)
+				b.WriteString(";\n")
+			}
+		}
+
 		for _, s := range sig.Signals {
 			val := s.Initial
 			if s.RawInit != "" {
@@ -108,19 +119,29 @@ func GenerateNewHydrationJS(result *EmitResult) string {
 
 		// Extra variables (must come before effects/memos that may reference them)
 		for _, ev := range sig.ExtraVars {
+			if strings.HasPrefix(ev, "var props=__krate_props[") {
+				continue
+			}
 			b.WriteString(ev)
 			b.WriteString(";\n")
 		}
 
-		// Refs: assign the live DOM node to the referenced variable. Runs after
-		// the extra vars are declared and before effects/memos that read them,
-		// so an onMount/handler can safely use the ref'd element.
+		// Refs: assign the live DOM node to the referenced variable, or invoke a
+		// callback ref with it. Runs after the extra vars are declared and before
+		// effects/memos that read them, so an onMount/handler can safely use the
+		// ref'd element.
 		for _, rb := range sig.RefBindings {
 			b.WriteString("kbindRef(")
 			b.WriteString(strconv.Quote(string(rb.ElementSlotID)))
-			b.WriteString(",el=>{")
-			b.WriteString(rb.Target)
-			b.WriteString("=el;})\n")
+			if rb.Callback != "" {
+				b.WriteString(",")
+				b.WriteString(rb.Callback)
+			} else {
+				b.WriteString(",el=>{")
+				b.WriteString(rb.Target)
+				b.WriteString("=el;}")
+			}
+			b.WriteString(")\n")
 		}
 
 		for i, memo := range sig.Memos {

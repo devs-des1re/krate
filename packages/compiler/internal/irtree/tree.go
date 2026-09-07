@@ -241,7 +241,13 @@ type HandlerDecl struct {
 // Target is the JS variable expression to assign (e.g. "wrapRef").
 type RefBinding struct {
 	ElementSlotID SlotID
-	Target        string
+	// Target is the assignment target for object refs (`ref={myRef}` →
+	// `myRef.current = el` or `myRef = el`). Mutually exclusive with Callback.
+	Target string
+	// Callback holds the full JS for callback refs (`ref={(el) => {...}}`).
+	// When set, the callback receives the mounted element directly and no
+	// assignment wrapper is generated. Mutually exclusive with Target.
+	Callback string
 }
 
 // ─── SignalDecl — per-instance signal declaration ──────────────────────────

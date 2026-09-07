@@ -313,6 +313,95 @@ export default function Page() {
 	if !strings.Contains(js, "onMount(") {
 		t.Errorf("expected hydration JS to emit onMount, got:\n%s", js)
 	}
+	if !strings.Contains(js, "typeof codeEl.textContent") {
+		t.Errorf("expected typeof operator to keep its space separator, got:\n%s", js)
+	}
+}
+
+func TestHydrationJSSignalInitPropsRegistration(t *testing.T) {
+	// A signal whose initializer references props at runtime (e.g. a missing
+	// prop compared with !==) must cause the child's props registration to be
+	// hoisted, so `props` resolves inside the component IIFE instead of
+	// throwing "props is not defined" during hydration.
+	src := `function Folder(props) {
+  var [open, setOpen] = createSignal(props.defaultOpen !== false);
+  function toggle() { setOpen(!open()); }
+  return <div class="krate-folder" onClick={toggle}>{open() ? "open" : "closed"}</div>;
+}
+export default function Page() {
+  return <Folder name="public" />;
+}`
+	_, js := fullPipeline(t, src)
+	if strings.Contains(js, "createSignal(props.defaultOpen") {
+		// The expression should have been const-folded to a boolean since a
+		// missing prop is a definite undefined. If it was NOT folded (i.e. it
+		// appears verbatim), the props registration must still be present so
+		// `props` is defined at runtime.
+		if !strings.Contains(js, "var props=__krate_props[") {
+			t.Errorf("expected props registration when signal init references props verbatim, got:\n%s", js)
+		}
+	}
+}
+
+func TestHydrationJSCallbackRef(t *testing.T) {
+	// Callback refs (ref={(el) => { rootRef = el; }}) must be emitted as the
+	// callback itself — kbindRef(id, (el)=>{...}) — NOT wrapped as an assignment
+	// target (kbindRef(id, el=>{(el)=>{...}=el;})) which is a syntax error.
+	src := `function Widget() {
+  var [count, setCount] = createSignal(0);
+  var rootRef = null;
+  return <div class="cb" ref={(el) => { rootRef = el; }}>{count()}</div>;
+}
+export default function Page() {
+  return <Widget />;
+}`
+	_, js := fullPipeline(t, src)
+	if !strings.Contains(js, "kbindRef(") {
+		t.Fatalf("expected hydration JS to emit kbindRef, got:\n%s", js)
+	}
+	if strings.Contains(js, "=el;}))") || strings.Contains(js, "}=el;") {
+		t.Errorf("callback ref must not be wrapped as an assignment target:\n%s", js)
+	}
+	if !strings.Contains(js, "(el)=>{rootRef = el;}") && !strings.Contains(js, "(el)=>{(rootRef = el);}") {
+		t.Errorf("expected the arrow callback passed to kbindRef, got:\n%s", js)
+	}
+}
+
+func TestHydrationJSPropsDeclPrecedesSignalInits(t *testing.T) {
+	// A signal whose initializer reads props at runtime (cannot be const-folded
+	// because the child's props are runtime-hoisted from the parent, e.g. when
+	// a handler references props.onValueChange) must still see `props` declared
+	// before the signal init runs. Signal inits are emitted before other extra
+	// vars, so the `var props=__krate_props[...]` decl must be hoisted above
+	// them.
+	src := `function RadioGroup(props) {
+  var [selected, setSelected] = createSignal(props.defaultValue || "");
+  function handleChange(v) {
+    setSelected(v);
+    if (props.onValueChange) props.onValueChange(v);
+  }
+  return <div data-krate-radio-group="true" onClick={handleChange}>{selected()}</div>;
+}
+function Demo() {
+  var [sel, setSel] = createSignal("x");
+  return <RadioGroup defaultValue="comfy" onValueChange={setSel} />;
+}
+export default function Page() {
+  return <Demo />;
+}`
+	_, js := fullPipeline(t, src)
+	propsDecl := "var props=__krate_props["
+	sigIdx := strings.Index(js, "createSignal(props.defaultValue")
+	declIdx := strings.Index(js, propsDecl)
+	if sigIdx == -1 {
+		t.Fatalf("expected signal init to reference props verbatim, got:\n%s", js)
+	}
+	if declIdx == -1 {
+		t.Fatalf("expected props registration decl, got:\n%s", js)
+	}
+	if declIdx > sigIdx {
+		t.Errorf("props decl (%d) must precede signal init (%d):\n%s", declIdx, sigIdx, js)
+	}
 }
 
 func TestHydrationJSWithTopLevelOnCleanup(t *testing.T) {

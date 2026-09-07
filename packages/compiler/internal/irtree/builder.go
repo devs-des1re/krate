@@ -42,9 +42,9 @@ func Build(prog *ast.Program, ann *Annotations) *ComponentTree {
 		idCounter:      make(map[string]int),
 		instanceCounts: make(map[string]int),
 		elementCounts:  make(map[string]int),
-		slotIDMap:    make(map[string]SlotID),
-		slotCounts:   make(map[string]int),
-		moduleConsts: collectModuleConsts(prog),
+		slotIDMap:      make(map[string]SlotID),
+		slotCounts:     make(map[string]int),
+		moduleConsts:   collectModuleConsts(prog),
 	}
 
 	root := builder.buildComponentNode(entryFn, "")
@@ -1352,9 +1352,10 @@ func (b *builder) buildComponentSlot(el *ast.JSXElement, parentID string) []Slot
 	// (which would reference out-of-scope identifiers). Even with no call-site
 	// props the child handlers may read props.X (e.g. props.onOpenChange), so
 	// an empty {} registration is emitted to keep `props` defined.
-	if childNode.Tier == TierClient && (len(childNode.Handlers) > 0 || len(childNode.Effects) > 0 || len(childNode.Memos) > 0) {
+	if childNode.Tier == TierClient && (len(childNode.Handlers) > 0 || len(childNode.Effects) > 0 || len(childNode.Memos) > 0 || len(childNode.Signals) > 0) {
 		if handlersOrLocalsReferenceProps(childNode.Handlers, childFn.Body) ||
-			compiledRefsProps(childNode.Effects) || compiledRefsProps(childNode.Memos) {
+			compiledRefsProps(childNode.Effects) || compiledRefsProps(childNode.Memos) ||
+			signalsReferenceProps(childNode.Signals) {
 			reg := buildPropsRegDecl(string(childNode.ID), childNode.Props, b.sigMap())
 			b.pendingPropsRegs = append(b.pendingPropsRegs, reg)
 			childNode.ExtraVars = append([]string{"var props=__krate_props[" + strconv.Quote(string(childNode.ID)) + "]"}, childNode.ExtraVars...)
@@ -1526,12 +1527,22 @@ func (b *builder) buildStaticElementSlots(el *ast.JSXElement, parentID string) [
 		}
 		if attr.Name == "ref" {
 			if attr.Value != nil {
+				// Callback ref: ref={(el) => {...}}. The arrow function is the
+				// callback itself — it receives the mounted element directly
+				// (React-style). Render it as-is instead of treating it as an
+				// assignment target.
+				if fn, ok := attr.Value.(*ast.ArrowFn); ok {
+					if cb := renderArrowFn(fn, b.sigMap()); cb != "" {
+						refs = append(refs, RefBinding{ElementSlotID: id, Callback: cb})
+					}
+					continue
+				}
 				target := generateExprJS(attr.Value, b.sigMap())
 				if target != "" {
 					// ref={refObj} where refObj is a useRef {current:...} object
 					// must assign refObj.current = el, not refObj = el (which
 					// would clobber the stable ref object the user reads later).
-					if id, ok := attr.Value.(*ast.Identifier); ok && b.refObjectVars != nil && b.refObjectVars[id.Name] {
+					if refID, ok := attr.Value.(*ast.Identifier); ok && b.refObjectVars != nil && b.refObjectVars[refID.Name] {
 						target += ".current"
 					}
 					refs = append(refs, RefBinding{ElementSlotID: id, Target: target})
@@ -4128,6 +4139,15 @@ func evalConstWithSignals(expr ast.Expr, signals map[string]ast.Expr, props map[
 				if v, ok := props[prop.Name]; ok {
 					return v
 				}
+				// children resolve through call-site slot machinery, never here.
+				if prop.Name == "children" {
+					return ""
+				}
+				// An absent prop is a definite undefined at runtime. Return the
+				// "undefined" token (not "") so comparisons fold correctly
+				// (undefined !== false === true) and fallbacks via || still
+				// pick the default (undefined is falsy).
+				return "undefined"
 			}
 		} else if id, ok := e.Object.(*ast.Identifier); ok {
 			if initial, ok := signals[id.Name]; ok && isResourceSentinel(initial) {
@@ -4524,6 +4544,20 @@ var propsIdentRe = regexp.MustCompile(`\bprops\b`)
 func compiledRefsProps(js []string) bool {
 	for _, s := range js {
 		if propsIdentRe.MatchString(s) {
+			return true
+		}
+	}
+	return false
+}
+
+// signalsReferenceProps reports whether any signal initializer that is emitted
+// verbatim (RawInit) references `props`. Signal inits like
+// `createSignal(props.defaultOpen !== false)` must resolve `props` at runtime,
+// so the props registration must be hoisted even when no handler/effect/memo
+// touches props.
+func signalsReferenceProps(signals []SignalDecl) bool {
+	for _, s := range signals {
+		if propsIdentRe.MatchString(s.RawInit) {
 			return true
 		}
 	}

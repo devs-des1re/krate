@@ -73,6 +73,11 @@ func generateExprJS(expr ast.Expr, signals map[string]ast.Expr) string {
 		if e.Postfix {
 			return arg + e.Op
 		}
+		if e.Op == "typeof" {
+			// typeof is a keyword; concatenating without a space yields an
+			// identifier (`typeofx`) instead of the typeof operator.
+			return "typeof " + arg
+		}
 		return e.Op + arg
 	case *ast.ConditionalExpr:
 		test := generateExprJS(e.Test, signals)

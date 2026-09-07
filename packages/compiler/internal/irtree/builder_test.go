@@ -463,6 +463,47 @@ func TestRefBindingUseRefCallAssignsCurrent(t *testing.T) {
 	}
 }
 
+func TestRefBindingArrowCallback(t *testing.T) {
+	// Callback ref: ref={(el) => { rootRef = el; }}. The arrow function is the
+	// callback itself and must be emitted as-is (no `=el` assignment wrapper),
+	// so the hydration JS stays syntactically valid.
+	src := `export default function App() {
+	var rootRef = useRef(null);
+	return <div ref={(el) => { rootRef = el; }}>hi</div>;
+}`
+	tree := annotateAndBuild(t, src)
+	refs := tree.Root.RefBindings
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 ref binding, got %d: %+v", len(refs), refs)
+	}
+	if refs[0].Target != "" {
+		t.Errorf("callback ref should not produce a Target, got %q", refs[0].Target)
+	}
+	if !strings.Contains(refs[0].Callback, "(el)=>") || !strings.Contains(refs[0].Callback, "rootRef = el") {
+		t.Errorf("expected callback to carry the arrow function, got %q", refs[0].Callback)
+	}
+}
+
+func TestRefBindingArrowCallbackWithCast(t *testing.T) {
+	// Type assertions (`as HTMLElement`) are dropped by the parser, so the
+	// rendered callback must be valid JS without them.
+	src := `export default function App() {
+	var rootRef: HTMLElement | null = null;
+	return <div ref={(el) => { rootRef = el as HTMLElement; }}>hi</div>;
+}`
+	tree := annotateAndBuild(t, src)
+	refs := tree.Root.RefBindings
+	if len(refs) != 1 {
+		t.Fatalf("expected 1 ref binding, got %d: %+v", len(refs), refs)
+	}
+	if strings.Contains(refs[0].Callback, " as ") || strings.Contains(refs[0].Callback, "HTMLElement") {
+		t.Errorf("callback should not contain type-assertion remnants, got %q", refs[0].Callback)
+	}
+	if !strings.Contains(refs[0].Callback, "rootRef = el") {
+		t.Errorf("expected callback body preserved, got %q", refs[0].Callback)
+	}
+}
+
 // --- Suspense boundary construction -----------------------------------------
 
 func TestBuildSuspenseBoundaryStaticFallback(t *testing.T) {
