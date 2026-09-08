@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -90,14 +91,14 @@ func TestBuildServerModesManifestE2E(t *testing.T) {
 		full[p.Route] = p.Mode
 	}
 	wantFull := map[string]RenderMode{
-		"/":           RenderSSG,
-		"/isr":        RenderISR,
+		"/":            RenderSSG,
+		"/isr":         RenderISR,
 		"/isr-default": RenderISR,
-		"/ssr":        RenderSSR,
-		"/streaming":  RenderStreaming,
-		"/suspense":   RenderStreaming,
-		"/live":       RenderStreaming,
-		"/precedence": RenderISR,
+		"/ssr":         RenderSSR,
+		"/streaming":   RenderStreaming,
+		"/suspense":    RenderStreaming,
+		"/live":        RenderStreaming,
+		"/precedence":  RenderISR,
 	}
 	for route, want := range wantFull {
 		if got, ok := full[route]; !ok || got != want {
@@ -121,15 +122,24 @@ func TestBuildServerModesManifestE2E(t *testing.T) {
 	if err := json.Unmarshal(srvData, &srvMan); err != nil {
 		t.Fatalf("unmarshal server-manifest.json: %v\n%s", err, srvData)
 	}
-	srv := make(map[string]struct{ mode string; revalidate int }, len(srvMan.Pages))
+	srv := make(map[string]struct {
+		mode       string
+		revalidate int
+	}, len(srvMan.Pages))
 	for _, p := range srvMan.Pages {
-		srv[p.Route] = struct{ mode string; revalidate int }{p.Mode, p.Revalidate}
+		srv[p.Route] = struct {
+			mode       string
+			revalidate int
+		}{p.Mode, p.Revalidate}
 	}
 
 	if _, ok := srv["/index"]; ok {
 		t.Error("SSG page /index leaked into server-manifest.json")
 	}
-	wantSrv := map[string]struct{ mode string; revalidate int }{
+	wantSrv := map[string]struct {
+		mode       string
+		revalidate int
+	}{
 		"/isr":         {"isr", 30},
 		"/isr-default": {"isr", defaultISRRevalidate},
 		"/ssr":         {"ssr", 0},
@@ -259,14 +269,14 @@ export default function VideoPage(props) {
 	}
 	bundleRel := ".krate/server-bundles/video.isr.server.mjs"
 	res := api.Build(api.BuildOptions{
-		AbsWorkingDir:  repoRoot,
-		Bundle:         true,
-		Format:         api.FormatESModule,
-		Platform:       api.PlatformNode,
-		Outfile:        filepath.Join(outDir, filepath.FromSlash(bundleRel)),
-		Write:          true,
-		JSX:            api.JSXAutomatic,
-		JSXSideEffects: false,
+		AbsWorkingDir:   repoRoot,
+		Bundle:          true,
+		Format:          api.FormatESModule,
+		Platform:        api.PlatformNode,
+		Outfile:         filepath.Join(outDir, filepath.FromSlash(bundleRel)),
+		Write:           true,
+		JSX:             api.JSXAutomatic,
+		JSXSideEffects:  false,
 		JSXImportSource: "@krate/runtime/server",
 		Plugins: []api.Plugin{{
 			Name: "krate-isr-e2e-alias",
@@ -421,10 +431,10 @@ type isrResult struct {
 
 // regionFrames holds the parsed NDJSON frames from a /__krate/regions stream.
 type regionFrames struct {
-	regions     map[string]string            // region ID → HTML
-	errors      map[string]string            // region ID → error text
-	cacheStatus map[string]string            // region ID → hit/stale/miss (page kind)
-	titles      map[string]string            // region ID → fresh <title> (page kind)
+	regions     map[string]string // region ID → HTML
+	errors      map[string]string // region ID → error text
+	cacheStatus map[string]string // region ID → hit/stale/miss (page kind)
+	titles      map[string]string // region ID → fresh <title> (page kind)
 	count       int
 }
 
@@ -725,6 +735,7 @@ func TestNestedRuntimeSuspenseSidecarE2E(t *testing.T) {
 // /__krate/regions with kind:page renders the whole page component (params
 // injected, ISR variant cache applied) as the frame the Go server splices in.
 func TestPageRegionSidecarE2E(t *testing.T) {
+	ensureRuntimeDist(t)
 	node, err := exec.LookPath("node")
 	if err != nil {
 		t.Skipf("node not available: %v", err)
@@ -841,6 +852,7 @@ export default function V(props: any) {
 // [id] pattern dir with the coarse marker and that the page region renders the
 // param (variant-aware ISR cache miss → hit).
 func TestDynamicPageRegionSidecarE2E(t *testing.T) {
+	ensureRuntimeDist(t)
 	node, err := exec.LookPath("node")
 	if err != nil {
 		t.Skipf("node not available: %v", err)
@@ -964,6 +976,40 @@ func isrRender(t *testing.T, base, route, url string, params map[string]string) 
 // linkRuntimePackage links the monorepo @krate/runtime package into a temp
 // project's node_modules so compiled server bundles can resolve it, mirroring
 // a real installed dependency. destDir is the "@krate" directory to create.
+// ensureRuntimeDist builds packages/runtime's dist/ when it is absent so the
+// sidecar fixtures can resolve @krate/runtime/dist/* like a real installed
+// package. packages/runtime/dist is gitignored (built, not committed), so a
+// fresh clone fails the sidecar E2E with ERR_MODULE_NOT_FOUND until the runtime
+// has been built. Building it here keeps upstream end-to-end checks green on a
+// clean checkout and exercises the real supported package path.
+func ensureRuntimeDist(t *testing.T) {
+	t.Helper()
+	runtimeEnsureOnce.Do(func() {
+		repoRoot, err := repoRootPath()
+		if err != nil {
+			t.Fatalf("repoRootPath: %v", err)
+		}
+		runtimeDir := filepath.Join(repoRoot, "packages", "runtime")
+		if _, err := os.Stat(filepath.Join(runtimeDir, "dist", "server-jsx-runtime.js")); err == nil {
+			return
+		}
+		npmCmd := "npm"
+		if _, err := exec.LookPath(npmCmd); err != nil {
+			// npm may be npm.cmd on Windows.
+			npmCmd = "npm.cmd"
+		}
+		if _, err := exec.LookPath(npmCmd); err != nil {
+			t.Skipf("packages/runtime/dist missing and npm not available: %v", err)
+		}
+		out, err := exec.Command(npmCmd, "run", "build").CombinedOutput()
+		if err != nil {
+			t.Fatalf("building packages/runtime dist: %v\n%s", err, out)
+		}
+	})
+}
+
+var runtimeEnsureOnce = sync.Once{}
+
 func linkRuntimePackage(t *testing.T, destDir string) error {
 	t.Helper()
 	repoRoot, err := repoRootPath()

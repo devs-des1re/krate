@@ -3,6 +3,7 @@ package build
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -27,7 +28,13 @@ func TestBuildGatesOnPluginError(t *testing.T) {
 	// Plugin package advertising runtime "go" with a binary that does not exist.
 	pluginDir := filepath.Join(root, "plugins", "broken-go")
 	os.MkdirAll(pluginDir, 0755)
-	// Same shape as examples/plugins/krate-plugin-demo-go/index.js.
+	// Same shape as examples/plugins/krate-plugin-demo-go/index.js. Include the
+	// host platform so the test is deterministic on every GOOS/GOARCH (e.g.
+	// darwin-arm64) — the binary entry points at a file that does not exist.
+	binaryName := "bin/missing"
+	if runtime.GOOS == "windows" {
+		binaryName = "bin/missing.exe"
+	}
 	desc := `module.exports = function() {
   return {
     name: "broken-go",
@@ -35,7 +42,7 @@ func TestBuildGatesOnPluginError(t *testing.T) {
     module: "",
     runtime: "go",
     hooks: { BeforeBuild: null, AfterParse: null, AfterRender: null, AfterPage: null },
-    binaries: { "windows-amd64": "bin/missing.exe", "darwin-amd64": "bin/missing", "linux-amd64": "bin/missing" },
+    binaries: { "` + runtime.GOOS + "-" + runtime.GOARCH + `": "` + binaryName + `" },
   };
 };
 `
