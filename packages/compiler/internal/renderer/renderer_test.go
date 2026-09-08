@@ -343,6 +343,35 @@ export default function Page() {
 	}
 }
 
+func TestHydrationJSNamedCallbackRef(t *testing.T) {
+	// A locally named function used as a ref (`ref={setRef}` where
+	// `function setRef(el){...}`) is a callback ref: kbindRef(id, setRef) must
+	// INVOKE the function with the node. Regression: it was compiled as an
+	// assignment target (el=>{setRef=el;}), overwriting the function variable
+	// with the element so an onMount that reads/calls setRef saw the node, not
+	// the function.
+	src := `function Widget() {
+  var [count, setCount] = createSignal(0);
+  var got = null;
+  function setRef(el) { got = el; }
+  onMount(function () { if (typeof setRef !== "function") throw new Error("setRef clobbered"); });
+  return <div class="named" ref={setRef}>{count()}</div>;
+}
+export default function Page() {
+  return <Widget />;
+}`
+	_, js := fullPipeline(t, src)
+	if !strings.Contains(js, "kbindRef(") {
+		t.Fatalf("expected hydration JS to emit kbindRef, got:\n%s", js)
+	}
+	if strings.Contains(js, "setRef=el;") || strings.Contains(js, "setRef = el;") {
+		t.Errorf("named callback ref must not compile to an assignment that overwrites the function:\n%s", js)
+	}
+	if !strings.Contains(js, "kbindRef(") || !strings.Contains(js, ",setRef)") {
+		t.Errorf("expected kbindRef(id, setRef) invoking the named function, got:\n%s", js)
+	}
+}
+
 func TestHydrationJSCallbackRef(t *testing.T) {
 	// Callback refs (ref={(el) => { rootRef = el; }}) must be emitted as the
 	// callback itself — kbindRef(id, (el)=>{...}) — NOT wrapped as an assignment

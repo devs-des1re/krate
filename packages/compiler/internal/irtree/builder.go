@@ -78,6 +78,7 @@ type builder struct {
 	localSignals     map[string]ast.Expr // component-local signal context (name → initial expr)
 	localProps       map[string]string   // component-local resolved props (name → value)
 	refObjectVars    map[string]bool     // component-local names bound to a useRef {current:...} object
+	refCallbackVars  map[string]bool     // component-local names bound to a function (callback-ref targets)
 	callSiteChildren []ast.JSXChild      // call-site children of the current component
 	moduleConsts     map[string]string   // module-level const values (name → resolved literal)
 	suspenseCount    int                 // monotonic counter for stable StreamID generation
@@ -230,6 +231,14 @@ func (b *builder) buildComponentNode(fn *ast.FnDecl, parentID string) *Component
 	savedRefObjectVars := b.refObjectVars
 	b.refObjectVars = collectRefObjectVars(fn.Body)
 
+	// Track which local names hold functions (named function declarations or
+	// variables initialized to an arrow/function). `ref={setRef}` where setRef
+	// is such a function is a callback ref — kbindRef(id, setRef) invokes it
+	// with the node — NOT an assignment target (which would overwrite the
+	// function variable with the element, breaking onMount readers).
+	savedRefCallbackVars := b.refCallbackVars
+	b.refCallbackVars = collectFunctionRefVars(fn.Body)
+
 	// Named memos (const doubled = createMemo(() => ...)) are treated as local
 	// reactive getters: mapping the getter to its arrow body expression lets
 	// JSX text reads like {doubled()} resolve to a reactive text binding with a
@@ -306,6 +315,7 @@ func (b *builder) buildComponentNode(fn *ast.FnDecl, parentID string) *Component
 	b.localSignals = savedLocalSignals
 	b.localProps = savedLocalProps
 	b.refObjectVars = savedRefObjectVars
+	b.refCallbackVars = savedRefCallbackVars
 
 	// Read accumulated handlers from slot building walk
 	if tier == TierClient {
@@ -1542,6 +1552,15 @@ func (b *builder) buildStaticElementSlots(el *ast.JSXElement, parentID string) [
 				}
 				target := generateExprJS(attr.Value, b.sigMap())
 				if target != "" {
+					// ref={fnName} where fnName is a function declared in this
+					// component is a callback ref: pass the function to kbindRef so
+					// it is INVOKED with the mounted element. Falling through to the
+					// assignment target would emit el=>{fnName=el;} — overwriting
+					// the function variable and breaking later calls/reads.
+					if refID, ok := attr.Value.(*ast.Identifier); ok && b.refCallbackVars != nil && b.refCallbackVars[refID.Name] {
+						refs = append(refs, RefBinding{ElementSlotID: id, Callback: refID.Name})
+						continue
+					}
 					// ref={refObj} where refObj is a useRef {current:...} object
 					// must assign refObj.current = el, not refObj = el (which
 					// would clobber the stable ref object the user reads later).
@@ -2658,6 +2677,34 @@ func isResourceSentinelExpr(expr ast.Expr, signals map[string]ast.Expr) bool {
 		return false
 	}
 	return false
+}
+
+// collectFunctionRefVars returns the local names that hold functions: named
+// function declarations and variables initialized to an arrow/function
+// expression. A `ref={name}` where name is in this set is a callback ref (the
+// function receives the mounted node); any other identifier ref is an object or
+// bare-variable assignment target.
+func collectFunctionRefVars(body []ast.Stmt) map[string]bool {
+	fns := make(map[string]bool)
+	for _, stmt := range body {
+		switch s := stmt.(type) {
+		case *ast.FnDecl:
+			if s.Name != "" {
+				fns[s.Name] = true
+			}
+		case *ast.VarStmt:
+			for _, decl := range s.Decls {
+				if decl == nil || decl.Name == "" || decl.Init == nil {
+					continue
+				}
+				switch decl.Init.(type) {
+				case *ast.ArrowFn:
+					fns[decl.Name] = true
+				}
+			}
+		}
+	}
+	return fns
 }
 
 // collectRefObjectVars returns the set of local variable names bound to a
