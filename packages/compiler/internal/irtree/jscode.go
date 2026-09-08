@@ -197,7 +197,11 @@ func renderStmtJS(stmt ast.Stmt, signals map[string]ast.Expr) string {
 				keyword = "let"
 			}
 			if decl.IsDestructuring {
-				parts = append(parts, keyword+" ["+strings.Join(decl.Names, ",")+"]="+generateExprJS(decl.Init, signals))
+				pattern := decl.Pattern
+				if pattern == "" {
+					pattern = "[" + strings.Join(decl.Names, ",") + "]"
+				}
+				parts = append(parts, keyword+" "+pattern+"="+generateExprJS(decl.Init, signals))
 			} else if decl.Name != "" {
 				init := ""
 				if decl.Init != nil {
@@ -516,7 +520,11 @@ func renderVarInitJS(s *ast.VarStmt, signals map[string]ast.Expr) string {
 			keyword = "let"
 		}
 		if decl.IsDestructuring {
-			parts = append(parts, keyword+" ["+strings.Join(decl.Names, ",")+"]="+generateExprJS(decl.Init, signals))
+			if decl.Pattern != "" {
+				parts = append(parts, keyword+" "+decl.Pattern+"="+generateExprJS(decl.Init, signals))
+			} else {
+				parts = append(parts, keyword+" ["+strings.Join(decl.Names, ",")+"]="+generateExprJS(decl.Init, signals))
+			}
 		} else if decl.Name != "" {
 			init := ""
 			if decl.Init != nil {

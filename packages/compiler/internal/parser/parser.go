@@ -746,6 +746,12 @@ func (p *Parser) parseVarStmt() ast.Stmt {
 				decl.Init = p.parseExpr(precLowest)
 			}
 			stmt.Decls = append(stmt.Decls, decl)
+		} else if p.peek().Kind == lexer.LBRACE {
+			decl := p.parseObjectDestructuring()
+			if p.match(lexer.ASSIGN) {
+				decl.Init = p.parseExpr(precLowest)
+			}
+			stmt.Decls = append(stmt.Decls, decl)
 		} else if isIdentifierToken(p.peek().Kind) {
 			name := p.next().Value
 			p.skipTypeAnnotation(false)
@@ -856,34 +862,118 @@ func (p *Parser) parseStmtList(end lexer.Kind) []ast.Stmt {
 }
 
 func (p *Parser) parseArrayDestructuring() *ast.VarDecl {
-	p.expect(lexer.LBRACKET)
 	decl := &ast.VarDecl{IsDestructuring: true}
+	var sb strings.Builder
+	var names []string
+	rest := ""
+	p.parseArrayPatternInto(&sb, &names, &rest)
+	decl.Pattern = sb.String()
+	decl.Names = names
+	decl.RestName = rest
+	p.skipDestructTypeAnnotation()
+	return decl
+}
+
+func (p *Parser) parseObjectDestructuring() *ast.VarDecl {
+	decl := &ast.VarDecl{IsDestructuring: true}
+	var sb strings.Builder
+	var names []string
+	rest := ""
+	p.parseObjectPatternInto(&sb, &names, &rest)
+	decl.Pattern = sb.String()
+	decl.Names = names
+	decl.RestName = rest
+	p.skipDestructTypeAnnotation()
+	return decl
+}
+
+func (p *Parser) skipDestructTypeAnnotation() {
+	if p.peek().Kind == lexer.COLON {
+		p.skipTypeAnnotation(false)
+	}
+}
+
+func (p *Parser) parseArrayPatternInto(sb *strings.Builder, names *[]string, rest *string) {
+	p.expect(lexer.LBRACKET)
+	sb.WriteString("[")
 	for p.peek().Kind != lexer.RBRACKET && p.peek().Kind != lexer.EOF {
 		if p.peek().Kind == lexer.SPREAD {
 			p.next()
-			if isIdentifierToken(p.peek().Kind) {
-				name := p.next().Value
-				decl.Names = append(decl.Names, name)
-				decl.RestName = name
-			}
-		} else if isIdentifierToken(p.peek().Kind) {
-			name := p.next().Value
-			decl.Names = append(decl.Names, name)
-			if p.match(lexer.ASSIGN) {
-				_ = p.parseExpr(precLowest)
+			sb.WriteString("...")
+			if !p.parsePatternElement(sb, names, rest) {
+				p.next()
 			}
 		} else if p.peek().Kind == lexer.COMMA {
 			p.next()
+			sb.WriteString(",")
 			continue
-		} else {
-			break
+		} else if !p.parsePatternElement(sb, names, rest) {
+			p.next()
+		}
+		if p.match(lexer.ASSIGN) {
+			_ = p.parseExpr(precLowest)
 		}
 		if !p.match(lexer.COMMA) {
 			break
 		}
+		sb.WriteString(",")
 	}
 	p.expect(lexer.RBRACKET)
-	return decl
+	sb.WriteString("]")
+}
+
+func (p *Parser) parseObjectPatternInto(sb *strings.Builder, names *[]string, rest *string) {
+	p.expect(lexer.LBRACE)
+	sb.WriteString("{")
+	for p.peek().Kind != lexer.RBRACE && p.peek().Kind != lexer.EOF {
+		if p.peek().Kind == lexer.SPREAD {
+			p.next()
+			sb.WriteString("...")
+			if !p.parsePatternElement(sb, names, rest) {
+				p.next()
+			}
+		} else if isIdentifierToken(p.peek().Kind) || p.peek().Kind == lexer.String || p.peek().Kind == lexer.Number {
+			key := p.next()
+			sb.WriteString(key.Value)
+			if p.match(lexer.COLON) {
+				sb.WriteString(":")
+				if !p.parsePatternElement(sb, names, rest) {
+					p.next()
+				}
+			} else {
+				*names = append(*names, key.Value)
+			}
+		} else {
+			p.next()
+		}
+		if p.match(lexer.ASSIGN) {
+			_ = p.parseExpr(precLowest)
+		}
+		if !p.match(lexer.COMMA) {
+			break
+		}
+		sb.WriteString(",")
+	}
+	p.expect(lexer.RBRACE)
+	sb.WriteString("}")
+}
+
+func (p *Parser) parsePatternElement(sb *strings.Builder, names *[]string, rest *string) bool {
+	if isIdentifierToken(p.peek().Kind) {
+		tok := p.next()
+		*names = append(*names, tok.Value)
+		sb.WriteString(tok.Value)
+		return true
+	}
+	if p.peek().Kind == lexer.LBRACKET {
+		p.parseArrayPatternInto(sb, names, rest)
+		return true
+	}
+	if p.peek().Kind == lexer.LBRACE {
+		p.parseObjectPatternInto(sb, names, rest)
+		return true
+	}
+	return false
 }
 
 func (p *Parser) parseParamList() []*ast.Param {

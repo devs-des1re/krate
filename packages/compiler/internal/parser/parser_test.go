@@ -409,6 +409,54 @@ func TestThisExpression(t *testing.T) {
 	}
 }
 
+func TestNestedObjectDestructuring(t *testing.T) {
+	prog, errs := parse(t, "const [user, { refetch }] = createResource(fetchUser);")
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	vs := firstVarStmt(t, prog)
+	decl := vs.Decls[0]
+	if !decl.IsDestructuring {
+		t.Fatalf("expected destructuring decl")
+	}
+	if len(decl.Names) != 2 || decl.Names[0] != "user" || decl.Names[1] != "refetch" {
+		t.Errorf("expected names [user refetch], got %v", decl.Names)
+	}
+	if decl.Pattern != "[user,{refetch}]" {
+		t.Errorf("expected pattern [user,{refetch}], got %q", decl.Pattern)
+	}
+}
+
+func TestNestedObjectDestructuringAlias(t *testing.T) {
+	prog, errs := parse(t, "const [user, { refetch: reload }] = createResource(fetchUser);")
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	vs := firstVarStmt(t, prog)
+	decl := vs.Decls[0]
+	if len(decl.Names) != 2 || decl.Names[1] != "reload" {
+		t.Errorf("expected bound name reload, got %v", decl.Names)
+	}
+	if decl.Pattern != "[user,{refetch:reload}]" {
+		t.Errorf("expected pattern [user,{refetch:reload}], got %q", decl.Pattern)
+	}
+}
+
+func TestStatementLevelObjectDestructuring(t *testing.T) {
+	prog, errs := parse(t, "const { refetch, data } = useQuery();")
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	vs := firstVarStmt(t, prog)
+	decl := vs.Decls[0]
+	if len(decl.Names) != 2 || decl.Names[0] != "refetch" || decl.Names[1] != "data" {
+		t.Errorf("expected names [refetch data], got %v", decl.Names)
+	}
+	if decl.Pattern != "{refetch,data}" {
+		t.Errorf("expected pattern {refetch,data}, got %q", decl.Pattern)
+	}
+}
+
 func TestErrorFileName(t *testing.T) {
 	l := lexer.New("const x = (")
 	tokens := l.Tokenize()

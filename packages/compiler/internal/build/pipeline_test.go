@@ -598,6 +598,29 @@ func TestBuildResourceEmitted(t *testing.T) {
 	}
 }
 
+// TestBuildNestedResourcePattern verifies the nested object-pattern form
+// const [user, { refetch }] = createResource(...) parses and round-trips into
+// the page hydration JS without being flattened (which would rebind refetch to
+// the whole actions object).
+func TestBuildNestedResourcePattern(t *testing.T) {
+	outDir := buildTestProject(t)
+	dir := filepath.Join(outDir, "resource-nested-demo")
+	jsFiles, err := filepath.Glob(filepath.Join(dir, "index.*.js"))
+	if err != nil || len(jsFiles) == 0 {
+		t.Fatalf("no hydration JS found for resource-nested-demo: %v", err)
+	}
+	js := readOut(t, outDir, filepath.ToSlash(jsFiles[0][len(outDir)+1:]))
+	if !strings.Contains(js, "createResource(") {
+		t.Errorf("expected createResource declaration emitted, got:\n%.600s", js)
+	}
+	if !strings.Contains(js, "{refetch") {
+		t.Errorf("expected nested {refetch} pattern preserved in hydration JS, got:\n%.600s", js)
+	}
+	if strings.Contains(js, ",refetch]=createResource(") {
+		t.Errorf("nested pattern was flattened to array form (refetch rebound to actions object):\n%.600s", js)
+	}
+}
+
 func writePNG(t *testing.T, path string, img image.Image) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {

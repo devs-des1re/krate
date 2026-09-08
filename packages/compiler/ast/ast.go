@@ -311,6 +311,7 @@ type VarDecl struct {
 	Name            string
 	Names           []string
 	IsDestructuring bool
+	Pattern         string
 	RestName        string
 	Init            Expr
 }
