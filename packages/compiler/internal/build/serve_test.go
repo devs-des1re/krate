@@ -220,9 +220,49 @@ func TestStaticRouteExists(t *testing.T) {
 	}
 }
 
+// TestShouldServeStatic verifies the ssrPageHandler routing decision: a static
+// file wins only for SSG pages / unmatched routes. A manifest-registered
+// ssr/isr/streaming page must ALWAYS go through the sidecar even when a
+// pre-generated (baked) file exists — regression for pre-generated ISR variants
+// and runtime-component regions being frozen at their build timestamp.
+func TestShouldServeStatic(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "cached", "known"), 0755)
+	os.WriteFile(filepath.Join(dir, "cached", "known", "index.html"), []byte("<html>baked</html>"), 0644)
+	os.MkdirAll(filepath.Join(dir, "items", "alpha"), 0755)
+	os.WriteFile(filepath.Join(dir, "items", "alpha", "index.html"), []byte("<html>alpha</html>"), 0644)
+
+	mkPage := func(mode string) *ManifestPage {
+		return &ManifestPage{Mode: mode, Route: "/cached/[id]"}
+	}
+
+	cases := []struct {
+		name string
+		path string
+		page *ManifestPage
+		want bool
+	}{
+		// SSG page with a concrete static file → static wins (beats sibling
+		// dynamic [param] template).
+		{"ssg static file present", "/items/alpha", &ManifestPage{Mode: "ssg"}, true},
+		// SSG page with NO static file → not static (falls to dynamic template).
+		{"ssg no static file", "/items/beta", &ManifestPage{Mode: "ssg"}, false},
+		// Pre-generated ISR variant: static file EXISTS but page is ISR → must
+		// NOT be served statically (goes to the sidecar for revalidation).
+		{"isr pre-generated variant", "/cached/known", mkPage("isr"), false},
+		{"ssr page with baked shell", "/cached/known", mkPage("ssr"), false},
+		{"streaming page with baked shell", "/cached/known", mkPage("streaming"), false},
+		// Unmatched route with a static file → static.
+		{"unknown route static", "/cached/known", nil, true},
+	}
+	for _, tc := range cases {
+		if got := shouldServeStatic(dir, tc.path, tc.page); got != tc.want {
+			t.Errorf("%s: shouldServeStatic(%q) = %v, want %v", tc.name, tc.path, got, tc.want)
+		}
+	}
+}
+
 func TestStaticBeatsDynamicRoute(t *testing.T) {
-	// A static page (/items/alpha) coexisting with a dynamic route (/items/[id]).
-	// The static file must win — the dynamic template must not be consulted.
 	dir := t.TempDir()
 	static := filepath.Join(dir, "items", "alpha")
 	os.MkdirAll(static, 0755)

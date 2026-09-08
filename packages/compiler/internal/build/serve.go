@@ -811,13 +811,6 @@ func serve(root string, cfg *config.Config, reload <-chan []string, startTime ti
 			return
 		}
 
-		// A concrete static page beats a dynamic [param] pattern: /items/alpha
-		// must serve the static build, never the /items/[id] ISR template.
-		if staticRouteExists(absOut, r.URL.Path) {
-			handlerWith404.ServeHTTP(w, r)
-			return
-		}
-
 		route := strings.TrimRight(r.URL.Path, "/")
 		if route == "" {
 			route = "/"
@@ -830,6 +823,20 @@ func serve(root string, cfg *config.Config, reload <-chan []string, startTime ti
 		// resolves the pattern and keys ISR cache variants by params. So the
 		// canonical route is what everything downstream uses.
 		page, params := ssr.FindPageForRoute(route)
+
+		// Request-time pages (ssr/isr/streaming) MUST go through the sidecar
+		// even when a concrete static file was baked at build time — a
+		// pre-generated ISR variant (generateStaticParams) or a streaming shell
+		// still needs request-time rendering/revalidation. Serving the static
+		// file would freeze it at the build timestamp forever (no revalidate,
+		// no fresh region content). Only pages that are NOT request-time (SSG /
+		// plain static) give precedence to their concrete static file over a
+		// sibling dynamic [param] template.
+		if shouldServeStatic(absOut, r.URL.Path, page) {
+			handlerWith404.ServeHTTP(w, r)
+			return
+		}
+
 		if page == nil {
 			// Not an SSR/ISR/streaming page (SSG or unknown).
 			handlerWith404.ServeHTTP(w, r)
@@ -1334,6 +1341,23 @@ func staticRouteExists(absOut, urlPath string) bool {
 		}
 	}
 	return false
+}
+
+// shouldServeStatic reports whether a request should be answered from the
+// baked static build instead of the request-time (sidecar) pipeline.
+//
+// A concrete static file always wins for SSG pages (or unmatched routes) so it
+// can shadow a sibling dynamic [param] template. But a page the manifest
+// registers as ssr/isr/streaming MUST NOT be served statically even when the
+// build baked a concrete file for it — a pre-generated ISR variant
+// (generateStaticParams) or a streaming shell still needs request-time
+// rendering/revalidation, and serving the baked bytes would freeze the page at
+// its build timestamp (no revalidate, no fresh region content).
+func shouldServeStatic(absOut, urlPath string, page *ManifestPage) bool {
+	if page != nil && page.Mode != RenderSSG.String() {
+		return false
+	}
+	return staticRouteExists(absOut, urlPath)
 }
 
 // dynamicRoute represents a URL pattern with [param] segments found in the output directory.
