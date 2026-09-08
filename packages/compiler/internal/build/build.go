@@ -80,6 +80,13 @@ type Builder struct {
 
 	chunkMu sync.Mutex
 	chunks  map[string]string // dynamic-import source path → hashed site URL (/chunks/…)
+
+	// Plugin hook errors are collected here (page builds run in parallel
+	// goroutines) so a failing plugin — e.g. a Go plugin whose binary is
+	// missing — fails `krate build` with a non-zero exit instead of silently
+	// dropping the plugin's contribution and exiting 0.
+	pluginErrs []string
+	pluginMu   sync.Mutex
 }
 
 func New(root string, cfg *config.Config) *Builder {
@@ -91,6 +98,28 @@ func New(root string, cfg *config.Config) *Builder {
 		depGraph: make(map[string][]string),
 		pageDeps: make(map[string][]string),
 	}
+}
+
+// pluginFailed records a plugin hook error so the overall build fails with a
+// non-zero exit code. Returns the message recorded ("" when nil).
+func (b *Builder) pluginFailed(err error) string {
+	if err == nil {
+		return ""
+	}
+	msg := err.Error()
+	b.pluginMu.Lock()
+	b.pluginErrs = append(b.pluginErrs, msg)
+	b.pluginMu.Unlock()
+	return msg
+}
+
+// drainPluginErrs returns and clears the accumulated plugin hook errors.
+func (b *Builder) drainPluginErrs() []string {
+	b.pluginMu.Lock()
+	defer b.pluginMu.Unlock()
+	errs := b.pluginErrs
+	b.pluginErrs = nil
+	return errs
 }
 
 // findKrateRoot walks up from the project root to find the krate compiler's root directory.
@@ -198,9 +227,11 @@ func (b *Builder) BuildPages(pages []string) error {
 		}
 		if err := plugin.RunAfterPage(afterPageCtx); err != nil {
 			fmt.Fprintf(os.Stderr, "  %sPlugin error (AfterPage: %s):%s %v\n", cYellow, res.page, cReset, err)
+			b.pluginFailed(err)
 		}
 		if err := plugin.RunCommunityPlugins("AfterPage", b.Cfg.Plugins, b.Root, b.Cfg.OutDir, afterPageCtx); err != nil {
 			fmt.Fprintf(os.Stderr, "  %sCommunity plugin error (AfterPage: %s):%s %v\n", cYellow, res.page, cReset, err)
+			b.pluginFailed(err)
 		}
 		// Apply plugin modifications back
 		result.HTML = afterPageCtx.HTML
@@ -238,6 +269,10 @@ func (b *Builder) BuildPages(pages []string) error {
 	// In-memory HTML generation + string swap + single disk write per page
 	b.writeHTMLPages(results, cssFile, runtimeJS)
 
+	if perrs := b.drainPluginErrs(); len(perrs) > 0 {
+		return fmt.Errorf("build failed: %d plugin error(s):\n  %s", len(perrs), strings.Join(perrs, "\n  "))
+	}
+
 	return nil
 }
 
@@ -270,9 +305,11 @@ func (b *Builder) BuildAll() error {
 	}
 	if err := plugin.RunBeforeBuild(beforeBuildCtx); err != nil {
 		fmt.Fprintf(os.Stderr, "  %sPlugin error (BeforeBuild):%s %v\n", cYellow, cReset, err)
+		b.pluginFailed(err)
 	}
 	if err := plugin.RunCommunityPlugins("BeforeBuild", b.Cfg.Plugins, b.Root, b.Cfg.OutDir, beforeBuildCtx); err != nil {
 		fmt.Fprintf(os.Stderr, "  %sCommunity plugin error (BeforeBuild):%s %v\n", cYellow, cReset, err)
+		b.pluginFailed(err)
 	}
 
 	// Add generated pages (from BeforeBuild hooks like docs plugin)
@@ -292,9 +329,11 @@ func (b *Builder) BuildAll() error {
 	routes, err := plugin.RunGenerateRoutes(routeCtx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "  %sPlugin error (GenerateRoutes):%s %v\n", cYellow, cReset, err)
+		b.pluginFailed(err)
 	}
 	if err := plugin.RunCommunityPlugins("GenerateRoutes", b.Cfg.Plugins, b.Root, b.Cfg.OutDir, routeCtx); err != nil {
 		fmt.Fprintf(os.Stderr, "  %sCommunity plugin error (GenerateRoutes):%s %v\n", cYellow, cReset, err)
+		b.pluginFailed(err)
 	}
 
 	type pageBuildResult struct {
@@ -378,9 +417,11 @@ func (b *Builder) BuildAll() error {
 		}
 		if err := plugin.RunAfterPage(afterPageCtx); err != nil {
 			fmt.Fprintf(os.Stderr, "  %sPlugin error (AfterPage: %s):%s %v\n", cYellow, res.page, cReset, err)
+			b.pluginFailed(err)
 		}
 		if err := plugin.RunCommunityPlugins("AfterPage", b.Cfg.Plugins, b.Root, b.Cfg.OutDir, afterPageCtx); err != nil {
 			fmt.Fprintf(os.Stderr, "  %sCommunity plugin error (AfterPage: %s):%s %v\n", cYellow, res.page, cReset, err)
+			b.pluginFailed(err)
 		}
 		// Apply plugin modifications back to result
 		result.HTML = afterPageCtx.HTML
@@ -571,9 +612,20 @@ func (b *Builder) BuildAll() error {
 	}
 	if err := plugin.RunAfterBuild(afterBuildCtx); err != nil {
 		fmt.Fprintf(os.Stderr, "  %sPlugin error (AfterBuild):%s %v\n", cYellow, cReset, err)
+		b.pluginFailed(err)
 	}
 	if err := plugin.RunCommunityPlugins("AfterBuild", b.Cfg.Plugins, b.Root, b.Cfg.OutDir, afterBuildCtx); err != nil {
 		fmt.Fprintf(os.Stderr, "  %sCommunity plugin error (AfterBuild):%s %v\n", cYellow, cReset, err)
+		b.pluginFailed(err)
+	}
+
+	// Plugin hook errors recorded in parallel page goroutines (AfterParse,
+	// AfterRender, AfterMarkdownParse, AfterPage) must fail the build too —
+	// otherwise `krate build` exits 0 while silently dropping plugin output.
+	perrs := b.drainPluginErrs()
+	if len(perrs) > 0 {
+		failureMessages = append(failureMessages, perrs...)
+		errorCount += len(perrs)
 	}
 
 	if errorCount > 0 {
@@ -762,9 +814,11 @@ func (b *Builder) buildPage(page string) (*PageResult, string, error) {
 	}
 	if err := plugin.RunAfterParse(parseCtx); err != nil {
 		fmt.Fprintf(os.Stderr, "  %sAfterParse plugin error (%s):%s %v\n", cYellow, page, cReset, err)
+		b.pluginFailed(fmt.Errorf("AfterParse (%s): %v", page, err))
 	}
 	if err := plugin.RunCommunityPlugins("AfterParse", b.Cfg.Plugins, b.Root, b.Cfg.OutDir, parseCtx); err != nil {
 		fmt.Fprintf(os.Stderr, "  %sCommunity plugin error AfterParse (%s):%s %v\n", cYellow, page, cReset, err)
+		b.pluginFailed(fmt.Errorf("AfterParse (%s): %v", page, err))
 	}
 	// Plugins may hand back a replacement AST (JS plugins decode the astjson doc
 	// they return; Go-style plugins swap ctx.Program directly). Point the entry
@@ -839,9 +893,11 @@ func (b *Builder) buildPage(page string) (*PageResult, string, error) {
 	}
 	if err := plugin.RunAfterRender(renderCtx); err != nil {
 		fmt.Fprintf(os.Stderr, "  %sAfterRender plugin error (%s):%s %v\n", cYellow, page, cReset, err)
+		b.pluginFailed(fmt.Errorf("AfterRender (%s): %v", page, err))
 	}
 	if err := plugin.RunCommunityPlugins("AfterRender", b.Cfg.Plugins, b.Root, b.Cfg.OutDir, renderCtx); err != nil {
 		fmt.Fprintf(os.Stderr, "  %sCommunity plugin error AfterRender (%s):%s %v\n", cYellow, page, cReset, err)
+		b.pluginFailed(fmt.Errorf("AfterRender (%s): %v", page, err))
 	}
 	// Apply plugin modifications back
 	emitResult.HTML = renderCtx.HTML
