@@ -294,10 +294,16 @@ func findServerRendererSource(root string) string {
 		filepath.Join(root, "packages", "runtime", "src", "server-renderer.ts"),
 		// Monorepo from compiler dir
 		filepath.Join(root, "..", "runtime", "src", "server-renderer.ts"),
-		// npm installed
+		// npm installed — the published @krate/runtime ships only compiled dist/,
+		// so the renderer lives at dist/server-renderer.js (never src/).
+		filepath.Join(root, "node_modules", "@krate", "runtime", "dist", "server-renderer.js"),
+		// npm installed via a nested/hosted workspace root
+		filepath.Join(root, "..", "node_modules", "@krate", "runtime", "dist", "server-renderer.js"),
+		// npm installed with the source tree retained (git installs / local links)
 		filepath.Join(root, "node_modules", "@krate", "runtime", "src", "server-renderer.ts"),
 		// Go binary relative
 		filepath.Join(filepath.Dir(os.Args[0]), "..", "runtime", "src", "server-renderer.ts"),
+		filepath.Join(filepath.Dir(os.Args[0]), "..", "runtime", "dist", "server-renderer.js"),
 	}
 
 	for _, c := range candidates {

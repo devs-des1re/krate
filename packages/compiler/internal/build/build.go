@@ -519,6 +519,8 @@ func (b *Builder) BuildAll() error {
 		// plain node instead of npx tsx on the TS source.
 		if staged := stageServerRenderer(b.Root, b.Cfg.OutDir); staged != "" {
 			fmt.Printf("  %s⚡%s Staged SSR renderer driver\n", cCyan, cReset)
+		} else {
+			fmt.Fprintf(os.Stderr, "  %sWarning: SSR renderer driver not staged — server-renderer source not found under %s (ensure @krate/runtime is installed)%s\n", cYellow, b.Root, cReset)
 		}
 	}
 
