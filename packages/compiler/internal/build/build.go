@@ -24,7 +24,6 @@ import (
 	"github.com/kratejs/krate/packages/compiler/internal/imageproc"
 	"github.com/kratejs/krate/packages/compiler/internal/irtree"
 	"github.com/kratejs/krate/packages/compiler/internal/jsruntime"
-	"github.com/kratejs/krate/packages/compiler/internal/markdown"
 	"github.com/kratejs/krate/packages/compiler/internal/plugin"
 	"github.com/kratejs/krate/packages/compiler/internal/reactive"
 	"github.com/kratejs/krate/packages/compiler/internal/renderer"
@@ -284,6 +283,8 @@ func (b *Builder) BuildAll() error {
 		return fmt.Errorf("creating output dir: %w", err)
 	}
 	defer b.ClosePlugins()
+
+	b.Cfg.Markdown.Root = b.Root
 
 	pages, err := findPages(b.Cfg.PagesDir)
 	if err != nil {
@@ -904,6 +905,28 @@ func (b *Builder) buildPage(page string) (*PageResult, string, error) {
 	emitResult.HeadHTML = renderCtx.HeadHTML
 	bundle.CSS = renderCtx.RawCSS
 
+	// Run AfterMarkdownParse hooks for markdown pages (plugins can modify the
+	// rendered HTML). Markdown pages flow through the normal bundler/emitter
+	// pipeline — the bundler synthesizes an MDX-style TSX bundle (bundler.go
+	// .md/.mdx branch) — so the hook runs against the fully emitted markup.
+	if strings.HasSuffix(page, ".md") || strings.HasSuffix(page, ".mdx") {
+		outName := pageToOutput(page, b.Cfg.PagesDir)
+		mdCtx := &plugin.MarkdownHookCtx{
+			Page:  page,
+			HTML:  emitResult.HTML,
+			Route: outName,
+		}
+		if err := plugin.RunAfterMarkdownParse(mdCtx); err != nil {
+			fmt.Fprintf(os.Stderr, "  %sAfterMarkdownParse plugin error (%s):%s %v\n", cYellow, page, cReset, err)
+			b.pluginFailed(fmt.Errorf("AfterMarkdownParse (%s): %v", page, err))
+		}
+		if err := plugin.RunCommunityPlugins("AfterMarkdownParse", b.Cfg.Plugins, b.Root, b.Cfg.OutDir, mdCtx); err != nil {
+			fmt.Fprintf(os.Stderr, "  %sCommunity plugin error AfterMarkdownParse (%s):%s %v\n", cYellow, page, cReset, err)
+			b.pluginFailed(fmt.Errorf("AfterMarkdownParse (%s): %v", page, err))
+		}
+		emitResult.HTML = mdCtx.HTML
+	}
+
 	// SSR/ISR pages have no component-level regions (any runtime component or
 	// <Suspense> forces streaming). Their whole page body is therefore ONE
 	// coarse region: the shell is baked with the page body wrapped in a splice
@@ -1006,79 +1029,6 @@ func (b *Builder) buildPage(page string) (*PageResult, string, error) {
 		Revalidate: revalidate,
 		SourcePath: relSrc,
 		Regions:    regions,
-	}, bundle.CSS, nil
-}
-
-// buildMarkdownPage renders a .md or .mdx file as a static HTML page.
-func (b *Builder) buildMarkdownPage(page string, bundle *bundler.Bundle) (*PageResult, string, error) {
-	data, err := os.ReadFile(page)
-	if err != nil {
-		return nil, "", fmt.Errorf("reading markdown: %w", err)
-	}
-
-	var htmlContent string
-	props := make(map[string]string)
-
-	if strings.HasSuffix(page, ".mdx") {
-		mdCfg := b.Cfg.Markdown
-		result := markdown.ParseMDX(string(data), mdCfg)
-		htmlContent = result.ReinsertJSXBlocks()
-		for k, v := range result.Frontmatter {
-			props[k] = v
-		}
-	} else {
-		mdCfg := b.Cfg.Markdown
-		htmlContent = markdown.RenderToHTML(string(data), mdCfg)
-	}
-
-	bodyHTML := "<div class=\"md-content\">" + htmlContent + "</div>"
-
-	// Run AfterMarkdownParse hooks (plugins can modify rendered HTML)
-	outName := pageToOutput(page, b.Cfg.PagesDir)
-	mdCtx := &plugin.MarkdownHookCtx{
-		Page:  page,
-		HTML:  bodyHTML,
-		Route: outName,
-	}
-	if err := plugin.RunAfterMarkdownParse(mdCtx); err != nil {
-		fmt.Fprintf(os.Stderr, "  %sAfterMarkdownParse plugin error (%s):%s %v\n", cYellow, page, cReset, err)
-	}
-	if err := plugin.RunCommunityPlugins("AfterMarkdownParse", b.Cfg.Plugins, b.Root, b.Cfg.OutDir, mdCtx); err != nil {
-		fmt.Fprintf(os.Stderr, "  %sCommunity plugin error AfterMarkdownParse (%s):%s %v\n", cYellow, page, cReset, err)
-	}
-	// Apply plugin modifications back
-	bodyHTML = mdCtx.HTML
-
-	deps := []string{page}
-	for _, mod := range bundle.Modules {
-		if mod.Path != page {
-			deps = append(deps, mod.Path)
-		}
-	}
-
-	layoutPath := findLayout(page, b.Cfg.PagesDir)
-	if layoutPath != "" {
-		layoutRes, layoutCSS, err := b.executeLayoutPipeline(layoutPath, bodyHTML, props)
-		if err == nil {
-			bodyHTML = layoutRes.HTML
-			bundle.CSS += layoutCSS
-		}
-	}
-
-	// Save data structures without writing to media yet
-	return &PageResult{
-		Page:        page,
-		OutName:     outName,
-		HTML:        bodyHTML,
-		HeadHTML:    "",
-		ScriptHTML:  "",
-		StyleHTML:   "",
-		HydrationJS: "",
-		HasJS:       false,
-		JSFile:      "",
-		HasCSS:      bundle.CSS != "",
-		UsedCSS:     make(map[string]bool),
-		UsedFuncs:   make(map[string]bool),
 	}, bundle.CSS, nil
 }
 
