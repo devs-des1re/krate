@@ -283,6 +283,11 @@ type ComponentNode struct {
 	Effects      []string
 	Memos        []string
 	ExtraVars    []string
+	// PreSignalVars holds local variable declarations that must be emitted
+	// BEFORE signal initializers. Signal RawInits like createSignal(initial.x)
+	// evaluate local values at hydration time, so any local var they reference
+	// has to be declared first (JS hoists `var` names to undefined, not values).
+	PreSignalVars []string
 	// BodyUses lists every signal read or written anywhere in the component's
 	// function body (including named functions and control flow), so the
 	// reactive validator knows these signals are used even when they don't
@@ -348,18 +353,19 @@ func NewRuntimePropStore() *RuntimePropStore {
 
 // ─── ComponentSignature — serializable metadata for SPA reconciliation ─────
 type ComponentSignature struct {
-	ComponentID  SlotID
-	Tier         ComponentTier
-	Signals      []SignalDecl
-	Handlers     []HandlerDecl
-	RefBindings  []RefBinding
-	Effects      []string
-	Memos        []string
-	ExtraVars    []string
-	BodyUses     []string
-	Children     []SlotID
-	SlotBindings []SlotBinding
-	AttrBindings []AttrBinding
+	ComponentID   SlotID
+	Tier          ComponentTier
+	Signals       []SignalDecl
+	Handlers      []HandlerDecl
+	RefBindings   []RefBinding
+	Effects       []string
+	Memos         []string
+	ExtraVars     []string
+	PreSignalVars []string
+	BodyUses      []string
+	Children      []SlotID
+	SlotBindings  []SlotBinding
+	AttrBindings  []AttrBinding
 }
 
 // ─── SlotBinding — describes a content binding for hydration ────────────────

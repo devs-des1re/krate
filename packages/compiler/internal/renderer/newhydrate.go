@@ -48,8 +48,8 @@ func GenerateNewHydrationJS(result *EmitResult) string {
 			continue
 		}
 		if len(sig.Signals) > 0 || len(sig.Handlers) > 0 || len(sig.Effects) > 0 ||
-			len(sig.Memos) > 0 || len(sig.ExtraVars) > 0 || len(sig.SlotBindings) > 0 ||
-			len(sig.AttrBindings) > 0 {
+			len(sig.Memos) > 0 || len(sig.ExtraVars) > 0 || len(sig.PreSignalVars) > 0 ||
+			len(sig.SlotBindings) > 0 || len(sig.AttrBindings) > 0 {
 			hasWork = true
 			break
 		}
@@ -91,6 +91,15 @@ func GenerateNewHydrationJS(result *EmitResult) string {
 				b.WriteString(ev)
 				b.WriteString(";\n")
 			}
+		}
+
+		// Local values a signal initializer may evaluate at hydration time
+		// (e.g. createSignal(initial.value)) must be declared before the signal
+		// declarations. These never read signals themselves, so ordering them
+		// ahead is safe.
+		for _, ev := range sig.PreSignalVars {
+			b.WriteString(ev)
+			b.WriteString(";\n")
 		}
 
 		for _, s := range sig.Signals {

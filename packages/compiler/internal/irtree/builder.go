@@ -172,12 +172,31 @@ func (b *builder) buildComponentNode(fn *ast.FnDecl, parentID string) *Component
 	node.Signals = b.collectSignalDecls(fn.Body)
 	node.BodyUses = b.collectBodySignalUses(fn.Body, node.Signals)
 
+	// Set component-local signal context before collecting effects/memos/extra
+	// vars: component's own signals take precedence over the global annotation
+	// map so signal reads resolve to the correct initial value even with name
+	// collisions across components — and signal-referencing classifications for
+	// extra vars see the current component's signals, not just the parent's.
+	savedLocalSignals := b.localSignals
+	if len(node.Signals) > 0 {
+		merged := make(map[string]ast.Expr, len(b.ann.Signals)+len(node.Signals))
+		for k, v := range b.ann.Signals {
+			merged[k] = v
+		}
+		for _, sig := range node.Signals {
+			if sig.InitialExpr != nil {
+				merged[sig.Name] = sig.InitialExpr
+			}
+		}
+		b.localSignals = merged
+	}
+
 	// Client-only: effects, memos, extra vars
 	if tier == TierClient {
 		node.InstanceID = deriveInstanceID(string(id))
 		node.Effects = b.collectEffectJS(fn.Body)
 		node.Memos = b.collectMemoJS(fn.Body)
-		node.ExtraVars = b.collectExtraVarJS(fn.Body)
+		node.PreSignalVars, node.ExtraVars = b.collectExtraVarJS(fn.Body)
 		node.ExtraVars = append(node.ExtraVars, b.collectResourceJS(fn.Body)...)
 	}
 
@@ -210,23 +229,6 @@ func (b *builder) buildComponentNode(fn *ast.FnDecl, parentID string) *Component
 	// `ref={myRef}` binding assigns `.current` instead of clobbering the object.
 	savedRefObjectVars := b.refObjectVars
 	b.refObjectVars = collectRefObjectVars(fn.Body)
-
-	// Set component-local signal context: component's own signals take
-	// precedence over the global annotation map so signal reads resolve to
-	// the correct initial value even with name collisions across components.
-	savedLocalSignals := b.localSignals
-	if len(node.Signals) > 0 {
-		merged := make(map[string]ast.Expr, len(b.ann.Signals)+len(node.Signals))
-		for k, v := range b.ann.Signals {
-			merged[k] = v
-		}
-		for _, sig := range node.Signals {
-			if sig.InitialExpr != nil {
-				merged[sig.Name] = sig.InitialExpr
-			}
-		}
-		b.localSignals = merged
-	}
 
 	// Named memos (const doubled = createMemo(() => ...)) are treated as local
 	// reactive getters: mapping the getter to its arrow body expression lets
@@ -336,6 +338,7 @@ func (b *builder) buildComponentNode(fn *ast.FnDecl, parentID string) *Component
 		// function that only composes JSX from its props.
 		if len(node.Signals) == 0 && len(node.Effects) == 0 &&
 			len(node.Memos) == 0 && len(node.ExtraVars) == 0 &&
+			len(node.PreSignalVars) == 0 &&
 			len(node.Handlers) == 0 && len(node.AttrBindings) == 0 &&
 			len(node.RefBindings) == 0 {
 			tier = TierStatic
@@ -2415,13 +2418,55 @@ func (b *builder) referencesSignal(expr ast.Expr) bool {
 				return true
 			}
 		}
-		return b.referencesSignal(e.Callee)
+		if b.referencesSignal(e.Callee) {
+			return true
+		}
+		for _, a := range e.Args {
+			if b.referencesSignal(a) {
+				return true
+			}
+		}
+		return false
 	case *ast.MemberExpr:
 		return b.referencesSignal(e.Object)
 	case *ast.BinaryExpr:
 		return b.referencesSignal(e.Left) || b.referencesSignal(e.Right)
 	case *ast.ConditionalExpr:
 		return b.referencesSignal(e.Test) || b.referencesSignal(e.Consequent) || b.referencesSignal(e.Alternate)
+	case *ast.ArrayExpr:
+		for _, el := range e.Elements {
+			if b.referencesSignal(el) {
+				return true
+			}
+		}
+		return false
+	case *ast.ObjectExpr:
+		for _, p := range e.Properties {
+			if b.referencesSignal(p.Value) {
+				return true
+			}
+		}
+		return false
+	case *ast.ArrowFn:
+		// Arrow bodies execute immediately in some positions (e.g. inside
+		// createMemo(() => count() * 2) or createEffect), so a signal read
+		// inside the thunk matters for dependency ordering.
+		for _, s := range e.Body {
+			if stmtReferenceSignal(s, b) {
+				return true
+			}
+		}
+		return false
+	case *ast.NewExpr:
+		if b.referencesSignal(e.Callee) {
+			return true
+		}
+		for _, a := range e.Args {
+			if b.referencesSignal(a) {
+				return true
+			}
+		}
+		return false
 	case *ast.UnaryExpr:
 		return b.referencesSignal(e.Arg)
 	case *ast.TemplateExpr:
@@ -2998,8 +3043,14 @@ func (b *builder) collectMemoJS(body []ast.Stmt) []string {
 
 // ─── collectExtraVarJS from function body ──────────────────────────────────
 
-func (b *builder) collectExtraVarJS(body []ast.Stmt) []string {
-	var vars []string
+// collectExtraVarJS walks top-level value declarations and returns them split
+// into two groups: pre (declarations that reference NO signal getters, safe to
+// emit before signal declarations) and post (declarations that read signals,
+// which must come after the signal decls they depend on). Signal initializers
+// like createSignal(initial.value) evaluate local values at hydration time, so
+// a plain local object placed in `pre` is declared first — matching source
+// order.
+func (b *builder) collectExtraVarJS(body []ast.Stmt) (pre, post []string) {
 	for _, stmt := range body {
 		switch s := stmt.(type) {
 		case *ast.VarStmt:
@@ -3020,19 +3071,122 @@ func (b *builder) collectExtraVarJS(body []ast.Stmt) []string {
 					}
 					if !decl.IsDestructuring && !referencesProps(decl.Init) {
 						js := generateExprJS(decl.Init, b.sigMap())
-						vars = append(vars, "var "+decl.Name+"="+js)
+						if b.referencesSignal(decl.Init) {
+							post = append(post, "var "+decl.Name+"="+js)
+						} else {
+							pre = append(pre, "var "+decl.Name+"="+js)
+						}
 					}
 				}
 			}
+		case *ast.BlockStmt:
+			p, po := b.collectExtraVarJS(s.Body)
+			pre = append(pre, p...)
+			post = append(post, po...)
+		case *ast.IfStmt:
+			if stmtsReferenceSignal(s.Consequent, b) || stmtsReferenceSignal(s.Alternate, b) {
+				post = append(post, renderStmtJS(s, b.sigMap()))
+			} else {
+				pre = append(pre, renderStmtJS(s, b.sigMap()))
+			}
 		case *ast.ForStmt:
-			vars = append(vars, renderStmtJS(s, b.sigMap()))
+			renderLoopStmt(&pre, &post, s, b)
+		case *ast.ForInStmt:
+			renderLoopStmt(&pre, &post, s, b)
 		case *ast.WhileStmt:
-			vars = append(vars, renderStmtJS(s, b.sigMap()))
+			renderLoopStmt(&pre, &post, s, b)
 		case *ast.DoWhileStmt:
-			vars = append(vars, renderStmtJS(s, b.sigMap()))
+			renderLoopStmt(&pre, &post, s, b)
 		}
 	}
-	return vars
+	return pre, post
+}
+
+func renderLoopStmt(pre, post *[]string, s ast.Stmt, b *builder) {
+	js := renderStmtJS(s, b.sigMap())
+	if stmtsReferenceSignal([]ast.Stmt{s}, b) {
+		*post = append(*post, js)
+	} else {
+		*pre = append(*pre, js)
+	}
+}
+
+// stmtsReferenceSignal reports whether any statement in the list reads a
+// signal getter, either directly or nested in blocks/control flow.
+func stmtsReferenceSignal(stmts []ast.Stmt, b *builder) bool {
+	for _, stmt := range stmts {
+		if stmtReferenceSignal(stmt, b) {
+			return true
+		}
+	}
+	return false
+}
+
+func stmtReferenceSignal(stmt ast.Stmt, b *builder) bool {
+	switch s := stmt.(type) {
+	case *ast.VarStmt:
+		for _, d := range s.Decls {
+			if d.Init != nil && b.referencesSignal(d.Init) {
+				return true
+			}
+		}
+	case *ast.BlockStmt:
+		if stmtsReferenceSignal(s.Body, b) {
+			return true
+		}
+	case *ast.IfStmt:
+		if b.referencesSignal(s.Test) || stmtsReferenceSignal(s.Consequent, b) || stmtsReferenceSignal(s.Alternate, b) {
+			return true
+		}
+	case *ast.ForStmt:
+		if s.Init != nil && stmtReferenceSignal(s.Init, b) {
+			return true
+		}
+		if b.referencesSignal(s.Test) || b.referencesSignal(s.Update) || stmtsReferenceSignal(s.Body, b) {
+			return true
+		}
+	case *ast.ForInStmt:
+		if b.referencesSignal(s.Right) || stmtsReferenceSignal(s.Body, b) {
+			return true
+		}
+	case *ast.WhileStmt:
+		if b.referencesSignal(s.Test) || stmtsReferenceSignal(s.Body, b) {
+			return true
+		}
+	case *ast.DoWhileStmt:
+		if b.referencesSignal(s.Test) || stmtsReferenceSignal(s.Body, b) {
+			return true
+		}
+	case *ast.SwitchStmt:
+		if b.referencesSignal(s.Discriminant) {
+			return true
+		}
+		for _, c := range s.Cases {
+			if stmtsReferenceSignal(c.Body, b) {
+				return true
+			}
+		}
+	case *ast.TryStmt:
+		if stmtsReferenceSignal(s.Body, b) || stmtsReferenceSignal(s.Finally, b) {
+			return true
+		}
+		if s.Catch != nil && stmtsReferenceSignal(s.Catch.Body, b) {
+			return true
+		}
+	case *ast.ExprStmt:
+		if b.referencesSignal(s.Expression) {
+			return true
+		}
+	case *ast.ReturnStmt:
+		if b.referencesSignal(s.Value) {
+			return true
+		}
+	case *ast.ThrowStmt:
+		if b.referencesSignal(s.Value) {
+			return true
+		}
+	}
+	return false
 }
 
 // ─── collectSignalReads from an expression ─────────────────────────────────

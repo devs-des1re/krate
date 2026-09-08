@@ -465,18 +465,19 @@ func (e *Emitter) emitClient(node *irtree.ComponentNode) SlotOutput {
 		}
 	}
 	sig := irtree.ComponentSignature{
-		ComponentID:  node.ID,
-		Tier:         node.Tier,
-		Signals:      node.Signals,
-		Handlers:     node.Handlers,
-		RefBindings:  node.RefBindings,
-		Effects:      node.Effects,
-		Memos:        node.Memos,
-		ExtraVars:    node.ExtraVars,
-		BodyUses:     node.BodyUses,
-		Children:     childIDs,
-		SlotBindings: slotBindings,
-		AttrBindings: node.AttrBindings,
+		ComponentID:   node.ID,
+		Tier:          node.Tier,
+		Signals:       node.Signals,
+		Handlers:      node.Handlers,
+		RefBindings:   node.RefBindings,
+		Effects:       node.Effects,
+		Memos:         node.Memos,
+		ExtraVars:     node.ExtraVars,
+		PreSignalVars: node.PreSignalVars,
+		BodyUses:      node.BodyUses,
+		Children:      childIDs,
+		SlotBindings:  slotBindings,
+		AttrBindings:  node.AttrBindings,
 	}
 	out.Signatures = append([]irtree.ComponentSignature{sig}, out.Signatures...)
 

@@ -404,6 +404,47 @@ export default function Page() {
 	}
 }
 
+func TestHydrationJSLocalVarPrecedesSignalInit(t *testing.T) {
+	// Regression for the release-qualification "initializer" probe: a signal
+	// whose initializer reads a local object (`var initial = {value:7}` then
+	// createSignal(initial.value)) must not emit the signal before the local
+	// declaration. `var` hoists the name to undefined, so signal-first emission
+	// throws "Cannot read properties of undefined" at hydration (createSignal(
+	// initial.value); var initial={value:7};).
+	src := `function Widget() {
+  var initial = { value: 7 };
+  var [count, setCount] = createSignal(initial.value);
+  var doubled = count() * 2;
+  return <div onClick={() => setCount(count() + 1)}>{count()} {doubled}</div>;
+}
+export default function Page() {
+  return <Widget />;
+}`
+	_, js := fullPipeline(t, src)
+	initIdx := strings.Index(js, "initial.value")
+	declIdx := strings.Index(js, "var initial=")
+	if initIdx == -1 {
+		t.Fatalf("expected signal init to reference the local var, got:\n%s", js)
+	}
+	if declIdx == -1 {
+		t.Fatalf("expected local var declaration, got:\n%s", js)
+	}
+	if declIdx > initIdx {
+		t.Errorf("local var (%d) must be declared before signal init (%d):\n%s", declIdx, initIdx, js)
+	}
+
+	// A local var that reads a signal getter must stay AFTER the signal
+	// declaration (const [count,...]=createSignal(...)) it depends on.
+	sigIdx := strings.Index(js, "const [count,setCount]=createSignal(")
+	doubledIdx := strings.Index(js, "var doubled=")
+	if sigIdx == -1 || doubledIdx == -1 {
+		t.Fatalf("expected signal decl and signal-reading var, got:\n%s", js)
+	}
+	if doubledIdx < sigIdx {
+		t.Errorf("signal-reading var (%d) must come after signal decl (%d):\n%s", doubledIdx, sigIdx, js)
+	}
+}
+
 func TestHydrationJSWithTopLevelOnCleanup(t *testing.T) {
 	src := `function Widget() {
   onCleanup(function () {
