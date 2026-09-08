@@ -169,6 +169,43 @@ func dumpPage(t *testing.T, prog *ast.Program) string {
 	return string(b)
 }
 
+// TestGoPluginOfficialDescriptorWithImportMeta reproduces the official Go
+// plugin example's descriptor shape (examples/plugins/krate-plugin-demo-go):
+// a CommonJS `module.exports = function() {...}` descriptor that also
+// references `import.meta.url` for its `module:` self-path. esbuild treats such
+// a file as ESM (due to import.meta) and leaves the `module.exports`
+// assignment unwrapped, so discovery used to throw "module is not defined".
+// The loader must shim CommonJS for manifest discovery so the official example
+// loads and its per-platform binary is resolved.
+func TestGoPluginOfficialDescriptorWithImportMeta(t *testing.T) {
+	pkgDir := t.TempDir()
+	desc := `module.exports = function() {
+  return {
+    name: "demo-go",
+    order: 10,
+    module: (typeof import.meta !== "undefined" && import.meta.url) ? import.meta.url : "",
+    runtime: "go",
+    hooks: { BeforeBuild: null, AfterParse: null, AfterRender: null, ServeRequest: null, ServeResponse: null },
+    binaries: { "` + platformKey() + `": "bin/plugin" },
+  };
+};
+`
+	if err := os.WriteFile(filepath.Join(pkgDir, "index.js"), []byte(desc), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := discoverGoManifest(pkgDir)
+	if err != nil {
+		t.Fatalf("discoverGoManifest with official-style descriptor: %v", err)
+	}
+	if got.Runtime != "go" {
+		t.Errorf("runtime = %q, want go", got.Runtime)
+	}
+	if got.Binaries[platformKey()] != "bin/plugin" {
+		t.Errorf("binaries = %v, want host platform -> bin/plugin", got.Binaries)
+	}
+}
+
 // TestGoPluginDiscoveryAndRouting exercises the full host path: a module whose
 // JS descriptor advertises runtime "go" with a per-platform binary. Krate must
 // discover the manifest, resolve the binary for the host platform, spawn it via

@@ -110,12 +110,22 @@ func runJSManifest(module string) (goPluginDescriptor, error) {
 		return goPluginDescriptor{}, fmt.Errorf("creating JS runtime for manifest: %w", err)
 	}
 	defer rt.Close()
+	// Prelude a CommonJS shim so descriptor files written as
+	// `module.exports = ...` (the documented Go-plugin shape) load even when
+	// esbuild leaves the `module.exports` assignment unwrapped — which happens
+	// when the file also references `import.meta` (esbuild then treats it as
+	// ESM and does NOT convert the CJS export to the __kratePlugin global).
+	// Pure ESM bundles ignore the shim and still set __kratePlugin; pure CJS
+	// bundles are fully wrapped by esbuild and set __kratePlugin directly.
+	if _, err := rt.Execute("var __krateModuleShimExports={}; var module={exports:__krateModuleShimExports};"); err != nil {
+		return goPluginDescriptor{}, fmt.Errorf("initializing plugin module scope: %w", err)
+	}
 	if _, err := rt.Execute(bundleCode); err != nil {
 		return goPluginDescriptor{}, fmt.Errorf("loading plugin module for manifest: %w", err)
 	}
 	call := `(function(){
       try {
-        var mod = __kratePlugin || {};
+        var mod = (module && module.exports !== __krateModuleShimExports) ? module.exports : (__kratePlugin || {});
         var plugin = mod.default || mod;
         if (typeof plugin === 'function') plugin = plugin({});
         var desc = plugin || {};
