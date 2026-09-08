@@ -939,18 +939,7 @@ func (b *Builder) buildPage(page string) (*PageResult, string, error) {
 		emitResult.HTML = "<!--suspense:page-->" + emitResult.HTML + "<!--/suspense:page-->"
 	}
 
-	layoutPath := findLayout(page, b.Cfg.PagesDir)
-	if layoutPath != "" {
-		layoutRes, layoutCSS, err := b.executeLayoutPipeline(layoutPath, emitResult.HTML, nil)
-		if err == nil {
-			emitResult.HTML = layoutRes.HTML
-			// Merge metadata from layout
-			emitResult.HeadHTML = emitResult.HeadHTML + layoutRes.HeadHTML
-			emitResult.ScriptHTML = emitResult.ScriptHTML + layoutRes.ScriptHTML
-			emitResult.StyleHTML = emitResult.StyleHTML + layoutRes.StyleHTML
-			bundle.CSS += layoutCSS
-		}
-	}
+	bundle.CSS += b.applyLayoutStack(page, emitResult)
 
 	b.recordDeps(page, deps)
 
@@ -1390,6 +1379,66 @@ func findLayout(pagePath, pagesDir string) string {
 	return findLayoutFile(pagePath, pagesDir, layoutNames)
 }
 
+// findLayoutStack returns every layout wrapping pagePath, ordered innermost
+// first: the layout nearest to the page, then each ancestor layout up to (and
+// including) the pagesDir root. A page under blog/ with both blog/_layout and
+// _layout at pagesDir gets [blog/_layout, pagesDir/_layout] so the root shell
+// (nav/footer) can wrap a nested section layout. Pages outside pagesDir (e.g.
+// .krate/gen plugin pages) only collect layouts found in their own tree and
+// never fall back to the app root layout.
+func findLayoutStack(pagePath, pagesDir string) []string {
+	var stack []string
+	dir := filepath.Dir(pagePath)
+	for {
+		for _, name := range layoutNames {
+			candidate := filepath.Join(dir, name)
+			if cached, ok := layoutCache.Load(candidate); ok {
+				if cached.(string) != "" {
+					stack = append(stack, cached.(string))
+				}
+				continue
+			}
+			if _, err := os.Stat(candidate); err == nil {
+				layoutCache.Store(candidate, candidate)
+				stack = append(stack, candidate)
+			} else {
+				layoutCache.Store(candidate, "")
+			}
+		}
+		if dir == pagesDir {
+			break
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			break
+		}
+		dir = parent
+	}
+	return stack
+}
+
+// applyLayoutStack wraps emitResult.HTML in every layout returned by
+// findLayoutStack, innermost first. Each layout's metadata (head/script/style)
+// is merged after the inner content so an outer layout's own head/style lands
+// after (and thus after the nested section's). A layout that fails to build is
+// skipped so the page still emits unwrapped. Returns the CSS contributed by the
+// applied layouts.
+func (b *Builder) applyLayoutStack(page string, emitResult *renderer.EmitResult) string {
+	var css string
+	for _, layoutPath := range findLayoutStack(page, b.Cfg.PagesDir) {
+		layoutRes, layoutCSS, err := b.executeLayoutPipeline(layoutPath, emitResult.HTML, nil)
+		if err != nil {
+			continue
+		}
+		emitResult.HTML = layoutRes.HTML
+		emitResult.HeadHTML = emitResult.HeadHTML + layoutRes.HeadHTML
+		emitResult.ScriptHTML = emitResult.ScriptHTML + layoutRes.ScriptHTML
+		emitResult.StyleHTML = emitResult.StyleHTML + layoutRes.StyleHTML
+		css += layoutCSS
+	}
+	return css
+}
+
 var (
 	layoutNames  = []string{"_layout.tsx", "_layout.ts", "_layout.jsx", "_layout.js"}
 	loadingNames = []string{"loading.tsx", "loading.ts", "loading.jsx", "loading.js"}
@@ -1599,6 +1648,11 @@ func pageToOutput(page, pagesDir string) string {
 	// and region requests. Callers that touch the filesystem join it with
 	// filepath.Join, which re-applies the OS separator.
 	name := filepath.ToSlash(strings.TrimSuffix(rel, filepath.Ext(rel)))
+	// A nested index page (blog/index.tsx) is the directory's default page: it
+	// maps to the parent route (blog) so /blog/ serves it — not the odd
+	// /blog/index URL (which would 404 into a directory listing at /blog/).
+	// Matches the .krate/gen behavior just above.
+	name = strings.TrimSuffix(name, "/index")
 	if name == "index" || name == "home" {
 		return "."
 	}

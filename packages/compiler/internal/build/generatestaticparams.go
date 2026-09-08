@@ -286,14 +286,7 @@ func (b *Builder) buildStaticParamsPage(spp staticParamsPage) (*PageResult, stri
 
 	layoutPath := findLayout(spp.PagePath, b.Cfg.PagesDir)
 	if layoutPath != "" {
-		layoutRes, layoutCSS, err := b.executeLayoutPipeline(layoutPath, emitResult.HTML, nil)
-		if err == nil {
-			emitResult.HTML = layoutRes.HTML
-			emitResult.HeadHTML = emitResult.HeadHTML + layoutRes.HeadHTML
-			emitResult.ScriptHTML = emitResult.ScriptHTML + layoutRes.ScriptHTML
-			emitResult.StyleHTML = emitResult.StyleHTML + layoutRes.StyleHTML
-			bundle.CSS += layoutCSS
-		}
+		bundle.CSS += b.applyLayoutStack(spp.PagePath, emitResult)
 	}
 
 	pageDir := filepath.Join(b.Cfg.OutDir, spp.OutPath)
