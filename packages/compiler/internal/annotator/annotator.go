@@ -551,8 +551,13 @@ func MergeModuleFunctions(ann *irtree.Annotations, modules []ModuleSource) {
 			collectFunctionsWithSource(mod.Program.Body, ann.Functions, ann.ComponentSources, ann.ComponentRaw, mod.Path, mod.RawSource)
 		}
 	}
-	// Re-walk used components to pick up newly discovered functions
+	// Re-walk used components to pick up newly discovered functions. The used
+	// map is reset first: the initial walk ran before imported modules were
+	// merged, so its `!used[name]` guard would otherwise prevent re-entering
+	// already-used components whose bodies reference the newly merged ones
+	// (e.g. a page-local component rendering an imported <Badge/>).
 	if ann.EntryPoint != "" {
+		ann.UsedComponents = map[string]bool{}
 		collectUsedFuncs(ann.Functions, ann.EntryPoint, ann.UsedComponents)
 	}
 	// Collect signal declarations for any newly discovered components so the

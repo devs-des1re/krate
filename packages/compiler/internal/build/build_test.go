@@ -117,14 +117,26 @@ func TestBuildTestProject(t *testing.T) {
 	}
 
 	// Verify syntax-robustness page renders alias-imported components. The
-	// Badge component is imported via `@/components/ui/badge` and
-	// `@components/ui/badge`; its `<span class="badge">` markup only appears if
-	// the @-alias imports resolved through the bundler.
+	// Badge component is imported via `@/components/ui/badge`; its
+	// `<span class="badge">` markup only appears if the @-alias imports
+	// resolved through the bundler AND the imported component was merged into
+	// the annotation set (page-local MiscDemo renders it in both slots).
 	syntaxPage := filepath.Join(outDir, "syntax-robustness", "index.html")
 	if data, err := os.ReadFile(syntaxPage); err == nil {
 		content := string(data)
 		if !strings.Contains(content, "Syntax Robustness") {
 			t.Errorf("syntax-robustness page missing heading")
+		}
+		// Minification drops the quotes around attribute values, so match both.
+		badge1 := `<span class="badge">fragment + spread attrs</span>`
+		badge1Min := "<span class=badge>fragment + spread attrs</span>"
+		badge2 := `<span class="badge">fragments render children</span>`
+		badge2Min := "<span class=badge>fragments render children</span>"
+		if !strings.Contains(content, badge1) && !strings.Contains(content, badge1Min) {
+			t.Errorf("syntax-robustness page missing alias-imported <Badge> markup (alias import or module merge dropped it)")
+		}
+		if !strings.Contains(content, badge2) && !strings.Contains(content, badge2Min) {
+			t.Errorf("syntax-robustness page missing second alias-imported <Badge> markup")
 		}
 	}
 
@@ -264,6 +276,38 @@ export default function Page() {
 	}
 	if !strings.Contains(err.Error(), "render failed") {
 		t.Errorf("expected render-failed error, got: %v", err)
+	}
+}
+
+func TestFindServerRendererSourceNpmLayout(t *testing.T) {
+	// Simulate a consumer app whose node_modules/@krate/runtime ships only the
+	// compiled dist/ (matching the published package's "files": ["dist"]).
+	fakeRoot := t.TempDir()
+	runtimePkg := filepath.Join(fakeRoot, "node_modules", "@krate", "runtime")
+	if err := os.MkdirAll(filepath.Join(runtimePkg, "dist"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	rendererJS := "export default function createServer(){return null;}"
+	if err := os.WriteFile(filepath.Join(runtimePkg, "dist", "server-renderer.js"), []byte(rendererJS), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	src := findServerRendererSource(fakeRoot)
+	if src == "" {
+		t.Fatal("findServerRendererSource failed to locate dist/server-renderer.js in an npm layout")
+	}
+	if !strings.HasSuffix(src, "server-renderer.js") {
+		t.Errorf("expected the compiled renderer, got %q", src)
+	}
+
+	// Staging the compiled JS must produce a bundle without needing the source tree.
+	outDir := filepath.Join(fakeRoot, "dist")
+	staged := stageServerRenderer(fakeRoot, outDir)
+	if staged == "" {
+		t.Fatal("stageServerRenderer failed to stage from compiled dist renderer")
+	}
+	if _, err := os.Stat(staged); err != nil {
+		t.Fatalf("staged driver missing: %v", err)
 	}
 }
 

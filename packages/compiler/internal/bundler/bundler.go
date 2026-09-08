@@ -147,6 +147,16 @@ func (b *Bundler) resolveImportForModule(importer, imp string) string {
 		if resolved != "" {
 			return resolved
 		}
+		// Fallback: tsconfig paths targets are normally relative to baseUrl,
+		// but many projects declare them relative to the project root (e.g.
+		// `@/*: ["./src/*"]`). When baseUrl resolution misses, try the root the
+		// tsconfig lives in.
+		if b.root != "" && b.root != b.tsBaseDir {
+			resolved = resolvePathAlias(imp, b.pathAliases, b.root)
+			if resolved != "" {
+				return resolved
+			}
+		}
 	}
 	return ""
 }

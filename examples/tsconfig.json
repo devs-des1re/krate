@@ -13,7 +13,7 @@
     "outDir": "./dist",
     "rootDir": "./src",
     "declaration": false,
-    "baseUrl": "./src",
+    "baseUrl": ".",
     "paths": {
       "@/*": ["./src/*"]
     }
