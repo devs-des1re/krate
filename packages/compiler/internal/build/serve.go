@@ -309,7 +309,7 @@ func streamRegionPage(w http.ResponseWriter, flusher http.Flusher, absOut, route
 	res.served = true
 
 	type boundary struct {
-		openEnd int    // index just past the opening marker's "-->"
+		openEnd int // index just past the opening marker's "-->"
 		id      string
 		kind    string // "suspense" | "region"
 		fbStart int    // start of inner content (for suspense: baked content)
@@ -686,33 +686,37 @@ func serve(root string, cfg *config.Config, reload <-chan []string, startTime ti
 	}
 
 	handlerWith404 := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Check dynamic routes first — if a URL matches a [param] pattern, serve the template
-		for _, dr := range dynRoutes {
-			if params, ok := matchDynamicRoute(r.URL.Path, dr.pattern); ok {
-				templatePath := filepath.Join(dr.dir, "index.html")
-				templateHTML, err := os.ReadFile(templatePath)
-				if err != nil {
-					break
+		// A concrete static file beats any dynamic [param] pattern: /items/alpha
+		// must resolve to the static page, not the /items/[id] template.
+		if !staticRouteExists(absOut, r.URL.Path) {
+			// Check dynamic routes — if a URL matches a [param] pattern, serve the template
+			for _, dr := range dynRoutes {
+				if params, ok := matchDynamicRoute(r.URL.Path, dr.pattern); ok {
+					templatePath := filepath.Join(dr.dir, "index.html")
+					templateHTML, err := os.ReadFile(templatePath)
+					if err != nil {
+						break
+					}
+					pageHTML := string(templateHTML)
+
+					// Inject params as a script tag before </head> for client-side access
+					paramsJSON, _ := json.Marshal(params)
+					injectScript := "<script>window.__KRATE_PARAMS__=" + string(paramsJSON) + "</script>"
+					pageHTML = strings.Replace(pageHTML, "</head>", injectScript+"</head>", 1)
+
+					// Replace signal-bound text nodes with actual param values.
+					// The build renders [param] pages with placeholder values (e.g. "unknown").
+					// We replace those with the actual matched param values so the page
+					// displays correctly even before hydration runs.
+					for _, paramValue := range params {
+						pageHTML = strings.ReplaceAll(pageHTML, ">unknown<", ">"+html.EscapeString(paramValue)+"<")
+					}
+
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					w.WriteHeader(200)
+					w.Write([]byte(pageHTML))
+					return
 				}
-				pageHTML := string(templateHTML)
-
-				// Inject params as a script tag before </head> for client-side access
-				paramsJSON, _ := json.Marshal(params)
-				injectScript := "<script>window.__KRATE_PARAMS__=" + string(paramsJSON) + "</script>"
-				pageHTML = strings.Replace(pageHTML, "</head>", injectScript+"</head>", 1)
-
-				// Replace signal-bound text nodes with actual param values.
-				// The build renders [param] pages with placeholder values (e.g. "unknown").
-				// We replace those with the actual matched param values so the page
-				// displays correctly even before hydration runs.
-				for _, paramValue := range params {
-					pageHTML = strings.ReplaceAll(pageHTML, ">unknown<", ">"+html.EscapeString(paramValue)+"<")
-				}
-
-				w.Header().Set("Content-Type", "text/html; charset=utf-8")
-				w.WriteHeader(200)
-				w.Write([]byte(pageHTML))
-				return
 			}
 		}
 
@@ -803,6 +807,13 @@ func serve(root string, cfg *config.Config, reload <-chan []string, startTime ti
 	// SSR/ISR/Streaming page handler — proxies dynamic pages to the Node.js renderer
 	var ssrPageHandler http.Handler = http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !ssrStarted {
+			handlerWith404.ServeHTTP(w, r)
+			return
+		}
+
+		// A concrete static page beats a dynamic [param] pattern: /items/alpha
+		// must serve the static build, never the /items/[id] ISR template.
+		if staticRouteExists(absOut, r.URL.Path) {
 			handlerWith404.ServeHTTP(w, r)
 			return
 		}
@@ -1298,6 +1309,31 @@ func rewriteDestination(path, source, destination string) string {
 		return destination + suffix
 	}
 	return destination
+}
+
+// staticRouteExists reports whether the output dir holds a concrete static
+// file for the URL path — in which case dynamic [param] routing must give way.
+func staticRouteExists(absOut, urlPath string) bool {
+	up, err := url.PathUnescape(urlPath)
+	if err != nil {
+		up = urlPath
+	}
+	rel := strings.Trim(strings.TrimPrefix(up, "/"), "/")
+	if rel == "" {
+		rel = "index.html"
+	} else if strings.HasSuffix(rel, "/") {
+		rel = rel + "index.html"
+	}
+	candidates := []string{
+		filepath.Join(absOut, filepath.FromSlash(rel)),               // literal file
+		filepath.Join(absOut, filepath.FromSlash(rel), "index.html"), // folder route
+	}
+	for _, cand := range candidates {
+		if fi, err := os.Stat(cand); err == nil && !fi.IsDir() {
+			return true
+		}
+	}
+	return false
 }
 
 // dynamicRoute represents a URL pattern with [param] segments found in the output directory.

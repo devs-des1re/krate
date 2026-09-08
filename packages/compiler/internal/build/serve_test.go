@@ -195,6 +195,65 @@ func TestFindDynamicRoutes(t *testing.T) {
 	}
 }
 
+func TestStaticRouteExists(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "items", "alpha"), 0755)
+	os.WriteFile(filepath.Join(dir, "items", "alpha", "index.html"), []byte("<html>static alpha</html>"), 0644)
+	os.WriteFile(filepath.Join(dir, "index.html"), []byte("<html>home</html>"), 0644)
+	os.WriteFile(filepath.Join(dir, "favicon.ico"), []byte("x"), 0644)
+
+	cases := []struct {
+		path string
+		want bool
+	}{
+		{"/items/alpha", true},
+		{"/items/alpha/", true},
+		{"/items/beta", false},
+		{"/", true},
+		{"/favicon.ico", true},
+		{"/missing.html", false},
+	}
+	for _, tc := range cases {
+		if got := staticRouteExists(dir, tc.path); got != tc.want {
+			t.Errorf("staticRouteExists(%q) = %v, want %v", tc.path, got, tc.want)
+		}
+	}
+}
+
+func TestStaticBeatsDynamicRoute(t *testing.T) {
+	// A static page (/items/alpha) coexisting with a dynamic route (/items/[id]).
+	// The static file must win — the dynamic template must not be consulted.
+	dir := t.TempDir()
+	static := filepath.Join(dir, "items", "alpha")
+	os.MkdirAll(static, 0755)
+	os.WriteFile(filepath.Join(static, "index.html"), []byte("<html>STATIC ALPHA</html>"), 0644)
+	dyn := filepath.Join(dir, "items", "[id]")
+	os.MkdirAll(dyn, 0755)
+	os.WriteFile(filepath.Join(dyn, "index.html"), []byte("<html>DYNAMIC TEMPLATE</html>"), 0644)
+
+	routes := findDynamicRoutes(dir)
+	var pattern string
+	for _, r := range routes {
+		if r.pattern == "items/[id]" {
+			pattern = r.pattern
+		}
+	}
+	if pattern == "" {
+		t.Fatal("expected dynamic route items/[id]")
+	}
+
+	// Mirror the handler: the dynamic branch runs only when no static file
+	// exists. For /items/alpha the static gate must be closed so the
+	// handlerMux skips the items/[id] template.
+	if staticRouteExists(dir, "/items/alpha") != true {
+		t.Error("static /items/alpha must exist so the handler skips the dynamic template")
+	}
+	// The pattern still matches the URL — precedence comes from the gate above.
+	if _, ok := matchDynamicRoute("/items/alpha", pattern); !ok {
+		t.Error("items/[id] pattern should still match /items/alpha; the static gate is the precedence mechanism")
+	}
+}
+
 func TestFindDynamicRoutesEmpty(t *testing.T) {
 	dir := t.TempDir()
 	os.MkdirAll(filepath.Join(dir, "about"), 0755)
