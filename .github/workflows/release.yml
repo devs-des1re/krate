@@ -86,14 +86,10 @@ jobs:
       - name: Compute compiler SDK changelog
         id: sdk
         shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
           set -e
           VERSION="${GITHUB_REF_NAME#v}"
           RVERSION="v${VERSION}"
-          REPO_OWNER="${GITHUB_REPOSITORY%/*}"
-          REPO_NAME="${GITHUB_REPOSITORY#*/}"
 
           PREV_RELEASE="$(
             git tag -l 'v*' \
@@ -101,14 +97,7 @@ jobs:
               | sort -V \
               | tail -n 1 || true
           )"
-          PREV_COMPILER="$(
-            git tag -l 'packages/compiler/v*' \
-              | grep -v -F -- "packages/compiler/${RVERSION}" \
-              | sort -V \
-              | tail -n 1 || true
-          )"
           echo "prev_release=${PREV_RELEASE}" >> "$GITHUB_OUTPUT"
-          echo "prev_compiler=${PREV_COMPILER:-NONE}" >> "$GITHUB_OUTPUT"
 
           if [ -n "${PREV_RELEASE}" ]; then
             RANGE="${PREV_RELEASE}..HEAD"
@@ -116,56 +105,12 @@ jobs:
             RANGE="HEAD"
           fi
 
-          SHAS="$(git log --no-merges --format='%H' "${RANGE}")"
-          : > /tmp/krate-sha-set.txt
-          printf '%s\n' "${SHAS}" > /tmp/krate-sha-set.txt
-          OLDEST="$(tail -n 1 /tmp/krate-sha-set.txt || true)"
-          TOTAL_SHAS="$(printf '%s' "${SHAS}" | grep -c '^' || true)"
-
-          : > /tmp/krate-nodes.tsv
-          if [ "${TOTAL_SHAS}" -gt 0 ]; then
-            QUERY='query($owner:String!,$repo:String!,$oid:GitObjectID!,$cursor:String){ repository(owner:$owner,name:$repo){ object(oid:$oid){ ... on Commit { history(first:100,after:$cursor){ pageInfo{ hasNextPage endCursor } nodes{ oid messageHeadline associatedPullRequests(first:1){ nodes{ number title url } } } } } } } }'
-            CURSOR=""
-            REACHED=false
-            while :; do
-              # The cursor must be omitted on the first page: GitHub rejects an
-              # explicit empty `after` cursor ("" is not a valid cursor).
-              API_ARGS=(api graphql -f query="$QUERY" -F owner="$REPO_OWNER" -F repo="$REPO_NAME" -F oid="$GITHUB_SHA")
-              if [ -n "${CURSOR}" ]; then
-                API_ARGS+=(-f cursor="$CURSOR")
-              fi
-              RESPONSE="$(gh "${API_ARGS[@]}")"
-              echo "$RESPONSE" \
-                | jq -r '.data.repository.object.history.nodes[] | [.oid, .messageHeadline, (.associatedPullRequests.nodes[0].number // ""), (.associatedPullRequests.nodes[0].title // ""), (.associatedPullRequests.nodes[0].url // "")] | @tsv' \
-                >> /tmp/krate-nodes.tsv
-              if [ -n "${OLDEST}" ]; then
-                # OLDEST is a bare SHA; the TSV's first column is the oid, so
-                # compare against column 1 (a bare-SHA grep can never match a
-                # full TSV line and pagination would never stop early).
-                cut -f1 /tmp/krate-nodes.tsv | grep -qxF -- "${OLDEST}" && REACHED=true
-              fi
-              HAS_NEXT="$(echo "$RESPONSE" | jq -r '.data.repository.object.history.pageInfo.hasNextPage')"
-              CURSOR="$(echo "$RESPONSE" | jq -r '.data.repository.object.history.pageInfo.endCursor')"
-              if [ "${REACHED}" = true ] || [ "${HAS_NEXT}" != "true" ] || [ -z "${CURSOR}" ]; then
-                break
-              fi
-            done
-          fi
-
+          # Every commit is a squash-merge, so list them all directly — no need
+          # to resolve associated PRs via the GitHub API.
           : > /tmp/krate-entries.txt
-          : > /tmp/krate-seen-pr.txt
-          while IFS=$'\t' read -r OID HEADLINE PRNUM PRTITLE PRURL; do
-            grep -qxF -- "${OID}" /tmp/krate-sha-set.txt || continue
-            if [ -n "${PRNUM}" ]; then
-              if grep -qxF -- "${PRNUM}" /tmp/krate-seen-pr.txt; then
-                continue
-              fi
-              printf '%s\n' "${PRNUM}" >> /tmp/krate-seen-pr.txt
-              printf -- '- %s ([#%s](%s))\n' "${PRTITLE}" "${PRNUM}" "${PRURL}" >> /tmp/krate-entries.txt
-            else
-              printf -- '- %s ([%s](https://github.com/%s/commit/%s))\n' "${HEADLINE}" "$(printf '%s' "$OID" | cut -c1-7)" "${GITHUB_REPOSITORY}" "${OID}" >> /tmp/krate-entries.txt
-            fi
-          done < /tmp/krate-nodes.tsv
+          git log --no-merges --format='%H%x09%s' "${RANGE}" | while IFS=$'\t' read -r OID SUBJECT; do
+            printf -- '- %s ([%s](https://github.com/%s/commit/%s))\n' "${SUBJECT}" "$(printf '%s' "$OID" | cut -c1-7)" "${GITHUB_REPOSITORY}" "${OID}" >> /tmp/krate-entries.txt
+          done
 
           : > /tmp/grp-feat.txt
           : > /tmp/grp-fix.txt
