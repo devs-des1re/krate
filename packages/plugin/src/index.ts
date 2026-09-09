@@ -22,6 +22,14 @@ export type {
   ServeResponseContext,
   ServeResponseResult,
 } from "./context.js";
+export type { DocsLayoutProps } from "./docs.js";
+export type {
+  DocsSearchOptions,
+  DocsSidebarItem,
+  DocsThemeDescriptor,
+  DocsThemeOptions,
+} from "./docs.js";
+export { defineDocsTheme } from "./docs.js";
 export type { PluginHookFn, PluginOutput } from "./output.js";
 export type { Krate } from "./krate.js";
 export {

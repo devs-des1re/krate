@@ -3,6 +3,7 @@ import TOCNav from "@/components/docs/TOCNav";
 import Breadcrumbs from "@/components/docs/Breadcrumbs";
 import PrevNext from "@/components/docs/PrevNext";
 import SocialLinks from "@/components/docs/SocialLinks";
+import "@/components/docs/docs.css";
 
 interface SidebarItem {
   title: string;
@@ -54,7 +55,6 @@ export default function DocsLayout(props: DocLayoutProps) {
   return (
     <div class="docs-page">
       <Head>
-        <link rel="stylesheet" href='/docs-styles.css' />
         <title>{pageTitle} - {siteTitle}</title>
       </Head>
 

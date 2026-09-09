@@ -81,6 +81,12 @@ if (Array.isArray(config.plugins)) {
     if (p && typeof p.module === 'string' && p.module.startsWith('file://')) {
       p.module = fileURLToPath(p.module);
     }
+    // Docs theme factories embed their layout component's location the same
+    // way, nested inside the docs plugin's options.theme descriptor.
+    const theme = p && p.options && typeof p.options === 'object' ? p.options.theme : null;
+    if (theme && typeof theme === 'object' && typeof theme.module === 'string' && theme.module.startsWith('file://')) {
+      theme.module = fileURLToPath(theme.module);
+    }
   }
 }
 if (typeof config.validate === 'function') {

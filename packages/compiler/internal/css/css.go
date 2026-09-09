@@ -144,9 +144,37 @@ func shortenHexColors(css string) string {
 	})
 }
 
-// removeZeroUnits removes units from 0 values (0px → 0).
+// customPropRe matches a custom property declaration (--name: value). Custom
+// property values are substituted verbatim into var()/calc() later, so their
+// bytes must never be rewritten by value-level transforms like removeZeroUnits.
+var customPropRe = regexp.MustCompile(`(?:^|[;{})\s])--[a-zA-Z0-9_-]+\s*:\s*[^;}]*`)
+
+// removeZeroUnits removes units from 0 values (0px → 0), EXCEPT inside custom
+// property values. Rewriting `--x: 0rem` to `--x: 0` changes the substituted
+// value — calc(1rem + var(--x)) is only valid when --x carries a unit — so
+// custom property declarations are stashed and restored verbatim.
 func removeZeroUnits(css string) string {
-	return zeroUnitRe.ReplaceAllString(css, "0")
+	type placeholder struct {
+		token, value string
+	}
+	var stash []placeholder
+	protect := customPropRe.ReplaceAllStringFunc(css, func(m string) string {
+		colon := strings.Index(m, ":")
+		if colon < 0 {
+			return m
+		}
+		// Keep any leading boundary character (space/;/{/}) so the declaration
+		// still parses, but stash the raw value untouched.
+		prefix := m[:colon+1]
+		tok := fmt.Sprintf("\x00cp%d\x00", len(stash))
+		stash = append(stash, placeholder{tok, m[colon+1:]})
+		return prefix + tok
+	})
+	protect = zeroUnitRe.ReplaceAllString(protect, "0")
+	for _, p := range stash {
+		protect = strings.ReplaceAll(protect, p.token, p.value)
+	}
+	return protect
 }
 
 // removeEmptyRules removes empty rulesets (selectors with no declarations).

@@ -13,6 +13,10 @@ export type {
   RobotsConfig,
   DocsPluginOptions,
   DocsSidebarItem,
+  DocsSearchOptions,
+  DocsThemeDescriptor,
+  DocsThemeOptions,
   SitemapPluginOptions,
   RuntimeName,
 } from "./config.js";
+export type { DocsLayoutProps } from "./config.js";

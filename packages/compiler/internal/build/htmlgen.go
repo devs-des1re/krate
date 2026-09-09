@@ -13,11 +13,7 @@ const liveReloadScript = `<script>(function(){var s=new EventSource('/__krate/ho
 // Dev Error Overlay
 (function(){function e(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;')}function o(t,m,f,s){var d=document.getElementById('krate-error-overlay');if(d)return;d=document.createElement('div');d.id='krate-error-overlay';var l='';if(f){var p=[e(f.file||'')];if(f.line)p.push('line '+f.line);if(f.col)p.push('col '+f.col);var c=(f.file||'')+(f.line?':'+f.line:'')+(f.col?':'+f.col:'');l='<div style="background:rgba(52,152,219,0.15);border:1px solid rgba(52,152,219,0.3);border-radius:6px;padding:10px 14px;margin-top:12px;font-size:13px;cursor:pointer" onclick="navigator.clipboard.writeText(\''+e(c)+'\');this.style.borderColor=\'#2ecc71\'" title="Click to copy">'+p.join(' ')+'</div>'}d.style.cssText='all:initial;position:fixed;top:0;left:0;right:0;bottom:0;z-index:99999;background:rgba(0,0,0,0.85);color:#ecf0f1;font-family:Menlo,Monaco,"Courier New",monospace;display:flex;align-items:center;justify-content:center;backdrop-filter:blur(4px)';d.innerHTML='<div style="background:#1a1a2e;border:1px solid #e74c3c;border-radius:8px;padding:24px 32px;max-width:800px;max-height:80vh;overflow:auto;box-shadow:0 8px 32px rgba(231,76,60,0.3);width:90%;position:relative"><button style="position:absolute;top:16px;right:16px;background:#e74c3c;color:#fff;border:none;border-radius:4px;padding:6px 12px;cursor:pointer;font-size:14px;font-family:inherit" onclick="this.parentNode.parentNode.remove()">X</button><div style="color:#e74c3c;font-size:18px;font-weight:bold;margin-bottom:12px">'+e(t)+'</div><div style="color:#ecf0f1;font-size:14px;line-height:1.6;white-space:pre-wrap;word-break:break-word">'+e(m)+'</div>'+l+(s?'<div style="color:#95a5a6;font-size:12px;line-height:1.5;margin-top:12px;white-space:pre-wrap;max-height:300px;overflow-y:auto">'+e(s)+'</div>':'')+'<div style="color:#7f8c8d;font-size:11px;margin-top:16px">Press Esc to dismiss</div></div>';document.body.appendChild(d);document.addEventListener('keydown',function h(ev){if(ev.key==='Escape'&&d.parentNode){d.remove();document.removeEventListener('keydown',h)}})}window.addEventListener('error',function(e){e.preventDefault();var t=e.error&&e.error.name||'Runtime Error';var m=e.message||'Unknown error';var l={};var s='';if(e.error&&e.error.stack){s=e.error.stack;var r=s.match(/at\s+(?:(\S+)\s+\()?(.+?):(\d+):(\d+)/);if(r){l.file=r[2];l.line=r[3];l.col=r[4]}}if(!l.file&&e.filename){l.file=e.filename;l.line=e.lineno;l.col=e.colno}o(t,m,l,s)});window.addEventListener('unhandledrejection',function(e){e.preventDefault();var r=e.reason;var t='Unhandled Promise Rejection';var m=r instanceof Error?r.message:String(r);var s=r instanceof Error?r.stack:'';o(t,m,null,s)})})()</script>`
 
-// cssPlaceholder is used as a placeholder for the CSS filename in generated HTML.
-// BuildAll replaces it with the actual hashed filename after CSS is written.
-const cssPlaceholder = "__KRATE_CSS__"
-
-func generateHTML(bodyHTML, headHTML, scriptHTML, styleHTML string, hasCSS bool, jsFile, runtimeJSFile, route string, devMode bool) string {
+func generateHTML(bodyHTML, headHTML, scriptHTML, styleHTML string, cssFiles []string, jsFile, runtimeJSFile, route string, devMode bool) string {
 	var b strings.Builder
 
 	b.WriteString("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n")
@@ -36,8 +32,8 @@ func generateHTML(bodyHTML, headHTML, scriptHTML, styleHTML string, hasCSS bool,
 		b.WriteByte('\n')
 	}
 
-	if hasCSS && !strings.HasPrefix(route, "docs/") && route != "docs" {
-		b.WriteString(fmt.Sprintf("<link rel=\"stylesheet\" href=\"/%s\">\n", cssPlaceholder))
+	for _, cssFile := range cssFiles {
+		b.WriteString(fmt.Sprintf("<link rel=\"stylesheet\" href=\"/%s\">\n", cssFile))
 	}
 
 	b.WriteString("</head>\n<body>\n")
@@ -72,8 +68,8 @@ func generateHTML(bodyHTML, headHTML, scriptHTML, styleHTML string, hasCSS bool,
 }
 
 // generateHTMLWithLoading is like generateHTML but includes a loading template for SPA transitions.
-func generateHTMLWithLoading(bodyHTML, headHTML, scriptHTML, styleHTML, loadingHTML string, hasCSS bool, jsFile, runtimeJSFile, route string, devMode bool) string {
-	html := generateHTML(bodyHTML, headHTML, scriptHTML, styleHTML, hasCSS, jsFile, runtimeJSFile, route, devMode)
+func generateHTMLWithLoading(bodyHTML, headHTML, scriptHTML, styleHTML, loadingHTML string, cssFiles []string, jsFile, runtimeJSFile, route string, devMode bool) string {
+	html := generateHTML(bodyHTML, headHTML, scriptHTML, styleHTML, cssFiles, jsFile, runtimeJSFile, route, devMode)
 	if loadingHTML != "" {
 		loadingTemplate := "<template data-krate-loading>" + loadingHTML + "</template>"
 		html = strings.Replace(html, "</div>\n</body>", loadingTemplate+"</div>\n</body>", 1)

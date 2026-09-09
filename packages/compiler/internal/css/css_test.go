@@ -49,6 +49,11 @@ func TestRemoveZeroUnits(t *testing.T) {
 		{"width: 0em;", "width: 0;"},
 		{"gap: 0rem;", "gap: 0;"},
 		{"width: 10px;", "width: 10px;"}, // non-zero unchanged
+		// Custom property values must keep their units: they are substituted
+		// verbatim into var()/calc() later, and calc(1rem + var(--x)) is invalid
+		// when --x is the bare number 0.
+		{"--toc-indent: 0rem;", "--toc-indent: 0rem;"},
+		{".a{--x: 0px;--y: 0.5rem;padding: 0px}", ".a{--x: 0px;--y: 0.5rem;padding: 0}"},
 	}
 	for _, tt := range tests {
 		got := removeZeroUnits(tt.input)

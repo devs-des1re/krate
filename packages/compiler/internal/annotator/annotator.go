@@ -5,6 +5,7 @@ import (
 	"strings"
 
 	"github.com/kratejs/krate/packages/compiler/ast"
+	"github.com/kratejs/krate/packages/compiler/internal/bundler"
 	"github.com/kratejs/krate/packages/compiler/internal/config"
 	irtree "github.com/kratejs/krate/packages/compiler/internal/irtree"
 	"github.com/kratejs/krate/packages/compiler/internal/sigutil"
@@ -27,7 +28,7 @@ func Annotate(prog *ast.Program, cfg *config.Config, sourceFile string, rawSourc
 	collectFunctionsWithSource(prog.Body, ann.Functions, ann.ComponentSources, ann.ComponentRaw, sourceFile, rawSource)
 
 	// 2. Find default export → entry point
-	ann.EntryPoint = findDefaultExport(prog.Body)
+	ann.EntryPoint = FindDefaultExport(prog.Body)
 
 	// 3. Walk used-component graph
 	if ann.EntryPoint != "" {
@@ -378,7 +379,11 @@ func recordComponentVarDecls(stmt *ast.VarStmt, record func(*ast.FnDecl)) {
 	}
 }
 
-func findDefaultExport(body []ast.Stmt) string {
+// FindDefaultExport returns the identifier a program's default export resolves
+// to: the declared name for `export default function Foo()`, or the local name
+// for `export default Foo`. It returns "" when the default export is anonymous
+// or unbound.
+func FindDefaultExport(body []ast.Stmt) string {
 	for _, stmt := range body {
 		if exp, ok := stmt.(*ast.ExportStmt); ok && exp.Default {
 			if fn, ok := exp.Declaration.(*ast.FnDecl); ok {
@@ -567,6 +572,81 @@ func MergeModuleFunctions(ann *irtree.Annotations, modules []ModuleSource) {
 			collectSignalDecls(fn.Body, ann.Signals)
 		}
 	}
+}
+
+// MergeImportAliases makes imported components resolvable under their local
+// binding names. Bundled modules' function declarations are merged into one map
+// keyed by declared name, so without aliasing a renamed import — e.g.
+// `import FooLayout from "./theme/layout"` where the theme declares
+// `export default function NightLayout` — renders nothing: `<FooLayout>` has no
+// matching entry. Aliasing each import local to the function it actually
+// resolves to fixes that, so page/theme authors can name exports freely.
+// entry is the page's own module (its imports are the ones that matter most).
+func MergeImportAliases(ann *irtree.Annotations, modules []ModuleSource, entry ModuleSource) {
+	if entry.Program != nil {
+		modules = append(modules, entry)
+	}
+	aliases := BuildImportAliases(modules)
+	for local, declared := range aliases {
+		if fn := ann.Functions[declared]; fn != nil {
+			if _, exists := ann.Functions[local]; !exists {
+				ann.Functions[local] = fn
+			}
+		}
+	}
+	// Re-walk used components so aliased references from the entry are
+	// classified and their signals collected, then reclassify tiers for them.
+	if ann.EntryPoint != "" {
+		ann.UsedComponents = map[string]bool{}
+		collectUsedFuncs(ann.Functions, ann.EntryPoint, ann.UsedComponents)
+	}
+	for name := range ann.UsedComponents {
+		if fn, ok := ann.Functions[name]; ok {
+			collectSignalDecls(fn.Body, ann.Signals)
+		}
+	}
+}
+
+// BuildImportAliases returns a map from import local binding to the declared
+// function name it resolves to across the given modules. Default imports map to
+// their module's default export; named imports map to the exported name (which
+// equals the declared name for function declarations). Unresolvable bindings
+// (namespace imports, re-exports, non-function exports) are skipped.
+func BuildImportAliases(modules []ModuleSource) map[string]string {
+	byPath := make(map[string]*ast.Program)
+	for _, m := range modules {
+		if m.Program != nil && m.Path != "" {
+			byPath[m.Path] = m.Program
+		}
+	}
+	aliases := make(map[string]string)
+	for _, m := range modules {
+		if m.Program == nil || m.Path == "" {
+			continue
+		}
+		for _, stmt := range m.Program.Body {
+			imp, ok := stmt.(*ast.ImportStmt)
+			if !ok || imp.Source == "" {
+				continue
+			}
+			target := bundler.ResolveImport(m.Path, strings.Trim(imp.Source, "\"'"))
+			tprog := byPath[target]
+			if tprog == nil {
+				continue
+			}
+			if imp.Default != "" {
+				if name := FindDefaultExport(tprog.Body); name != "" {
+					aliases[imp.Default] = name
+				}
+			}
+			for _, n := range imp.Named {
+				if n.Local != "" && n.Remote != "" && n.Local != n.Remote {
+					aliases[n.Local] = n.Remote
+				}
+			}
+		}
+	}
+	return aliases
 }
 
 // ReclassifyTiers re-runs tier classification for all used components.

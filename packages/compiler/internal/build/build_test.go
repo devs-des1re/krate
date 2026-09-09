@@ -156,7 +156,10 @@ func TestBuildTestProject(t *testing.T) {
 		t.Error("no hashed JS hydration file found in output directory")
 	}
 
-	// Verify Tailwind CSS generation: stylesheet should contain utility rules
+	// Verify Tailwind CSS generation: the site-global stylesheet (linked on
+	// every page) should contain utility rules. Per-page stylesheets are
+	// separate now, so scan the root styles.*.css files for one that carries
+	// the generated utilities.
 	twChecks := []struct {
 		desc string
 		seek string
@@ -174,25 +177,30 @@ func TestBuildTestProject(t *testing.T) {
 		{"bg color utility", ".bg-blue-50"},
 		{"text size utility", ".text-2xl"},
 	}
-	cssFound := false
+	cssFiles := []string{}
 	for _, c := range entries {
 		if strings.HasPrefix(c.Name(), "styles.") && strings.HasSuffix(c.Name(), ".css") && !c.IsDir() {
 			data, err := os.ReadFile(filepath.Join(outDir, c.Name()))
 			if err != nil {
 				t.Fatalf("reading CSS file %s: %v", c.Name(), err)
 			}
-			css := string(data)
-			for _, tw := range twChecks {
-				if !strings.Contains(css, tw.seek) {
-					t.Errorf("Tailwind CSS missing %s: %q not in stylesheet", tw.desc, tw.seek)
-				}
-			}
-			cssFound = true
-			break
+			cssFiles = append(cssFiles, string(data))
 		}
 	}
-	if !cssFound {
-		t.Error("no styles.css file found")
+	if len(cssFiles) == 0 {
+		t.Error("no styles.*.css file found")
+	}
+	for _, tw := range twChecks {
+		found := false
+		for _, css := range cssFiles {
+			if strings.Contains(css, tw.seek) {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("Tailwind CSS missing %s: %q not in any stylesheet", tw.desc, tw.seek)
+		}
 	}
 
 	// Verify docs plugin generated pages

@@ -14,12 +14,8 @@ import (
 	"github.com/kratejs/krate/packages/compiler/internal/lexer"
 	"github.com/kratejs/krate/packages/compiler/internal/markdown"
 	"github.com/kratejs/krate/packages/compiler/internal/parser"
+	"github.com/kratejs/krate/packages/compiler/internal/resolver"
 )
-
-type PkgJSON struct {
-	Main   string `json:"main"`
-	Module string `json:"module"`
-}
 
 type Module struct {
 	Path           string
@@ -488,6 +484,13 @@ func (b *Bundler) CheckCompositionRules() error {
 // Set by the build system at startup to enable virtual package resolution.
 var KrateRoot string
 
+// ResolveImport resolves an import path to an absolute file path. Exported for
+// consumers (e.g. the annotator's import-binding resolution) that need the same
+// relative/node_modules/index resolution rules the bundler applies.
+func ResolveImport(importer, imp string) string {
+	return resolveImport(importer, imp)
+}
+
 // resolveImport resolves an import path to an absolute file path.
 func resolveImport(importer, imp string) string {
 	dir := filepath.Dir(importer)
@@ -523,7 +526,7 @@ func resolveImport(importer, imp string) string {
 		return resolved
 	}
 
-	return resolveNodeModule(dir, imp)
+	return resolver.NodeModule(dir, imp)
 }
 
 // resolvePathAlias tries to resolve an import using TypeScript path aliases.
@@ -629,73 +632,8 @@ func resolveKratePackage(importerDir, imp string) string {
 	return ""
 }
 
-func resolveNodeModule(startDir, pkg string) string {
-	pkgDir := pkg
-	if strings.HasPrefix(pkg, "@") {
-		dir := filepath.Dir(startDir)
-		for {
-			base := filepath.Join(dir, "node_modules", pkgDir)
-			if info, err := os.Stat(base); err == nil && info.IsDir() {
-				return resolvePackageDir(base)
-			}
-			parent := filepath.Dir(dir)
-			if parent == dir {
-				break
-			}
-			dir = parent
-		}
-		return ""
-	}
-
-	dir := startDir
-	for {
-		base := filepath.Join(dir, "node_modules", pkgDir)
-		if info, err := os.Stat(base); err == nil && info.IsDir() {
-			return resolvePackageDir(base)
-		}
-		parent := filepath.Dir(dir)
-		if parent == dir {
-			break
-		}
-		dir = parent
-	}
-	return ""
-}
-
-func resolvePackageDir(pkgDir string) string {
-	pkgJSONPath := filepath.Join(pkgDir, "package.json")
-	if data, err := os.ReadFile(pkgJSONPath); err == nil {
-		var pkg PkgJSON
-		if json.Unmarshal(data, &pkg) == nil {
-			if pkg.Module != "" {
-				candidate := filepath.Join(pkgDir, pkg.Module)
-				if fileExists(candidate) {
-					return candidate
-				}
-			}
-			if pkg.Main != "" {
-				candidate := filepath.Join(pkgDir, pkg.Main)
-				if fileExists(candidate) {
-					return candidate
-				}
-			}
-		}
-	}
-
-	indices := []string{"index.tsx", "index.ts", "index.jsx", "index.js"}
-	for _, idx := range indices {
-		candidate := filepath.Join(pkgDir, idx)
-		if fileExists(candidate) {
-			return candidate
-		}
-	}
-
-	return ""
-}
-
 func fileExists(path string) bool {
-	_, err := os.Stat(path)
-	return err == nil
+	return resolver.Exists(path)
 }
 
 // generateMDXBundleTSX creates a TSX source string from MDX content.

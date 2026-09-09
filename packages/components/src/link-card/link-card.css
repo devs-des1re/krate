@@ -30,7 +30,8 @@
   color: var(--krate-text-muted, #b9b9b9);
   line-height: 1.5;
 }
-.krate-link-card-description p {
+.krate-link-card-description p,
+div.krate-link-card .krate-link-card-description p {
   margin: 0;
   margin-bottom: 4px;
 }

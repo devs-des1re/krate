@@ -20,9 +20,10 @@
     color: var(--krate-text-muted, #b9b9b9);
     line-height: 1.6;
 }
-.krate-aside-content p {
-    margin: 0;
-    margin-bottom: 4px;
+.krate-aside-content p,
+div.krate-aside .krate-aside-content p {
+  margin: 0;
+  margin-bottom: 4px;
 }
 .krate-aside-note {
     border-left-color: #3b82f6;

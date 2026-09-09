@@ -45,8 +45,12 @@ Krate supports GitHub-flavored Markdown out of the box:
 
 ### Admonitions
 
+:::note
+This is a note/callout rendered by `@krate/components`.
+:::
+
 ```md
-> **Note** — this is a callout.
+> A blockquote looks like this.
 ```
 
 ## Local development

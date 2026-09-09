@@ -17,6 +17,14 @@
  * ```
  */
 
+import type {
+  DocsLayoutProps,
+  DocsSearchOptions,
+  DocsSidebarItem,
+  DocsThemeDescriptor,
+  DocsThemeOptions,
+} from "@krate/plugin";
+
 export interface DevServerConfig {
   /** Dev server port (default: 3000). */
   port?: number;
@@ -96,37 +104,26 @@ export interface RobotsConfig {
   sitemap?: string;
 }
 
-export interface DocsSidebarItem {
-  title?: string;
-  url?: string;
-  children?: DocsSidebarItem[];
-}
-
-export interface DocsSearchOptions {
-  /**
-   * Turn the search bar on/off (default: true).
-   */
-  enabled?: boolean;
-  /**
-   * Index backend. "docfind" (default) builds a WASM search index with the
-   * documents embedded in-process at build time; "json" uses the classic
-   * search-index.json. The client falls back to JSON automatically when the
-   * WASM index is unavailable.
-   */
-  engine?: "docfind" | "json";
-  /**
-   * Max number of results shown (default: 8).
-   */
-  maxResults?: number;
-}
-
 export interface DocsPluginOptions {
   /** Directory of markdown/mdx docs, relative to project root. */
   contentDir?: string;
   /** Site title shown in the docs layout. */
   title?: string;
-  /** Path to a layout component, relative to project root. */
+  /**
+   * Path to a layout component, relative to project root. The layout receives
+   * a single {@link DocsLayoutProps} object and owns the docs chrome (navbar,
+   * sidebar, TOC, breadcrumbs, prev/next, social links).
+   */
   layout?: string;
+  /**
+   * Docs theme — the component every generated docs page is rendered through.
+   * Like {@link layout}: a root-relative file path (`./` or `/`) or an npm
+   * package name (a docs theme installed from a registry) — or a theme
+   * descriptor returned by a theme factory (bare object). `theme` and
+   * `layout` are aliases: set only one unless both resolve to the same
+   * component.
+   */
+  theme?: DocsThemeDescriptor<DocsThemeOptions> | string;
   /** Custom sidebar override. */
   sidebar?: DocsSidebarItem[];
   /** Social links rendered in the docs layout. */
@@ -134,6 +131,14 @@ export interface DocsPluginOptions {
   /** Search bar configuration (docfind WASM search). */
   search?: DocsSearchOptions;
 }
+
+export type {
+  DocsLayoutProps,
+  DocsSearchOptions,
+  DocsSidebarItem,
+  DocsThemeDescriptor,
+  DocsThemeOptions,
+} from "@krate/plugin";
 
 export interface SitemapPluginOptions {
   /** e.g. "https://example.com" (falls back to `seo.baseUrl`). */

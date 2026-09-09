@@ -268,6 +268,7 @@ func (b *Builder) buildStaticParamsPage(spp staticParamsPage) (*PageResult, stri
 	ann := annotator.Annotate(entryModule.Program, b.Cfg, spp.PagePath, entryModule.SourceCode)
 	extraPrograms := moduleSources(bundle.Modules, entryModule)
 	annotator.MergeModuleFunctions(ann, extraPrograms)
+	annotator.MergeImportAliases(ann, extraPrograms, annotator.ModuleSource{Program: entryModule.Program, Path: entryModule.Path, RawSource: entryModule.SourceCode})
 	tree := irtree.Build(entryModule.Program, ann)
 	injectStaticParams(tree, spp.Params)
 	emitter := renderer.NewEmitter()
@@ -334,6 +335,7 @@ func (b *Builder) buildStaticParamsPage(spp staticParamsPage) (*PageResult, stri
 		HasJS:       hasJS,
 		JSFile:      jsFile,
 		HasCSS:      bundle.CSS != "",
+		CSS:         bundle.CSS,
 		UsedCSS:     emitResult.UsedCSS,
 		UsedFuncs:   emitResult.UsedFuncs,
 		Mode:        renderMode,

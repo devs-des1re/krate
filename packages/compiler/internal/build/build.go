@@ -45,6 +45,7 @@ type PageResult struct {
 	HydrationJS   string
 	JSFile        string
 	CSSFile       string
+	CSS           string // this page's own imported CSS (before minification/hashing)
 	RuntimeJSFile string // shared runtime chunk path (relative to outDir), e.g. "chunks/runtime.abc.js"
 	HasJS         bool
 	HasCSS        bool
@@ -191,10 +192,6 @@ func (b *Builder) BuildPages(pages []string) error {
 	}()
 
 	var results []*PageResult
-	mergedCSS := ""
-	docsCSS := ""
-	cssRuleSeen := make(map[string]bool)
-	docsCSSRuleSeen := make(map[string]bool)
 
 	for res := range resultsCh {
 		if res.err != nil {
@@ -204,15 +201,6 @@ func (b *Builder) BuildPages(pages []string) error {
 		}
 		result := res.result
 		results = append(results, result)
-
-		isDocsPage := strings.HasPrefix(result.OutName, "docs/") || result.OutName == "docs"
-		if res.rawCSS != "" {
-			if isDocsPage {
-				docsCSS = mergeCSS(docsCSS, res.rawCSS, docsCSSRuleSeen)
-			} else {
-				mergedCSS = mergeCSS(mergedCSS, res.rawCSS, cssRuleSeen)
-			}
-		}
 
 		// Run page-level plugins (AfterPage — post-layout)
 		pageHTML := result.HTML
@@ -241,32 +229,29 @@ func (b *Builder) BuildPages(pages []string) error {
 		return fmt.Errorf("no pages built successfully")
 	}
 
+	// Write shared runtime chunk (extracted from per-page bundles)
+	runtimeJS := writeRuntimeChunk(b.Cfg.OutDir, b.Cfg.ShouldMinifyJS(), b.Root)
+
+	// Per-page stylesheets: each page links only the CSS its own module graph
+	// imported (deduplicated across pages sharing identical CSS).
+	b.writePageCSS(results)
+
+	// Optional site-global stylesheet (Tailwind) linked on every page.
+	var globalCSS []string
 	if b.Cfg.Tailwind.Enabled {
 		twCfg := css.LoadTailwindConfig(b.Root)
 		twCSS, err := css.GenerateTailwind(b.Root, twCfg)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "  %sTailwind error:%s %v\n", cYellow, cReset, err)
 		} else if twCSS != "" {
-			mergedCSS = mergeCSS(mergedCSS, twCSS, cssRuleSeen)
+			if f := b.writeGlobalCSS(twCSS); f != "" {
+				globalCSS = append(globalCSS, f)
+			}
 		}
 	}
-
-	// Inject chroma syntax highlighting CSS if code highlighting is enabled
-	if b.Cfg.Markdown.CodeHighlight {
-		chromaCSS := syntaxhighlight.CSSForTheme(b.Cfg.Markdown.CodeTheme)
-		if chromaCSS != "" {
-			mergedCSS = chromaCSS + "\n" + mergedCSS
-		}
-	}
-
-	// Regenerate global CSS (if multiple pages, need new CSS hash)
-	cssFile := b.writeGlobalCSS(mergedCSS)
-
-	// Write shared runtime chunk (extracted from per-page bundles)
-	runtimeJS := writeRuntimeChunk(b.Cfg.OutDir, b.Cfg.ShouldMinifyJS(), b.Root)
 
 	// In-memory HTML generation + string swap + single disk write per page
-	b.writeHTMLPages(results, cssFile, runtimeJS)
+	b.writeHTMLPages(results, globalCSS, runtimeJS)
 
 	if perrs := b.drainPluginErrs(); len(perrs) > 0 {
 		return fmt.Errorf("build failed: %d plugin error(s):\n  %s", len(perrs), strings.Join(perrs, "\n  "))
@@ -379,10 +364,6 @@ func (b *Builder) BuildAll() error {
 	}()
 
 	var results []*PageResult
-	mergedCSS := ""
-	docsCSS := ""
-	cssRuleSeen := make(map[string]bool)
-	docsCSSRuleSeen := make(map[string]bool)
 	errorCount := 0
 	var failureMessages []string
 
@@ -396,15 +377,6 @@ func (b *Builder) BuildAll() error {
 
 		result := res.result
 		results = append(results, result)
-
-		isDocsPage := strings.HasPrefix(result.OutName, "docs/") || result.OutName == "docs"
-		if res.rawCSS != "" {
-			if isDocsPage {
-				docsCSS = mergeCSS(docsCSS, res.rawCSS, docsCSSRuleSeen)
-			} else {
-				mergedCSS = mergeCSS(mergedCSS, res.rawCSS, cssRuleSeen)
-			}
-		}
 
 		// Run page-level plugins (AfterPage — post-layout)
 		pageHTML := result.HTML
@@ -429,14 +401,6 @@ func (b *Builder) BuildAll() error {
 		result.HeadHTML = afterPageCtx.HeadHTML
 	}
 
-	if b.Cfg.Tailwind.Enabled {
-		twCfg := css.LoadTailwindConfig(b.Root)
-		twCSS, err := css.GenerateTailwind(b.Root, twCfg)
-		if err == nil && twCSS != "" {
-			mergedCSS = mergeCSS(mergedCSS, twCSS, cssRuleSeen)
-		}
-	}
-
 	staticParamPages, gspErr := b.resolveStaticParamsPages(pages)
 	if gspErr != nil {
 		fmt.Fprintf(os.Stderr, "  %s✗ Error:%s %v\n", cRed, cReset, gspErr)
@@ -446,7 +410,7 @@ func (b *Builder) BuildAll() error {
 	if len(staticParamPages) > 0 {
 		fmt.Printf("  %s⚡%s Building %d statically generated pages from generateStaticParams\n", cCyan, cReset, len(staticParamPages))
 		for _, spp := range staticParamPages {
-			result, rawCSS, err := b.buildStaticParamsPage(spp)
+			result, _, err := b.buildStaticParamsPage(spp)
 			if err != nil {
 				msg := fmt.Sprintf("generateStaticParams page %s: %v", spp.OutPath, err)
 				fmt.Fprintf(os.Stderr, "  %s✗ Error:%s %v\n", cRed, cReset, msg)
@@ -455,9 +419,6 @@ func (b *Builder) BuildAll() error {
 				continue
 			}
 			results = append(results, result)
-			if rawCSS != "" {
-				mergedCSS = mergeCSS(mergedCSS, rawCSS, cssRuleSeen)
-			}
 			// Run AfterPage plugins for the generated page
 			afterPageCtx := &plugin.PageHookCtx{
 				Page:     result.Page,
@@ -473,17 +434,6 @@ func (b *Builder) BuildAll() error {
 		}
 	}
 
-	// Inject chroma syntax highlighting CSS if code highlighting is enabled
-	if b.Cfg.Markdown.CodeHighlight {
-		chromaCSS := syntaxhighlight.CSSForTheme(b.Cfg.Markdown.CodeTheme)
-		if chromaCSS != "" {
-			mergedCSS = chromaCSS + "\n" + mergedCSS
-		}
-	}
-
-	// Write global CSS with hash-based naming
-	cssFile := b.writeGlobalCSS(mergedCSS)
-
 	// Write shared runtime chunk only if at least one page needs client JS.
 	// Fully static sites (no signals/handlers anywhere) ship zero JavaScript.
 	anyPageHasJS := false
@@ -498,8 +448,24 @@ func (b *Builder) BuildAll() error {
 		runtimeJS = writeRuntimeChunk(b.Cfg.OutDir, b.Cfg.ShouldMinifyJS(), b.Root)
 	}
 
+	// Per-page stylesheets: each page links only the CSS its own module graph
+	// imported (deduplicated across pages sharing identical CSS).
+	b.writePageCSS(results)
+
+	// Optional site-global stylesheet (Tailwind) linked on every page.
+	var globalCSS []string
+	if b.Cfg.Tailwind.Enabled {
+		twCfg := css.LoadTailwindConfig(b.Root)
+		twCSS, err := css.GenerateTailwind(b.Root, twCfg)
+		if err == nil && twCSS != "" {
+			if f := b.writeGlobalCSS(twCSS); f != "" {
+				globalCSS = append(globalCSS, f)
+			}
+		}
+	}
+
 	// In-memory HTML generation + string swap + single disk write per page
-	b.writeHTMLPages(results, cssFile, runtimeJS)
+	b.writeHTMLPages(results, globalCSS, runtimeJS)
 
 	// Compile and emit any registered web workers to /workers/.
 	if err := b.writeWorkerBundles(); err != nil {
@@ -526,22 +492,6 @@ func (b *Builder) BuildAll() error {
 		fmt.Fprintf(os.Stderr, "  %sImage copy error:%s %v\n", cYellow, cReset, err)
 	}
 
-	// Append docs-specific component CSS + chroma CSS to docs-styles.css
-	if docsCSS != "" || b.Cfg.Markdown.CodeHighlight {
-		extra := docsCSS
-		if b.Cfg.Markdown.CodeHighlight {
-			chromaCSS := syntaxhighlight.CSSForTheme(b.Cfg.Markdown.CodeTheme)
-			if chromaCSS != "" {
-				if extra != "" {
-					extra = chromaCSS + "\n" + extra
-				} else {
-					extra = chromaCSS
-				}
-			}
-		}
-		b.writeDocsCSS(extra)
-	}
-
 	if err := b.BuildAllAPI(); err != nil {
 		fmt.Fprintf(os.Stderr, "  %sAPI Build error:%s %v\n", cRed, cReset, err)
 		failureMessages = append(failureMessages, "  API: "+err.Error())
@@ -551,7 +501,11 @@ func (b *Builder) BuildAll() error {
 	b.BuildMiddleware()
 
 	// Write page manifest with SSR/ISR metadata
-	manifest := BuildManifest(results, cssFile, runtimeJS)
+	manifestCSS := ""
+	if len(globalCSS) > 0 {
+		manifestCSS = globalCSS[0]
+	}
+	manifest := BuildManifest(results, manifestCSS, runtimeJS)
 
 	// Compile server bundles for SSR/ISR/streaming pages
 	serverBundles := CompileServerBundles(results, b.Root, b.Cfg.OutDir)
@@ -595,6 +549,8 @@ func (b *Builder) BuildAll() error {
 
 	// Run build-level plugins (after all pages are done and aggregate work is complete)
 	pageResults := make([]plugin.PageResult, len(results))
+	seenCSS := make(map[string]bool)
+	var mergedPageCSS strings.Builder
 	for i, r := range results {
 		pageResults[i] = plugin.PageResult{
 			Page:     r.Page,
@@ -603,13 +559,20 @@ func (b *Builder) BuildAll() error {
 			HeadHTML: r.HeadHTML,
 			HasJS:    r.HasJS,
 		}
+		if r.CSSFile != "" && !seenCSS[r.CSSFile] {
+			seenCSS[r.CSSFile] = true
+			if data, err := os.ReadFile(filepath.Join(b.Cfg.OutDir, r.CSSFile)); err == nil {
+				mergedPageCSS.Write(data)
+				mergedPageCSS.WriteString("\n")
+			}
+		}
 	}
 	afterBuildCtx := &plugin.BuildResultHookCtx{
 		Root:   b.Root,
 		OutDir: b.Cfg.OutDir,
 		Config: b.Cfg,
 		Pages:  pageResults,
-		CSS:    mergedCSS,
+		CSS:    mergedPageCSS.String(),
 	}
 	if err := plugin.RunAfterBuild(afterBuildCtx); err != nil {
 		fmt.Fprintf(os.Stderr, "  %sPlugin error (AfterBuild):%s %v\n", cYellow, cReset, err)
@@ -688,17 +651,55 @@ func (b *Builder) writeGlobalCSS(mergedCSS string) string {
 	return cssFile
 }
 
-// writeDocsCSS appends component CSS to the docs-styles.css file in the output directory.
-func (b *Builder) writeDocsCSS(docsCSS string) {
-	docsCSSPath := filepath.Join(b.Cfg.OutDir, "docs-styles.css")
-	existing, _ := os.ReadFile(docsCSSPath)
-	combined := string(existing) + "\n" + docsCSS
-	os.WriteFile(docsCSSPath, []byte(combined), 0644)
+// writePageCSS writes one hashed stylesheet per page from the page's own CSS.
+// Pages sharing identical CSS (e.g. every docs page under the same theme, or
+// every page wrapped by the same layout) collapse onto one shared file, so each
+// page only downloads the CSS its own module graph imported. Syntax-highlight
+// (chroma) CSS is prepended only when the page actually renders highlighted
+// code. Returns the set of stylesheet filenames written.
+func (b *Builder) writePageCSS(results []*PageResult) map[string]bool {
+	written := make(map[string]bool)
+	for _, r := range results {
+		if r.CSS == "" && !pageRendersCode(r.HTML) {
+			continue
+		}
+		pageCss := r.CSS
+		if b.Cfg.Markdown.CodeHighlight && pageRendersCode(r.HTML) {
+			chromaCSS := syntaxhighlight.CSSForTheme(b.Cfg.Markdown.CodeTheme)
+			if chromaCSS != "" {
+				pageCss = chromaCSS + "\n" + pageCss
+			}
+		}
+		processedCSS := css.InlineImports(pageCss, b.Root)
+		if b.Cfg.ShouldMinifyCSS() {
+			processedCSS = css.Minify(processedCSS)
+		}
+		if strings.TrimSpace(processedCSS) == "" {
+			continue
+		}
+		processedBytes := []byte(processedCSS)
+		cssHash := hashContent(processedBytes)
+		cssFile := "styles." + cssHash + ".css"
+		r.CSSFile = cssFile
+		if !written[cssFile] {
+			os.WriteFile(filepath.Join(b.Cfg.OutDir, cssFile), processedBytes, 0644)
+			written[cssFile] = true
+		}
+	}
+	return written
+}
+
+// pageRendersCode reports whether a page's markup contains syntax-highlighted
+// code, in which case the chroma stylesheet is needed on that page.
+func pageRendersCode(html string) bool {
+	return strings.Contains(html, "chroma")
 }
 
 // writeHTMLPages builds the layout wrapper, applies placeholders, minifies,
 // and saves to disk in a single parallel step (Zero Disk-I/O Amplification Fix)
-func (b *Builder) writeHTMLPages(results []*PageResult, cssFile string, runtimeJSFile string) {
+// cssFiles are extra global stylesheets (e.g. Tailwind) linked on every page in
+// addition to each page's own stylesheet (r.CSSFile).
+func (b *Builder) writeHTMLPages(results []*PageResult, cssFiles []string, runtimeJSFile string) {
 	var wg sync.WaitGroup
 	pool := newWorkerPool(buildWorkerLimit())
 	for _, r := range results {
@@ -716,14 +717,19 @@ func (b *Builder) writeHTMLPages(results []*PageResult, cssFile string, runtimeJ
 			os.MkdirAll(pageDir, 0755)
 
 			// 1. Construct structural HTML wrapper in memory.
-			// A page links the global stylesheet when it has its own imported CSS
-			// OR when a merged stylesheet (e.g. Tailwind-generated) was written.
-			hasCSS := r.HasCSS || cssFile != ""
+			// A page links its own stylesheet (r.CSSFile) first, then any
+			// site-global stylesheets (e.g. Tailwind) so utility classes can
+			// override page/component styles.
+			pageCSS := []string{}
+			if r.CSSFile != "" {
+				pageCSS = append(pageCSS, r.CSSFile)
+			}
+			pageCSS = append(pageCSS, cssFiles...)
 			var html string
 			if r.LoadingHTML != "" {
-				html = generateHTMLWithLoading(r.HTML, r.HeadHTML, r.ScriptHTML, r.StyleHTML, r.LoadingHTML, hasCSS, r.JSFile, runtimeJSFile, r.OutName, b.DevMode)
+				html = generateHTMLWithLoading(r.HTML, r.HeadHTML, r.ScriptHTML, r.StyleHTML, r.LoadingHTML, pageCSS, r.JSFile, runtimeJSFile, r.OutName, b.DevMode)
 			} else {
-				html = generateHTML(r.HTML, r.HeadHTML, r.ScriptHTML, r.StyleHTML, hasCSS, r.JSFile, runtimeJSFile, r.OutName, b.DevMode)
+				html = generateHTML(r.HTML, r.HeadHTML, r.ScriptHTML, r.StyleHTML, pageCSS, r.JSFile, runtimeJSFile, r.OutName, b.DevMode)
 			}
 
 			// 2. CSP meta tag injection
@@ -740,11 +746,6 @@ func (b *Builder) writeHTMLPages(results []*PageResult, cssFile string, runtimeJ
 				if seoTags != "" {
 					html = strings.Replace(html, "</head>", seoTags+"</head>", 1)
 				}
-			}
-
-			// 3. Perform placeholder swap in memory
-			if cssFile != "" {
-				html = strings.ReplaceAll(html, cssPlaceholder, cssFile)
 			}
 
 			// 3. Minify code in memory
@@ -852,6 +853,7 @@ func (b *Builder) buildPage(page string) (*PageResult, string, error) {
 
 	b.TransformUniversalIcons(entryModule.Program)
 	b.TransformUniversalImages(entryModule.Program)
+	b.FlattenComponentSpreadAttrs(entryModule.Program)
 
 	// ─── New pipeline: Annotate → Build IR → Emit ──────────────────────────
 	// Transform <Icon>/<Image> in imported component modules too. These are
@@ -864,8 +866,10 @@ func (b *Builder) buildPage(page string) (*PageResult, string, error) {
 	for _, mp := range extraPrograms {
 		b.TransformUniversalIcons(mp.Program)
 		b.TransformUniversalImages(mp.Program)
+		b.FlattenComponentSpreadAttrs(mp.Program)
 	}
 	annotator.MergeModuleFunctions(ann, extraPrograms)
+	annotator.MergeImportAliases(ann, extraPrograms, annotator.ModuleSource{Program: entryModule.Program, Path: entryModule.Path, RawSource: entryModule.SourceCode})
 	// Re-classify tiers for any newly discovered components
 	annotator.ReclassifyTiers(ann, b.Cfg)
 	tree := irtree.Build(entryModule.Program, ann)
@@ -1010,6 +1014,7 @@ func (b *Builder) buildPage(page string) (*PageResult, string, error) {
 		JSFile:      jsFile,
 		HasCSS:      bundle.CSS != "",
 		IsErrorPage: pageBase == "404" || pageBase == "500",
+		CSS:         bundle.CSS,
 		UsedCSS:     emitResult.UsedCSS,
 		UsedFuncs:   emitResult.UsedFuncs,
 		LoadingHTML: loadingHTML,
@@ -1047,6 +1052,7 @@ func (b *Builder) buildRoute(route plugin.Route) (result *PageResult, rawCSS str
 		HasJS:       false,
 		JSFile:      "",
 		HasCSS:      rawCSS != "",
+		CSS:         rawCSS,
 		UsedCSS:     layoutRes.UsedCSS,
 		UsedFuncs:   make(map[string]bool),
 	}, rawCSS, nil
@@ -1137,10 +1143,12 @@ func (b *Builder) executeLayoutPipeline(layoutPath string, content string, props
 
 	b.TransformUniversalIcons(layoutModule.Program)
 	b.TransformUniversalImages(layoutModule.Program)
+	b.FlattenComponentSpreadAttrs(layoutModule.Program)
 
 	ann := annotator.Annotate(layoutModule.Program, b.Cfg, layoutPath, layoutModule.SourceCode)
 	extraLayoutPrograms := moduleSources(layoutBundle.Modules, layoutModule)
 	annotator.MergeModuleFunctions(ann, extraLayoutPrograms)
+	annotator.MergeImportAliases(ann, extraLayoutPrograms, annotator.ModuleSource{Program: layoutModule.Program, Path: layoutModule.Path, RawSource: layoutModule.SourceCode})
 	annotator.ReclassifyTiers(ann, b.Cfg)
 	tree := irtree.Build(layoutModule.Program, ann)
 	emitter := renderer.NewEmitter()
@@ -1208,81 +1216,6 @@ func renderErrors(page string, errs []error) error {
 		msgs = append(msgs, e.Error())
 	}
 	return fmt.Errorf("render failed (%s): %s", page, strings.Join(msgs, "; "))
-}
-
-// mergeCSS merges new CSS into the accumulated CSS, deduplicating by individual rule.
-// Rules are split respecting brace depth so @keyframes/@media rules with nested
-// braces are treated as a single unit.
-func mergeCSS(merged, newCSS string, seen map[string]bool) string {
-	if newCSS == "" {
-		return merged
-	}
-	var b strings.Builder
-	b.Grow(len(merged) + len(newCSS))
-	b.WriteString(merged)
-	if merged != "" && !strings.HasSuffix(merged, "\n") {
-		b.WriteByte('\n')
-	}
-	// Split newCSS into rules respecting brace depth
-	i := 0
-	for i < len(newCSS) {
-		openIdx := strings.IndexByte(newCSS[i:], '{')
-		if openIdx < 0 {
-			// No more rules — append any trailing text
-			rest := newCSS[i:]
-			if strings.TrimSpace(rest) != "" {
-				b.WriteString(rest)
-				b.WriteByte('\n')
-			}
-			break
-		}
-		openIdx += i
-		// Find matching close brace (respecting nested braces and strings)
-		depth := 1
-		j := openIdx + 1
-		inStr := byte(0)
-		for j < len(newCSS) && depth > 0 {
-			ch := newCSS[j]
-			if inStr != 0 {
-				if ch == '\\' && j+1 < len(newCSS) {
-					j += 2
-					continue
-				}
-				if ch == inStr {
-					inStr = 0
-				}
-			} else {
-				switch ch {
-				case '"', '\'':
-					inStr = ch
-				case '{':
-					depth++
-				case '}':
-					depth--
-				}
-			}
-			j++
-		}
-		if depth > 0 {
-			// Unmatched brace — append the rest and stop
-			rest := newCSS[i:]
-			if strings.TrimSpace(rest) != "" {
-				b.WriteString(rest)
-				b.WriteByte('\n')
-			}
-			break
-		}
-		// j points just past the closing '}'; rule is [i, j)
-		rule := newCSS[i:j]
-		key := strings.TrimSpace(rule)
-		if key != "" && !seen[key] {
-			seen[key] = true
-			b.WriteString(rule)
-			b.WriteByte('\n')
-		}
-		i = j
-	}
-	return b.String()
 }
 
 func findPages(dir string) ([]string, error) {
@@ -1356,6 +1289,7 @@ func (b *Builder) renderLoadingComponent(pagePath string) string {
 	ann := annotator.Annotate(entryModule.Program, b.Cfg, loadingPath, entryModule.SourceCode)
 	extraPrograms := moduleSources(bundle.Modules, entryModule)
 	annotator.MergeModuleFunctions(ann, extraPrograms)
+	annotator.MergeImportAliases(ann, extraPrograms, annotator.ModuleSource{Program: entryModule.Program, Path: entryModule.Path, RawSource: entryModule.SourceCode})
 	tree := irtree.Build(entryModule.Program, ann)
 	emitter := renderer.NewEmitter()
 	emitter.EvalJS = b.jsExprEvaluator()

@@ -568,6 +568,7 @@ func TestWriteBootstrapResolvesPluginModules(t *testing.T) {
 		`fileURLToPath`,
 		`p.module.startsWith('file://')`,
 		`p.module = fileURLToPath(p.module);`,
+		`theme.module = fileURLToPath(theme.module);`,
 		`JSON.stringify(config)`,
 	} {
 		if !strings.Contains(content, want) {
