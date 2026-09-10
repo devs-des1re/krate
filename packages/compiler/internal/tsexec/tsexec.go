@@ -45,6 +45,16 @@ func RunBootstrap(name, content, cwd string, timeout time.Duration) (stdout []by
 
 	cmd := exec.CommandContext(ctx, "npx", "tsx", path)
 	cmd.Dir = cwd
+	configureProcessTree(cmd)
+	// A timeout must not outlive itself. On Windows `npx` is a shim that spawns
+	// a child `node`; killing only the shim leaves the child holding the
+	// stdout/stderr pipes open, so cmd.Wait() would block forever even after the
+	// deadline. Kill the whole tree and bound the post-kill I/O wait.
+	cmd.Cancel = func() error {
+		killProcessTree(cmd)
+		return nil
+	}
+	cmd.WaitDelay = 10 * time.Second
 	out, err := cmd.Output()
 	if err != nil {
 		if ctx.Err() == context.DeadlineExceeded {
