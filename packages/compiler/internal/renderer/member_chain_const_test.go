@@ -78,3 +78,22 @@ export default function Page() {
 		}
 	}
 }
+
+// An absent nested prop chain (props.meta?.title with no `meta` prop) must
+// render as nothing, never the literal text "undefined". Guard for the
+// props-chain fold, which must stay scoped so it can't leak JS `undefined`
+// into SSR output for ordinary components.
+func TestNestedMemberAbsentPropRendersNothing(t *testing.T) {
+	src := `
+function Card(props: { meta?: { title?: string } }) {
+  return <div>{props.meta?.title}</div>;
+}
+export default function Page() {
+  return <Card />;
+}
+`
+	result, _ := fullPipeline(t, src)
+	if strings.Contains(result.HTML, "undefined") {
+		t.Errorf("absent nested prop leaked 'undefined' into SSR output:\n%s", result.HTML)
+	}
+}

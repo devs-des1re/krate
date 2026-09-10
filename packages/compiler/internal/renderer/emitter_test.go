@@ -163,6 +163,55 @@ export default function Page() {
 	}
 }
 
+// TestEmitMetaCallSiteHeadInWrapper guards the call-site <Head> case: a <Head>
+// passed as a CHILD into a signal-less wrapper is not part of the wrapper's own
+// return JSX, so SSREval does not capture it — EmitMeta must still walk the
+// wrapper's call-site children to hoist it. Regression guard for the meta-dedup
+// fix, which only skips the eval'd own-return tree.
+func TestEmitMetaCallSiteHeadInWrapper(t *testing.T) {
+	src := `function Shell(props) {
+  return <html><body>{props.children}</body></html>;
+}
+export default function Page() {
+  return <Shell><Head><title>Call Site Title</title></Head><div>body</div></Shell>;
+}`
+	result, _ := fullPipeline(t, src)
+	if !strings.Contains(result.HeadHTML, "Call Site Title") {
+		t.Errorf("call-site <Head> passed into a wrapper was not hoisted, got HeadHTML=%q", result.HeadHTML)
+	}
+}
+
+// TestEmitMetaHeadNotDuplicated guards the opposite direction: the root's OWN
+// <Head> is captured once by SSREval and must not be appended a second time by
+// EmitMeta (which previously doubled <title> with stale pre-binding values).
+func TestEmitMetaHeadNotDuplicated(t *testing.T) {
+	src := `export default function Page() {
+  return <div><Head><title>Only Once</title></Head><p>body</p></div>;
+}`
+	result, _ := fullPipeline(t, src)
+	if got := strings.Count(result.HeadHTML, "<title>Only Once</title>"); got != 1 {
+		t.Errorf("expected the root <title> exactly once in HeadHTML, got %d:\n%s", got, result.HeadHTML)
+	}
+}
+
+// TestEmitRootLocalFoldsInHead locks the root-local fold: a plain const at the
+// page root must resolve to its value in both head and body, never leak the
+// identifier name. Regression guard (blog.tsx renders
+// <Head><title>{title} - Krate Blog</title></Head>).
+func TestEmitRootLocalFoldsInHead(t *testing.T) {
+	src := `export default function Page() {
+  const title = "Root Local Title";
+  return <div><Head><title>{title} - Site</title></Head><p>{title}</p></div>;
+}`
+	result, _ := fullPipeline(t, src)
+	if !strings.Contains(result.HeadHTML, "<title>Root Local Title - Site</title>") {
+		t.Errorf("root local in <title> was not folded, got HeadHTML=%q", result.HeadHTML)
+	}
+	if !strings.Contains(result.HTML, "<p>Root Local Title</p>") {
+		t.Errorf("root local in body was not folded, got HTML=%q", result.HTML)
+	}
+}
+
 // ─── emitClient edge cases ──────────────────────────────────────────────────
 
 func TestEmitClientCollectsChildComponentSignatures(t *testing.T) {

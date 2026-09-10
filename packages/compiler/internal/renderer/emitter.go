@@ -785,18 +785,26 @@ func EmitMeta(tree *irtree.ComponentTree, result *EmitResult) {
 
 // walkMetaSlots recursively walks ComponentNode children looking for MetaSlots.
 //
-// SSREval'd components already capture their own <Head>/<Script>/<Style> content
-// while evaluating the component's return JSX (into EmitResult via the emitter's
-// headHTML/scriptHTML/styleHTML accumulators). Walking their MetaSlots here too
-// would append that content a second time — and, when the node was SSREval'd with
-// injected prop bindings (generateStaticParams params, dynamic-route sentinels),
-// with stale pre-binding values. So SSREval nodes are skipped; the slot-pipeline
-// path (client/non-evaluated components) is still walked.
+// A component's own-return <Head>/<Script>/<Style> is captured by SSREval while
+// the component's return JSX is evaluated (into EmitResult via the emitter's
+// headHTML/scriptHTML/styleHTML accumulators). For the page ROOT, node.Children
+// ARE that own-return tree, so walking them here would append the same content a
+// second time — and, when the root was SSREval'd with injected prop bindings
+// (generateStaticParams params, dynamic-route sentinels), with stale
+// pre-binding values. Child SSREval nodes keep their own-return tree in
+// ReturnSlots, so their Children are CALL-SITE slots, which SSREval does not
+// capture — a call-site <Head> passed into a signal-less wrapper must still be
+// walked. Non-evaluated nodes are never captured by SSREval, so their own-return
+// Children are walked as before.
 func walkMetaSlots(node *irtree.ComponentNode, result *EmitResult) {
 	if node == nil {
 		return
 	}
-	if !node.IsSSREval {
+	// Root-like SSREval node: Children are the component's own return, already
+	// captured during SSREval. Any SSREval node with a call site has
+	// CallSiteChildren set, so this identifies the entry/root node.
+	skipOwnReturn := node.IsSSREval && node.CallSiteChildren == nil
+	if !skipOwnReturn {
 		for _, child := range node.Children {
 			if meta, ok := child.(*irtree.MetaSlot); ok {
 				var childHTML strings.Builder
@@ -817,7 +825,7 @@ func walkMetaSlots(node *irtree.ComponentNode, result *EmitResult) {
 		}
 	}
 	for _, child := range node.Children {
-		if comp, ok := child.(*irtree.ComponentSlot); ok && comp.Component != nil && !comp.Component.IsSSREval {
+		if comp, ok := child.(*irtree.ComponentSlot); ok && comp.Component != nil {
 			walkMetaSlots(comp.Component, result)
 		}
 	}

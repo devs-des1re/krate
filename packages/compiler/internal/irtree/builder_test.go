@@ -14,62 +14,6 @@ func annotateWith(prog *ast.Program, cfg *config.Config, path, raw string) *irtr
 	return annotator.Annotate(prog, cfg, path, raw)
 }
 
-// TestBuildRootPropsFoldLocals verifies that seeding the entry component's
-// props lets a props-derived local fold at build time, and that the root stays
-// static (so its output is emitted directly, not deferred to hydration). This
-// is the mechanism that lets dynamic-route templates emit replaceable
-// placeholders instead of leaking the local variable name.
-func TestBuildRootPropsFoldLocals(t *testing.T) {
-	src := `export default function Page(props) {
-	const id = props.params?.id || "fallback"
-	return <div>{id}</div>
-}`
-	prog := parseProg(t, src)
-	ann := annotator.Annotate(prog, &config.Config{}, "test.tsx", src)
-
-	// Without root props, the chain is unresolved and the local still folds to
-	// its "fallback" default (props.params absent → undefined → || fallback).
-	tree := irtree.Build(prog, ann)
-	if tree.Root.Tier != irtree.TierStatic {
-		t.Fatalf("expected static root tier, got %v", tree.Root.Tier)
-	}
-
-	// With a seeded prop, the local must fold to the seed value.
-	seeded := irtree.Build(prog, ann, map[string]string{"params": `{"id":"abc123"}`})
-	if seeded.Root.Tier != irtree.TierStatic {
-		t.Fatalf("seeded root must stay static, got %v", seeded.Root.Tier)
-	}
-	if !containsStaticText(seeded.Root, "abc123") {
-		t.Errorf("seeded root did not fold props.params.id into the rendered text")
-	}
-}
-
-// containsStaticText reports whether any StaticHTML under node contains substr.
-func containsStaticText(node *irtree.ComponentNode, substr string) bool {
-	if node == nil {
-		return false
-	}
-	for _, child := range node.Children {
-		switch c := child.(type) {
-		case *irtree.StaticHTML:
-			if strings.Contains(c.HTML, substr) {
-				return true
-			}
-		case *irtree.ComponentSlot:
-			if containsStaticText(c.Component, substr) {
-				return true
-			}
-		case *irtree.MetaSlot:
-			for _, mc := range c.Children {
-				if s, ok := mc.(*irtree.StaticHTML); ok && strings.Contains(s.HTML, substr) {
-					return true
-				}
-			}
-		}
-	}
-	return false
-}
-
 func configWithRuntime(names ...string) *config.Config {
 	return &config.Config{RuntimeComponents: names}
 }

@@ -304,3 +304,71 @@ export default {
 		t.Errorf("AfterRender did not run for the static-param page: rawCSS=%q result.CSS=%q", rawCSS, result.CSS)
 	}
 }
+
+// buildTreeForSrc parses/bundles a page source and returns its IR tree.
+func buildTreeForSrc(t *testing.T, root, pagePath, src string) *irtree.ComponentTree {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(pagePath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pagePath, []byte(src), 0644); err != nil {
+		t.Fatal(err)
+	}
+	bnd := bundler.New(root)
+	bundle, err := bnd.Bundle(pagePath)
+	if err != nil {
+		t.Fatalf("bundle: %v", err)
+	}
+	ent := findEntryModule(bundle.Modules)
+	if ent == nil || ent.Program == nil {
+		t.Fatal("no entry module")
+	}
+	ann := annotator.Annotate(ent.Program, &config.Config{}, pagePath, ent.SourceCode)
+	return irtree.Build(ent.Program, ann)
+}
+
+// TestInjectDynamicRoutePlaceholdersStaticRoot verifies a static route root is
+// SSREval'd with sentinels for every [param].
+func TestInjectDynamicRoutePlaceholdersStaticRoot(t *testing.T) {
+	root := t.TempDir()
+	pagePath := filepath.Join(root, "src", "pages", "video", "[id].tsx")
+	src := `export default function VideoPage(props: { params?: { id: string } }) {
+  const id = props.params?.id || "unknown";
+  return <div>Video {id}</div>;
+}`
+	tree := buildTreeForSrc(t, root, pagePath, src)
+	if tree.Root.Tier != irtree.TierStatic {
+		t.Fatalf("expected static root tier, got %v", tree.Root.Tier)
+	}
+	injectDynamicRoutePlaceholders(tree, []string{"id"})
+	if !tree.Root.IsSSREval {
+		t.Fatal("static dynamic-route root should be SSREval'd with sentinels")
+	}
+	if got := tree.Root.SSREvalBindings["id"]; got != dynamicParamSentinel("id") {
+		t.Errorf("binding id = %q, want sentinel %q", got, dynamicParamSentinel("id"))
+	}
+	if got := tree.Root.SSREvalBindings["params"]; !strings.Contains(got, dynamicParamSentinel("id")) {
+		t.Errorf("params binding = %q, want it to carry the sentinel", got)
+	}
+}
+
+// TestInjectDynamicRoutePlaceholdersSkipsClientRoot verifies an interactive
+// dynamic-route root is NOT frozen to a sentinel: it renders params reactively
+// after hydration, so the server must not substitute a static placeholder.
+func TestInjectDynamicRoutePlaceholdersSkipsClientRoot(t *testing.T) {
+	root := t.TempDir()
+	pagePath := filepath.Join(root, "src", "pages", "video", "[id].tsx")
+	src := `export default function VideoPage() {
+  const [id, setId] = createSignal("x");
+  return <button onClick={() => setId(id() + "!")}>{id()}</button>;
+}`
+	tree := buildTreeForSrc(t, root, pagePath, src)
+	if tree.Root.Tier != irtree.TierClient {
+		t.Fatalf("expected client root tier, got %v", tree.Root.Tier)
+	}
+	injectDynamicRoutePlaceholders(tree, []string{"id"})
+	if tree.Root.IsSSREval {
+		t.Error("client dynamic-route root must not be frozen to a sentinel")
+	}
+}
+

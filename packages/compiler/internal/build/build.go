@@ -888,22 +888,14 @@ func (b *Builder) buildPage(page string) (*PageResult, string, error) {
 	annotator.MergeImportAliases(ann, extraPrograms, annotator.ModuleSource{Program: entryModule.Program, Path: entryModule.Path, RawSource: entryModule.SourceCode})
 	// Re-classify tiers for any newly discovered components
 	annotator.ReclassifyTiers(ann, b.Cfg)
+	tree := irtree.Build(entryModule.Program, ann)
 	// Dynamic-route templates are built once and served for every matching URL,
-	// so seed each [param] as a replaceable sentinel the server substitutes per
-	// request. This folds into the static render path (body text, <title>, and
-	// meta attributes), unlike the old signal-only ">unknown<" replacement.
-	// generateStaticParams pages are built separately (buildStaticParamsPage)
-	// with concrete param values, so this only affects the reusable template.
-	var rootProps map[string]string
+	// so bind each [param] to a replaceable sentinel the server substitutes per
+	// request (see serve.go applyDynamicRouteParams). Mirrors injectStaticParams
+	// and only affects static/server roots; generateStaticParams pages are built
+	// separately with concrete values.
 	if isDynamicRoute(page, b.Cfg.PagesDir) {
-		rootProps = dynamicParamRootProps(extractParamNames(page, b.Cfg.PagesDir))
-	}
-	tree := irtree.Build(entryModule.Program, ann, rootProps)
-	// A client root renders params reactively at hydration; freezing them to a
-	// static sentinel would be wrong. Rebuild unseeded so behavior matches a
-	// non-dynamic page (the server-side params come from the runtime props).
-	if rootProps != nil && tree.Root.Tier == irtree.TierClient {
-		tree = irtree.Build(entryModule.Program, ann)
+		injectDynamicRoutePlaceholders(tree, extractParamNames(page, b.Cfg.PagesDir))
 	}
 	regions := enumerateRegions(tree)
 	emitter := renderer.NewEmitter()

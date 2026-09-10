@@ -70,25 +70,37 @@ func dynamicParamSentinel(name string) string {
 	return dynamicParamSentinelPrefix + name + "__"
 }
 
-// dynamicParamRootProps builds the entry-component prop seed for a dynamic
-// route template: each [param] is bound to a unique sentinel (both as the
-// `params` object and as a bare key) so the build-time fold emits a replaceable
-// marker in every position the param is read. The dev/preview server swaps each
-// sentinel for the matched URL segment at request time (see serve.go).
-func dynamicParamRootProps(paramNames []string) map[string]string {
-	if len(paramNames) == 0 {
-		return nil
+// injectDynamicRoutePlaceholders binds each dynamic-route [param] to a unique
+// sentinel so a statically built template's evaluated output (body text, title,
+// meta attributes) contains a marker the server substitutes per request.
+//
+// Mirrors injectStaticParams: it SSREval's the root with the sentinel bindings,
+// and only for pure static/server roots. Interactive client roots render params
+// reactively after hydration and must not be frozen to a sentinel.
+func injectDynamicRoutePlaceholders(tree *irtree.ComponentTree, paramNames []string) {
+	root := tree.Root
+	if root == nil || len(paramNames) == 0 {
+		return
 	}
-	props := make(map[string]string, len(paramNames)+1)
-	obj := make(map[string]string, len(paramNames))
+	if root.Tier != irtree.TierStatic && root.Tier != irtree.TierServer {
+		return
+	}
+	bindings := make(map[string]string, len(paramNames)+1)
+	objStr := make([]string, 0, len(paramNames))
 	for _, name := range paramNames {
 		sentinel := dynamicParamSentinel(name)
-		props[name] = sentinel
-		obj[name] = sentinel
+		bindings[name] = sentinel
+		bv, _ := json.Marshal(sentinel)
+		objStr = append(objStr, fmt.Sprintf("%q:%s", name, bv))
 	}
-	objJSON, _ := json.Marshal(obj)
-	props["params"] = string(objJSON)
-	return props
+	bindings["params"] = "{" + strings.Join(objStr, ",") + "}"
+	for k, v := range root.SSREvalBindings {
+		if _, ok := bindings[k]; !ok {
+			bindings[k] = v
+		}
+	}
+	root.SSREvalBindings = bindings
+	root.IsSSREval = true
 }
 
 // extractParamNames extracts parameter names from a dynamic route filename.
