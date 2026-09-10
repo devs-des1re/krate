@@ -10,6 +10,7 @@ import (
 
 	"github.com/kratejs/krate/packages/compiler/internal/build"
 	"github.com/kratejs/krate/packages/compiler/internal/config"
+	krateversion "github.com/kratejs/krate/packages/compiler/internal/version"
 )
 
 const (
@@ -34,6 +35,8 @@ type cliFlags struct {
 
 func main() {
 	runtime.GOMAXPROCS(runtime.NumCPU())
+	// Publish the build-time version to internal packages (plugins read it).
+	krateversion.Value = version
 	flags, args := parseFlags(os.Args[1:])
 
 	if len(args) == 0 {

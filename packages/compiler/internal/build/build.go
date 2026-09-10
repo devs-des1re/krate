@@ -122,6 +122,16 @@ func (b *Builder) drainPluginErrs() []string {
 	return errs
 }
 
+// communityEnv is the build-wide context handed to community plugin hooks so
+// the richer `krate` object reflects the project layout and config.
+func (b *Builder) communityEnv() plugin.CommunityEnv {
+	return plugin.CommunityEnv{
+		PagesDir: b.Cfg.PagesDir,
+		DevMode:  b.DevMode,
+		Config:   b.Cfg,
+	}
+}
+
 // findKrateRoot walks up from the project root to find the krate compiler's root directory.
 func findKrateRoot(projectRoot string) string {
 	dir := projectRoot
@@ -216,7 +226,7 @@ func (b *Builder) BuildPages(pages []string) error {
 			fmt.Fprintf(os.Stderr, "  %sPlugin error (AfterPage: %s):%s %v\n", cYellow, res.page, cReset, err)
 			b.pluginFailed(err)
 		}
-		if err := plugin.RunCommunityPlugins("AfterPage", b.Cfg.Plugins, b.Root, b.Cfg.OutDir, afterPageCtx); err != nil {
+		if err := plugin.RunCommunityPlugins("AfterPage", b.Cfg.Plugins, b.Root, b.Cfg.OutDir, afterPageCtx, b.communityEnv()); err != nil {
 			fmt.Fprintf(os.Stderr, "  %sCommunity plugin error (AfterPage: %s):%s %v\n", cYellow, res.page, cReset, err)
 			b.pluginFailed(err)
 		}
@@ -293,7 +303,7 @@ func (b *Builder) BuildAll() error {
 		fmt.Fprintf(os.Stderr, "  %sPlugin error (BeforeBuild):%s %v\n", cYellow, cReset, err)
 		b.pluginFailed(err)
 	}
-	if err := plugin.RunCommunityPlugins("BeforeBuild", b.Cfg.Plugins, b.Root, b.Cfg.OutDir, beforeBuildCtx); err != nil {
+	if err := plugin.RunCommunityPlugins("BeforeBuild", b.Cfg.Plugins, b.Root, b.Cfg.OutDir, beforeBuildCtx, b.communityEnv()); err != nil {
 		fmt.Fprintf(os.Stderr, "  %sCommunity plugin error (BeforeBuild):%s %v\n", cYellow, cReset, err)
 		b.pluginFailed(err)
 	}
@@ -317,7 +327,7 @@ func (b *Builder) BuildAll() error {
 		fmt.Fprintf(os.Stderr, "  %sPlugin error (GenerateRoutes):%s %v\n", cYellow, cReset, err)
 		b.pluginFailed(err)
 	}
-	if err := plugin.RunCommunityPlugins("GenerateRoutes", b.Cfg.Plugins, b.Root, b.Cfg.OutDir, routeCtx); err != nil {
+	if err := plugin.RunCommunityPlugins("GenerateRoutes", b.Cfg.Plugins, b.Root, b.Cfg.OutDir, routeCtx, b.communityEnv()); err != nil {
 		fmt.Fprintf(os.Stderr, "  %sCommunity plugin error (GenerateRoutes):%s %v\n", cYellow, cReset, err)
 		b.pluginFailed(err)
 	}
@@ -392,7 +402,7 @@ func (b *Builder) BuildAll() error {
 			fmt.Fprintf(os.Stderr, "  %sPlugin error (AfterPage: %s):%s %v\n", cYellow, res.page, cReset, err)
 			b.pluginFailed(err)
 		}
-		if err := plugin.RunCommunityPlugins("AfterPage", b.Cfg.Plugins, b.Root, b.Cfg.OutDir, afterPageCtx); err != nil {
+		if err := plugin.RunCommunityPlugins("AfterPage", b.Cfg.Plugins, b.Root, b.Cfg.OutDir, afterPageCtx, b.communityEnv()); err != nil {
 			fmt.Fprintf(os.Stderr, "  %sCommunity plugin error (AfterPage: %s):%s %v\n", cYellow, res.page, cReset, err)
 			b.pluginFailed(err)
 		}
@@ -578,7 +588,7 @@ func (b *Builder) BuildAll() error {
 		fmt.Fprintf(os.Stderr, "  %sPlugin error (AfterBuild):%s %v\n", cYellow, cReset, err)
 		b.pluginFailed(err)
 	}
-	if err := plugin.RunCommunityPlugins("AfterBuild", b.Cfg.Plugins, b.Root, b.Cfg.OutDir, afterBuildCtx); err != nil {
+	if err := plugin.RunCommunityPlugins("AfterBuild", b.Cfg.Plugins, b.Root, b.Cfg.OutDir, afterBuildCtx, b.communityEnv()); err != nil {
 		fmt.Fprintf(os.Stderr, "  %sCommunity plugin error (AfterBuild):%s %v\n", cYellow, cReset, err)
 		b.pluginFailed(err)
 	}
@@ -818,7 +828,7 @@ func (b *Builder) buildPage(page string) (*PageResult, string, error) {
 		fmt.Fprintf(os.Stderr, "  %sAfterParse plugin error (%s):%s %v\n", cYellow, page, cReset, err)
 		b.pluginFailed(fmt.Errorf("AfterParse (%s): %v", page, err))
 	}
-	if err := plugin.RunCommunityPlugins("AfterParse", b.Cfg.Plugins, b.Root, b.Cfg.OutDir, parseCtx); err != nil {
+	if err := plugin.RunCommunityPlugins("AfterParse", b.Cfg.Plugins, b.Root, b.Cfg.OutDir, parseCtx, b.communityEnv()); err != nil {
 		fmt.Fprintf(os.Stderr, "  %sCommunity plugin error AfterParse (%s):%s %v\n", cYellow, page, cReset, err)
 		b.pluginFailed(fmt.Errorf("AfterParse (%s): %v", page, err))
 	}
@@ -900,7 +910,7 @@ func (b *Builder) buildPage(page string) (*PageResult, string, error) {
 		fmt.Fprintf(os.Stderr, "  %sAfterRender plugin error (%s):%s %v\n", cYellow, page, cReset, err)
 		b.pluginFailed(fmt.Errorf("AfterRender (%s): %v", page, err))
 	}
-	if err := plugin.RunCommunityPlugins("AfterRender", b.Cfg.Plugins, b.Root, b.Cfg.OutDir, renderCtx); err != nil {
+	if err := plugin.RunCommunityPlugins("AfterRender", b.Cfg.Plugins, b.Root, b.Cfg.OutDir, renderCtx, b.communityEnv()); err != nil {
 		fmt.Fprintf(os.Stderr, "  %sCommunity plugin error AfterRender (%s):%s %v\n", cYellow, page, cReset, err)
 		b.pluginFailed(fmt.Errorf("AfterRender (%s): %v", page, err))
 	}
@@ -924,7 +934,7 @@ func (b *Builder) buildPage(page string) (*PageResult, string, error) {
 			fmt.Fprintf(os.Stderr, "  %sAfterMarkdownParse plugin error (%s):%s %v\n", cYellow, page, cReset, err)
 			b.pluginFailed(fmt.Errorf("AfterMarkdownParse (%s): %v", page, err))
 		}
-		if err := plugin.RunCommunityPlugins("AfterMarkdownParse", b.Cfg.Plugins, b.Root, b.Cfg.OutDir, mdCtx); err != nil {
+		if err := plugin.RunCommunityPlugins("AfterMarkdownParse", b.Cfg.Plugins, b.Root, b.Cfg.OutDir, mdCtx, b.communityEnv()); err != nil {
 			fmt.Fprintf(os.Stderr, "  %sCommunity plugin error AfterMarkdownParse (%s):%s %v\n", cYellow, page, cReset, err)
 			b.pluginFailed(fmt.Errorf("AfterMarkdownParse (%s): %v", page, err))
 		}

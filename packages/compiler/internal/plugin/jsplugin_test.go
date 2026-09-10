@@ -1,8 +1,10 @@
 package plugin
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/kratejs/krate/packages/compiler/ast"
@@ -421,4 +423,192 @@ func contains(s, substr string) bool {
 		}
 		return false
 	})()
+}
+
+// TestJSPluginKrateCapabilities exercises the richer krate object: metadata
+// fields (projectRoot/outDir/pagesDir/dev/pages/version/config) and the
+// capability methods (resolveFile/readFile/emitFile/writeFileToRoot/
+// injectHead/injectCSS).
+func TestJSPluginKrateCapabilities(t *testing.T) {
+	root, outDir, cfg := writeTestPlugin(t, `
+export default {
+  name: "cap-plugin",
+  order: 10,
+  hooks: {
+    BeforeBuild(ctx, options, krate) {
+      const resolved = krate.resolveFile("./data/input.txt");
+      krate.emitFile("copied.txt", krate.readFile("./data/input.txt"));
+      krate.emitFile("meta.json", JSON.stringify({
+        resolved: resolved,
+        projectRoot: krate.projectRoot,
+        root: krate.root,
+        outDir: krate.outDir,
+        pagesDir: krate.pagesDir,
+        dev: krate.dev,
+        devMode: krate.devMode,
+        pages: krate.pages,
+        version: krate.version,
+        configOutDir: krate.config && krate.config.outDir,
+      }));
+      krate.writeFileToRoot("public/asset.txt", "asset-body");
+      return {};
+    },
+    AfterRender(ctx, options, krate) {
+      krate.injectHead('<meta name="cap" content="1">');
+      krate.injectCSS(".cap{color:red}");
+      return { html: "cap:" + ctx.html };
+    },
+  },
+};
+`)
+	if err := os.MkdirAll(filepath.Join(root, "data"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "data", "input.txt"), []byte("input-body"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	pagesDir := filepath.Join(root, "src", "pages")
+	env := CommunityEnv{PagesDir: pagesDir, DevMode: true, Config: &config.Config{OutDir: outDir}}
+	ctx := &BuildHookCtx{Root: root, OutDir: outDir, Pages: []string{"index.tsx", "about.tsx"}, DevMode: true}
+	if err := RunCommunityPlugins("BeforeBuild", []config.PluginConfig{cfg}, root, outDir, ctx, env); err != nil {
+		t.Fatalf("RunCommunityPlugins BeforeBuild: %v", err)
+	}
+
+	if data, err := os.ReadFile(filepath.Join(outDir, "copied.txt")); err != nil || string(data) != "input-body" {
+		t.Fatalf("copied.txt = %q (err %v), want %q", data, err, "input-body")
+	}
+	if data, err := os.ReadFile(filepath.Join(root, "public", "asset.txt")); err != nil || string(data) != "asset-body" {
+		t.Fatalf("public/asset.txt = %q (err %v), want %q", data, err, "asset-body")
+	}
+
+	metaBytes, err := os.ReadFile(filepath.Join(outDir, "meta.json"))
+	if err != nil {
+		t.Fatalf("meta.json not written: %v", err)
+	}
+	var meta map[string]interface{}
+	if err := json.Unmarshal(metaBytes, &meta); err != nil {
+		t.Fatalf("decoding meta.json: %v", err)
+	}
+	if meta["projectRoot"] != root || meta["root"] != root {
+		t.Errorf("projectRoot/root = %v/%v, want %v", meta["projectRoot"], meta["root"], root)
+	}
+	if meta["outDir"] != outDir {
+		t.Errorf("outDir = %v, want %v", meta["outDir"], outDir)
+	}
+	if meta["pagesDir"] != pagesDir {
+		t.Errorf("pagesDir = %v, want %v", meta["pagesDir"], pagesDir)
+	}
+	if meta["dev"] != true || meta["devMode"] != true {
+		t.Errorf("dev/devMode = %v/%v, want true", meta["dev"], meta["devMode"])
+	}
+	if meta["configOutDir"] != outDir {
+		t.Errorf("config.outDir = %v, want %v", meta["configOutDir"], outDir)
+	}
+	if v, _ := meta["version"].(string); v == "" || v == "1.0.0" {
+		t.Errorf("version = %v, want the real compiler version", meta["version"])
+	}
+	if pages, ok := meta["pages"].([]interface{}); !ok || len(pages) != 2 {
+		t.Errorf("pages = %v, want 2 entries", meta["pages"])
+	}
+	if meta["resolved"] != filepath.Join(root, "data", "input.txt") {
+		t.Errorf("resolveFile = %v, want %v", meta["resolved"], filepath.Join(root, "data", "input.txt"))
+	}
+
+	rctx := &RenderHookCtx{Page: "index.tsx", HTML: "<p>x</p>", HeadHTML: "<title>t</title>"}
+	if err := RunCommunityPlugins("AfterRender", []config.PluginConfig{cfg}, root, outDir, rctx, env); err != nil {
+		t.Fatalf("RunCommunityPlugins AfterRender: %v", err)
+	}
+	if !strings.Contains(rctx.HeadHTML, `name="cap"`) {
+		t.Errorf("injectHead did not reach HeadHTML: %q", rctx.HeadHTML)
+	}
+	if !strings.Contains(rctx.RawCSS, ".cap{color:red}") {
+		t.Errorf("injectCSS did not reach RawCSS: %q", rctx.RawCSS)
+	}
+	if rctx.HTML != "cap:<p>x</p>" {
+		t.Errorf("HTML = %q, want %q", rctx.HTML, "cap:<p>x</p>")
+	}
+}
+
+// TestJSPluginKrateReadFileTraversalRejected verifies capability host functions
+// reject paths that escape the project root.
+func TestJSPluginKrateReadFileTraversalRejected(t *testing.T) {
+	root, outDir, cfg := writeTestPlugin(t, `
+export default {
+  name: "escape-plugin",
+  order: 10,
+  hooks: {
+    BeforeBuild(ctx, options, krate) {
+      krate.emitFile("leak.txt", krate.readFile("../secret.txt"));
+      return {};
+    },
+  },
+};
+`)
+
+	ctx := &BuildHookCtx{Root: root, OutDir: outDir, Pages: nil}
+	err := RunCommunityPlugins("BeforeBuild", []config.PluginConfig{cfg}, root, outDir, ctx)
+	if err == nil {
+		t.Fatal("expected traversal error, got nil")
+	}
+	if _, statErr := os.Stat(filepath.Join(outDir, "leak.txt")); statErr == nil {
+		t.Fatal("plugin read a path outside the project root")
+	}
+}
+
+// TestBuildGoHookArgsInjectsKrateMetadata verifies Go plugin hook args carry the
+// shared build metadata (projectRoot/outDir/pagesDir/version/devMode/pages/
+// config) that the SDK exposes as KrateInfo.
+func TestBuildGoHookArgsInjectsKrateMetadata(t *testing.T) {
+	env := CommunityEnv{
+		PagesDir: "/proj/src/pages",
+		DevMode:  true,
+		Config:   &config.Config{OutDir: "/proj/dist"},
+	}
+
+	rctx := &RenderHookCtx{Page: "p.tsx", HTML: "<p>", HeadHTML: "", RawCSS: ""}
+	args, err := buildGoHookArgs("AfterRender", "/proj", "/proj/dist", env, rctx)
+	if err != nil {
+		t.Fatalf("buildGoHookArgs AfterRender: %v", err)
+	}
+	render := decodeArgs(t, args)
+	if render["projectRoot"] != "/proj" || render["outDir"] != "/proj/dist" {
+		t.Errorf("root/outDir = %v/%v", render["projectRoot"], render["outDir"])
+	}
+	if render["pagesDir"] != "/proj/src/pages" || render["devMode"] != true {
+		t.Errorf("pagesDir/devMode = %v/%v", render["pagesDir"], render["devMode"])
+	}
+	if v, _ := render["version"].(string); v == "" {
+		t.Errorf("version missing: %v", render["version"])
+	}
+	if pages, ok := render["pages"].([]interface{}); !ok || len(pages) != 1 || pages[0] != "p.tsx" {
+		t.Errorf("pages = %v", render["pages"])
+	}
+	if render["config"] == nil {
+		t.Error("config missing from Go hook args")
+	}
+
+	// AfterParse carries the program document plus the same metadata.
+	pctx := &ParseHookCtx{Page: "p.tsx"}
+	args, err = buildGoHookArgs("AfterParse", "/proj", "/proj/dist", env, pctx)
+	if err != nil {
+		t.Fatalf("buildGoHookArgs AfterParse: %v", err)
+	}
+	parse := decodeArgs(t, args)
+	if parse["projectRoot"] != "/proj" || parse["page"] != "p.tsx" {
+		t.Errorf("AfterParse args = %v", parse)
+	}
+}
+
+func decodeArgs(t *testing.T, args interface{}) map[string]interface{} {
+	t.Helper()
+	b, err := json.Marshal(args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]interface{}
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	return m
 }

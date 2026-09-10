@@ -87,14 +87,29 @@ export default function demoPlugin(options: { greeting?: string } = {}) {
 
 - **`@krate/plugin`** — import the SDK package for typed contexts, outputs, and
   descriptors. `definePluginHooks` type-checks every hook's `ctx`; `definePlugin`
-  types the factory's descriptor; `Krate` types the `{ root, outDir, version }`
-  third argument. The helpers are compile-time only and erase to nothing when
-  the plugin is bundled for QuickJS, so plain `.js` plugins keep working without
-  the package.
+  types the factory's descriptor; `Krate` types the richer build context. The
+  helpers are compile-time only and erase to nothing when the plugin is bundled
+  for QuickJS, so plain `.js` plugins keep working without the package.
 - **Signature** — every hook receives `(ctx, options, krate)`: `ctx` is the
   JSON-serialized context (lowercase fields like `ctx.html`, `ctx.page`,
   `ctx.outName`, `ctx.headHTML`, `ctx.rawCSS`), `options` is the per-plugin
-  options object, and `krate` is `{ root, outDir, version }`.
+  options object, and `krate` is the build context
+  `{ root, projectRoot, outDir, pagesDir, config, dev, devMode, pages, version }`
+  plus the capability methods below.
+- **`krate` capabilities** — a plugin should not need raw `fs` guesswork or a
+  hand-rolled `node_modules` walk. The host exposes:
+  - `krate.resolveFile(spec)` → absolute path. Bare specifiers (`"pkg"`,
+    `"@scope/pkg/sub/file.css"`) resolve through `node_modules` walking up from
+    the project root; relative paths resolve against the root.
+  - `krate.readFile(spec)` → string (resolved exactly like `resolveFile`).
+  - `krate.emitFile(path, content)` → append a file to the build output
+    (outDir-relative; convenience over returning `{ files: [...] }`).
+  - `krate.writeFileToRoot(rel, content)` → write project-root-relative static
+    assets (for example `public/logo.svg`) — distinct from `emitFile`.
+  - `krate.injectHead(html)` / `krate.injectCSS(css)` → ergonomics over returning
+    `headHTML` / `rawCSS`.
+  Every path is anchored to the project root and traversal outside it is
+  rejected.
 - **Return value** — hooks return `{ files, routes, generatedPages, html,
   headHTML, rawCSS, scripts, metaTags, data }` (all optional; may be a
   Promise). `files` are written to the output dir, `routes` become static HTML
@@ -207,6 +222,14 @@ func main() {
   `github.com/kratejs/krate/packages/compiler/ast` module.
 - Every context embeds `plug.Result`, so a hook can also set `Files`, `Routes`,
   `HeadHTML`, `RawCSS`, `Scripts`, `MetaTags`, etc. on its context.
+- **Richer context & helpers** — contexts carry the same build metadata as the
+  JS `krate` object (`ProjectRoot`, `OutDir`, `PagesDir`, `Version`, `DevMode`,
+  `Pages`, `Config`). The SDK mirrors the JS capabilities:
+  `ResolveFile(root, spec)`, `ReadFile(root, spec)`, `WriteFileToRoot(root, rel,
+  content)`, and the `Result` methods `EmitFile`, `InjectHead`, `InjectCSS` —
+  for example `ctx.EmitFile("note.txt", "hi")` or
+  `ctx.InjectHead("<meta ...>")`. Paths are anchored to the project root and
+  traversal outside it is rejected.
 
 ### Building and distributing
 

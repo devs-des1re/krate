@@ -30,7 +30,7 @@ const pluginGlobal = "__kratePlugin"
 // are invoked as fn(ctx, options, krate) where ctx is the JSON-serialized hook
 // context and the return value is a { files, routes, generatedPages, html,
 // headHTML, rawCSS } result object (optionally a Promise).
-func runJSPluginHook(hookName string, pc config.PluginConfig, root, outDir string, hookCtx interface{}) error {
+func runJSPluginHook(hookName string, pc config.PluginConfig, root, outDir string, env CommunityEnv, hookCtx interface{}) error {
 	bundleCode, err := bundleJSPlugin(pc.Module, root)
 	if err != nil {
 		return err
@@ -41,6 +41,13 @@ func runJSPluginHook(hookName string, pc config.PluginConfig, root, outDir strin
 		return fmt.Errorf("creating JS runtime: %w", err)
 	}
 	defer rt.Close()
+
+	// Assemble the richer `krate` object's capabilities (resolve/read/emit/
+	// write/inject) and register their Go-backed host functions.
+	cap := newKrateCapabilities(root, outDir, env, hookName, hookCtx)
+	if err := registerKrateHostFuncs(rt, cap); err != nil {
+		return fmt.Errorf("registering krate capabilities: %w", err)
+	}
 
 	if _, err := rt.Execute(bundleCode); err != nil {
 		return fmt.Errorf("loading plugin bundle: %w", err)
@@ -54,11 +61,7 @@ func runJSPluginHook(hookName string, pc config.PluginConfig, root, outDir strin
 	if err != nil {
 		return fmt.Errorf("serializing plugin options: %w", err)
 	}
-	krateJSON, err := json.Marshal(map[string]string{
-		"root":    root,
-		"outDir":  outDir,
-		"version": "1.0.0",
-	})
+	krateJSON, err := json.Marshal(cap.metadata())
 	if err != nil {
 		return fmt.Errorf("serializing krate metadata: %w", err)
 	}
@@ -74,7 +77,14 @@ func runJSPluginHook(hookName string, pc config.PluginConfig, root, outDir strin
     var hooks = (plugin && plugin.hooks) || mod.hooks || plugin || {};
     var fn = hooks[%[4]s];
     if (typeof fn !== 'function') return JSON.stringify({ skip: true });
-    var out = fn(%[3]s, %[2]s, %[5]s);
+    var krate = %[5]s;
+    krate.resolveFile = function(spec) { return _krate_resolveFile(String(spec)); };
+    krate.readFile = function(spec) { return _krate_readFile(String(spec)); };
+    krate.emitFile = function(path, content) { _krate_emitFile(String(path), String(content)); };
+    krate.writeFileToRoot = function(rel, content) { _krate_writeFileToRoot(String(rel), String(content)); };
+    krate.injectHead = function(html) { return _krate_injectHead(String(html)); };
+    krate.injectCSS = function(css) { return _krate_injectCSS(String(css)); };
+    var out = fn(%[3]s, %[2]s, krate);
     if (out && typeof out.then === 'function') {
       __krateResult = undefined;
       __krateError = '';
@@ -130,6 +140,10 @@ func runJSPluginHook(hookName string, pc config.PluginConfig, root, outDir strin
 			return fmt.Errorf("invalid plugin result JSON: %w", err)
 		}
 	}
+
+	// Fold in side-effects produced through the krate capability methods
+	// (emitFile / injectHead / injectCSS) before applying the output.
+	cap.applyTo(&output)
 
 	return applyPluginOutput(hookName, &output, outDir, hookCtx)
 }

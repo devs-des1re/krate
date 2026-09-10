@@ -359,14 +359,48 @@ func RunAfterBuild(ctx *BuildResultHookCtx) error {
 // Community plugins are JavaScript/TypeScript modules (config plugins[].module
 // points to a .js/.mjs/.cjs/.ts/.tsx file) executed inside the embedded QuickJS
 // runtime; esbuild transpiles TS entries before evaluation.
-func RunCommunityPlugins(hookName string, plugins []config.PluginConfig, root, outDir string, hookCtx interface{}) error {
+//
+// The optional env carries build-wide context (pages dir, dev flag, resolved
+// config) that the richer `krate` object exposes. When omitted it is derived
+// from hookCtx where possible.
+func RunCommunityPlugins(hookName string, plugins []config.PluginConfig, root, outDir string, hookCtx interface{}, env ...CommunityEnv) error {
+	e := resolveCommunityEnv(hookCtx, env)
 	for _, pc := range plugins {
 		if pc.Module == "" {
 			continue
 		}
-		if err := runCommunityHook(hookName, pc, root, outDir, hookCtx); err != nil {
+		if err := runCommunityHook(hookName, pc, root, outDir, e, hookCtx); err != nil {
 			return fmt.Errorf("community plugin %q: %w", pc.Name, err)
 		}
 	}
 	return nil
+}
+
+// CommunityEnv is build-wide context shared across every community plugin hook
+// invocation. It feeds the richer `krate` object (JS) and Go hook contexts.
+type CommunityEnv struct {
+	PagesDir string
+	DevMode  bool
+	Config   *config.Config
+}
+
+// resolveCommunityEnv uses the caller-supplied env when present, otherwise
+// derives what it can from the hook context.
+func resolveCommunityEnv(hookCtx interface{}, env []CommunityEnv) CommunityEnv {
+	if len(env) > 0 {
+		return env[0]
+	}
+	var e CommunityEnv
+	switch c := hookCtx.(type) {
+	case *BuildHookCtx:
+		e.DevMode = c.DevMode
+		if cfg, ok := c.Config.(*config.Config); ok {
+			e.Config = cfg
+		}
+	case *BuildResultHookCtx:
+		if cfg, ok := c.Config.(*config.Config); ok {
+			e.Config = cfg
+		}
+	}
+	return e
 }

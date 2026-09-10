@@ -60,11 +60,19 @@ export default function myPlugin(options: MyPluginOptions = {}) {
 
 - **Hook signature** — every hook receives `(ctx, options, krate)` where `ctx`
   is the JSON-serialized hook context (lowercase fields like `ctx.html`,
-  `ctx.page`, `ctx.outName`, `ctx.headHTML`, `ctx.rawCSS`) and `krate` is
-  `{ root, outDir, version }`. The `@krate/plugin` types name these
+  `ctx.page`, `ctx.outName`, `ctx.headHTML`, `ctx.rawCSS`) and `krate` is the
+  richer build context: `{ root, projectRoot, outDir, pagesDir, config, dev,
+  devMode, pages, version }`. The `@krate/plugin` types name these
   `BuildContext`, `ParseContext`, `MarkdownContext`, `RenderContext`,
   `PageContext`, `BuildResultContext`, `ServeRequestContext`, and
   `ServeResponseContext`.
+- **`krate` capabilities** — instead of raw `fs` guesswork or a hand-rolled
+  `node_modules` walk, use the host-backed methods: `krate.resolveFile(spec)`
+  and `krate.readFile(spec)` (root-anchored; bare specifiers resolve through
+  `node_modules`), `krate.emitFile(path, content)` (write into the output
+  directory), `krate.writeFileToRoot(rel, content)` (static assets under the
+  project root), and `krate.injectHead(html)` / `krate.injectCSS(css)`. Every
+  path is anchored to the project root and traversal outside it is rejected.
 - **Return value** — hooks return `{ files, routes, generatedPages, html,
   headHTML, rawCSS, scripts, metaTags, ast }` (all optional; may be a Promise;
   `PluginOutput` in `@krate/plugin`). `files` are written into the output

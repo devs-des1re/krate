@@ -34,11 +34,11 @@ type fileEntry struct {
 // The plugin is dispatched by runtime: descriptors returning runtime "go" are
 // launched as Go subprocesses, everything else runs as JavaScript inside the
 // embedded QuickJS runtime — no subprocess and no stdin/stdout protocol.
-func runCommunityHook(hookName string, pc config.PluginConfig, root, outDir string, hookCtx interface{}) error {
+func runCommunityHook(hookName string, pc config.PluginConfig, root, outDir string, env CommunityEnv, hookCtx interface{}) error {
 	if isGoPlugin(pc) {
-		return runGoPluginHook(hookName, pc, root, outDir, hookCtx)
+		return runGoPluginHook(hookName, pc, root, outDir, env, hookCtx)
 	}
-	return runJSPluginHook(hookName, pc, root, outDir, hookCtx)
+	return runJSPluginHook(hookName, pc, root, outDir, env, hookCtx)
 }
 
 // applyPluginOutput writes plugin-produced files/routes and applies HTML/head/CSS
