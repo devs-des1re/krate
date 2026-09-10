@@ -135,6 +135,15 @@ func GenerateNewHydrationJS(result *EmitResult) string {
 			b.WriteString(";\n")
 		}
 
+		// Function-prop aliases (`var onNavigate = props.onNavigate`): live reads
+		// of the registry object declared just above. These must precede the
+		// effects/handlers that invoke the aliased function.
+		for _, alias := range sig.FuncPropAliases {
+			b.WriteString("var ")
+			b.WriteString(alias)
+			b.WriteString(";\n")
+		}
+
 		// Refs: assign the live DOM node to the referenced variable, or invoke a
 		// callback ref with it. Runs after the extra vars are declared and before
 		// effects/memos that read them, so an onMount/handler can safely use the

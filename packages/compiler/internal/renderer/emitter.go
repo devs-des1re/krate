@@ -289,10 +289,6 @@ func (e *Emitter) emitSSREvaluated(node *irtree.ComponentNode) SlotOutput {
 	if node.Fn == nil {
 		return SlotOutput{}
 	}
-	ret := findReturnStmtIn(node.Fn.Body)
-	if ret == nil || ret.Value == nil {
-		return SlotOutput{}
-	}
 	eval := NewSSREval(e.functions)
 	if e.EvalJS != nil {
 		eval.SetEvalJS(e.EvalJS)
@@ -387,7 +383,18 @@ func (e *Emitter) emitSSREvaluated(node *irtree.ComponentNode) SlotOutput {
 		defer func() { eval.interactiveEmit = nil }()
 	}
 
-	html := eval.Eval(ret.Value)
+	// Resolve the component's return value. Early if/else-if returns (each
+	// branch ending in `return <jsx/>`, with or without a wrapping block) are
+	// resolved first so prop-driven components whose return depends on a
+	// member value (e.g. <a> vs <div>) render the right branch. Otherwise the
+	// trailing top-level return is evaluated.
+	var retHTML string
+	if v, ok := eval.evalBranchReturns(node.Fn.Body); ok {
+		retHTML = v
+	} else if ret := findReturnStmtIn(node.Fn.Body); ret != nil && ret.Value != nil {
+		retHTML = eval.Eval(ret.Value)
+	}
+	html := retHTML
 	e.errs = append(e.errs, eval.Errors()...)
 	out.HeadHTML += eval.HeadHTML
 	out.ScriptHTML += eval.ScriptHTML
@@ -465,19 +472,20 @@ func (e *Emitter) emitClient(node *irtree.ComponentNode) SlotOutput {
 		}
 	}
 	sig := irtree.ComponentSignature{
-		ComponentID:   node.ID,
-		Tier:          node.Tier,
-		Signals:       node.Signals,
-		Handlers:      node.Handlers,
-		RefBindings:   node.RefBindings,
-		Effects:       node.Effects,
-		Memos:         node.Memos,
-		ExtraVars:     node.ExtraVars,
-		PreSignalVars: node.PreSignalVars,
-		BodyUses:      node.BodyUses,
-		Children:      childIDs,
-		SlotBindings:  slotBindings,
-		AttrBindings:  node.AttrBindings,
+		ComponentID:     node.ID,
+		Tier:            node.Tier,
+		Signals:         node.Signals,
+		Handlers:        node.Handlers,
+		RefBindings:     node.RefBindings,
+		Effects:         node.Effects,
+		Memos:           node.Memos,
+		ExtraVars:       node.ExtraVars,
+		PreSignalVars:   node.PreSignalVars,
+		FuncPropAliases: node.FuncPropAliases,
+		BodyUses:        node.BodyUses,
+		Children:        childIDs,
+		SlotBindings:    slotBindings,
+		AttrBindings:    node.AttrBindings,
 	}
 	out.Signatures = append([]irtree.ComponentSignature{sig}, out.Signatures...)
 

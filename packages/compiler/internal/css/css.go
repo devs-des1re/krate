@@ -266,64 +266,75 @@ func removeTrailingSemicolons(css string) string {
 	return trailingSemiRe.ReplaceAllString(css, "}")
 }
 
-// removeDuplicateDeclarations removes duplicate property declarations within a rule,
-// keeping only the last declaration for each property.
+// removeDuplicateDeclarations removes duplicate property declarations within a
+// rule, keeping only the last declaration for each property. At-rules such as
+// @media/@keyframes/@supports are only recurded: their leaf rules are deduped
+// independently so nested rules never bleed declarations into one another.
 func removeDuplicateDeclarations(css string) string {
-	var result strings.Builder
-	remaining := css
+	var out strings.Builder
+	scanRules(&out, css)
+	return out.String()
+}
 
-	for {
-		openIdx := strings.Index(remaining, "{")
-		if openIdx == -1 {
-			result.WriteString(remaining)
-			break
+// scanRules walks a CSS chunk, locating rules and their bodies. When a body
+// contains nested rules (an at-rule container) it recurses so only LEAF rules
+// are deduped; rule ordering, whitespace and at-rule structure are preserved.
+func scanRules(out *strings.Builder, css string) {
+	for i := 0; i < len(css); {
+		open := strings.IndexByte(css[i:], '{')
+		if open < 0 {
+			out.WriteString(css[i:])
+			return
 		}
-
-		depth := 1
-		closeIdx := openIdx + 1
-		for closeIdx < len(remaining) && depth > 0 {
-			if remaining[closeIdx] == '{' {
-				depth++
-			} else if remaining[closeIdx] == '}' {
-				depth--
-			}
-			closeIdx++
+		open += i
+		out.WriteString(css[i:open])
+		closeBrace, deep := matchBrace(css, open)
+		if closeBrace < 0 {
+			out.WriteString(css[open:])
+			return
 		}
-		closeIdx--
-
-		selector := remaining[:openIdx]
-		body := remaining[openIdx+1 : closeIdx]
-		rest := remaining[closeIdx+1:]
-
-		deduped := deduplicateBody(body)
-		result.WriteString(selector)
-		result.WriteByte('{')
-		result.WriteString(deduped)
-		result.WriteByte('}')
-		remaining = rest
+		out.WriteByte('{')
+		body := css[open+1 : closeBrace]
+		if deep {
+			scanRules(out, body)
+		} else {
+			out.WriteString(deduplicateBody(body))
+		}
+		out.WriteByte('}')
+		i = closeBrace + 1
 	}
+}
 
-	return result.String()
+// matchBrace finds the brace that closes css[open]. The second return reports
+// whether the body contains a nested rule (i.e. at least one deeper '{').
+func matchBrace(css string, open int) (closeBrace int, deep bool) {
+	depth := 1
+	for j := open + 1; j < len(css); j++ {
+		switch css[j] {
+		case '{':
+			depth++
+			if depth == 2 {
+				deep = true
+			}
+		case '}':
+			depth--
+			if depth == 0 {
+				return j, deep
+			}
+		}
+	}
+	return -1, deep
 }
 
 func deduplicateBody(body string) string {
 	props := make(map[string]string)
 	var order []string
-	decls := strings.Split(body, ";")
-
-	for _, decl := range decls {
-		decl = strings.TrimSpace(decl)
-		if decl == "" {
+	for _, raw := range splitDecls(body) {
+		prop, val, hasColon := parseDecl(raw)
+		if !hasColon {
 			continue
 		}
-		colonIdx := strings.Index(decl, ":")
-		if colonIdx == -1 {
-			continue
-		}
-		prop := strings.TrimSpace(decl[:colonIdx])
-		val := strings.TrimSpace(decl[colonIdx+1:])
 		lowerProp := strings.ToLower(prop)
-
 		if _, exists := props[lowerProp]; !exists {
 			order = append(order, lowerProp)
 		}
@@ -340,6 +351,75 @@ func deduplicateBody(body string) string {
 		b.WriteString(props[prop])
 	}
 	return b.String()
+}
+
+// splitDecls splits a rule body into declaration strings at top-level ';'
+// boundaries, ignoring ';' inside quoted strings and inside balanced parens
+// (e.g. url("data:image/svg+xml;utf8,...") or var(--x, ...)).
+func splitDecls(body string) []string {
+	var decls []string
+	start := 0
+	paren := 0
+	var quote byte // 0 = none, '\'' or '"'
+	for i := 0; i < len(body); i++ {
+		c := body[i]
+		if quote != 0 {
+			if c == quote && (i == 0 || body[i-1] != '\\') {
+				quote = 0
+			}
+			continue
+		}
+		switch c {
+		case '\'', '"':
+			quote = c
+		case '(':
+			paren++
+		case ')':
+			if paren > 0 {
+				paren--
+			}
+		case ';':
+			if paren == 0 {
+				decls = append(decls, body[start:i])
+				start = i + 1
+			}
+		}
+	}
+	if start < len(body) {
+		decls = append(decls, body[start:])
+	}
+	return decls
+}
+
+// parseDecl splits one declaration at its first top-level ':' (outside quotes
+// and parens), returning the property name, value, and whether a colon existed.
+func parseDecl(s string) (prop, val string, hasColon bool) {
+	paren := 0
+	var quote byte
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if quote != 0 {
+			if c == quote && (i == 0 || s[i-1] != '\\') {
+				quote = 0
+			}
+			continue
+		}
+		switch c {
+		case '\'', '"':
+			quote = c
+		case '(':
+			paren++
+		case ')':
+			if paren > 0 {
+				paren--
+			}
+		case ':':
+			if paren == 0 {
+				return strings.TrimSpace(s[:i]), strings.TrimSpace(s[i+1:]), true
+			}
+		}
+	}
+	return strings.TrimSpace(s), "", false
 }
 
 var hexColorRe = regexp.MustCompile(`#[0-9a-fA-F]{6,8}\b`)

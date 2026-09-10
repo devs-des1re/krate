@@ -130,6 +130,17 @@ func TestRemoveDuplicateDeclarations(t *testing.T) {
 			"a { COLOR: red; color: blue; }", // case-insensitive
 			"a {color:blue}",
 		},
+		{
+			// Media-query rules must never bleed declarations across sibling rules.
+			"@media (max-width: 1279px) { .sidebar { transform: translateX(-100%); top: 0; } .sidebar.open { transform: translateX(0); } .toc { display: block; top: 48px; } }",
+			"@media (max-width: 1279px) { .sidebar {transform:translateX(-100%);top:0} .sidebar.open {transform:translateX(0)} .toc {display:block;top:48px} }",
+		},
+		{
+			// Strings containing semicolons (data URIs, content) must not break
+			// the declaration splitter.
+			`.x { content: ";"; background: url("data:image/svg+xml;utf8,<svg></svg>"); color: red; color: blue; }`,
+			`.x {content:";";background:url("data:image/svg+xml;utf8,<svg></svg>");color:blue}`,
+		},
 	}
 	for _, tt := range tests {
 		got := removeDuplicateDeclarations(tt.input)

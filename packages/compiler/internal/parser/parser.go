@@ -934,14 +934,18 @@ func (p *Parser) parseObjectPatternInto(sb *strings.Builder, names *[]string, re
 			}
 		} else if isIdentifierToken(p.peek().Kind) || p.peek().Kind == lexer.String || p.peek().Kind == lexer.Number {
 			key := p.next()
-			sb.WriteString(key.Value)
+			kv := key.Value
+			if key.Kind == lexer.String && len(kv) >= 2 {
+				kv = kv[1 : len(kv)-1]
+			}
+			sb.WriteString(kv)
 			if p.match(lexer.COLON) {
 				sb.WriteString(":")
 				if !p.parsePatternElement(sb, names, rest) {
 					p.next()
 				}
 			} else {
-				*names = append(*names, key.Value)
+				*names = append(*names, kv)
 			}
 		} else {
 			p.next()
@@ -995,12 +999,12 @@ func (p *Parser) parseParamList() []*ast.Param {
 			continue
 		}
 
-		if p.match(lexer.LBRACE) {
+		if p.peek().Kind == lexer.LBRACE {
+			var sb strings.Builder
+			var names []string
+			p.parseObjectPatternInto(&sb, &names, nil)
 			param.Name = "{...}"
-			for p.peek().Kind != lexer.RBRACE && p.peek().Kind != lexer.EOF {
-				p.next()
-			}
-			p.expect(lexer.RBRACE)
+			param.Pattern = sb.String()
 		} else if isIdentifierToken(p.peek().Kind) {
 			param.Name = p.next().Value
 		} else if p.match(lexer.SPREAD) {
@@ -1259,10 +1263,13 @@ func (p *Parser) parsePrefix() ast.Expr {
 					props = append(props, &ast.ObjectProp{Key: name, Value: &ast.Identifier{Name: name}, Shorthand: true})
 				}
 			} else if p.peek().Kind == lexer.String {
-				name := p.next().Value
+				key := p.next().Value
+				if len(key) >= 2 {
+					key = key[1 : len(key)-1]
+				}
 				if p.peek().Kind == lexer.COLON {
 					p.next()
-					props = append(props, &ast.ObjectProp{Key: name, Value: p.parseExpr(precLowest)})
+					props = append(props, &ast.ObjectProp{Key: key, Value: p.parseExpr(precLowest)})
 				}
 			} else if p.peek().Kind == lexer.Number {
 				name := p.next().Value

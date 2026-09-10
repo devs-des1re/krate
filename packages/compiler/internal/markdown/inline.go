@@ -63,11 +63,34 @@ func renderInline(text string, cfg Config) string {
 		text = strikeRe.ReplaceAllString(text, "<del>$1</del>")
 	}
 
-	// Autolinks (GFM)
+	// Autolinks (GFM) — skip URLs already inside HTML attributes (e.g.
+	// href="...") to avoid double-wrapping in <a> tags.
 	if cfg.GFM {
-		text = autoLinkRe.ReplaceAllStringFunc(text, func(match string) string {
-			return `<a href="` + match + `">` + match + `</a>`
-		})
+		var buf strings.Builder
+		rest := text
+		for {
+			loc := autoLinkRe.FindStringIndex(rest)
+			if loc == nil {
+				buf.WriteString(rest)
+				break
+			}
+			// If the character before the match is a quote, this URL lives
+			// inside an HTML attribute — leave it alone.
+			if loc[0] > 0 && (rest[loc[0]-1] == '"' || rest[loc[0]-1] == '\'') {
+				buf.WriteString(rest[:loc[1]])
+				rest = rest[loc[1]:]
+				continue
+			}
+			buf.WriteString(rest[:loc[0]])
+			u := rest[loc[0]:loc[1]]
+			buf.WriteString(`<a href="`)
+			buf.WriteString(u)
+			buf.WriteString(`">`)
+			buf.WriteString(u)
+			buf.WriteString(`</a>`)
+			rest = rest[loc[1]:]
+		}
+		text = buf.String()
 	}
 
 	return text

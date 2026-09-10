@@ -246,6 +246,10 @@ type Param struct {
 	Name     string
 	Default  Expr // Store the expression here
 	IsRest   bool // Added this
+	// Pattern holds the source text of a destructuring parameter pattern
+	// (e.g. `{items, label}` or `[a, b]`). When set, Name is the "{...}" sentinel
+	// and codegen emits this pattern so the destructured locals are bound.
+	Pattern string
 }
 
 func (p *Param) node()    {}

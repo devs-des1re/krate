@@ -119,6 +119,33 @@ func TestBuildListWithoutKeyFallsBackToIndex(t *testing.T) {
 	}
 }
 
+func TestBuildListSlotSubstitutesIndexParam(t *testing.T) {
+	tree := annotateAndBuild(t, `export default function App() {
+	return <ul>{["apple","banana"].map((item, i) => <li>{item} ({i})</li>)}</ul>;
+}`)
+	var list *irtree.ListSlot
+	for _, child := range tree.Root.Children {
+		if ls, ok := child.(*irtree.ListSlot); ok {
+			list = ls
+			break
+		}
+	}
+	if list == nil {
+		t.Fatal("expected ListSlot for .map() call")
+	}
+	if len(list.Items) != 2 {
+		t.Fatalf("expected 2 resolved items, got %d", len(list.Items))
+	}
+	got0 := renderSlotHTML(list.Items[0])
+	if got0 != "<li>apple (0)</li>" {
+		t.Errorf("item 0: expected '<li>apple (0)</li>', got %q", got0)
+	}
+	got1 := renderSlotHTML(list.Items[1])
+	if got1 != "<li>banana (1)</li>" {
+		t.Errorf("item 1: expected '<li>banana (1)</li>', got %q", got1)
+	}
+}
+
 // ─── Nested components ───────────────────────────────────────────────────────
 
 func TestBuildNestedComponentSlot(t *testing.T) {
@@ -632,4 +659,34 @@ export default function App() {
 	if !foundRuntime {
 		t.Errorf("expected a nested runtime ComponentSlot in the resolved content, got %#v", susp.Resolved)
 	}
+}
+
+// renderSlotHTML flattens slot nodes into their static HTML for assertions.
+func renderSlotHTML(item *irtree.ListItem) string {
+	var b strings.Builder
+	var walk func(nodes []irtree.SlotNode)
+	walk = func(nodes []irtree.SlotNode) {
+		for _, n := range nodes {
+			switch c := n.(type) {
+			case *irtree.StaticHTML:
+				b.WriteString(c.HTML)
+			case *irtree.TextSlot:
+				b.WriteString(c.Initial)
+			case *irtree.ExprSlot:
+				b.WriteString(c.Initial)
+			case *irtree.ComponentSlot:
+				if c.Component != nil {
+					walk(c.Component.ReturnSlots)
+				}
+			case *irtree.ListSlot:
+				for _, li := range c.Items {
+					walk(li.Contents)
+				}
+			case *irtree.ConditionalSlot:
+				walk(c.Consequent)
+			}
+		}
+	}
+	walk(item.Contents)
+	return b.String()
 }

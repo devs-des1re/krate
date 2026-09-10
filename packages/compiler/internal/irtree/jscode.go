@@ -143,7 +143,11 @@ func renderArrowFn(fn *ast.ArrowFn, signals map[string]ast.Expr) string {
 		if i > 0 {
 			b.WriteString(", ")
 		}
-		b.WriteString(p.Name)
+		if p.Pattern != "" {
+			b.WriteString(p.Pattern)
+		} else {
+			b.WriteString(p.Name)
+		}
 	}
 	b.WriteString(")=>")
 	if fn.Expression {
@@ -243,7 +247,11 @@ func renderStmtJS(stmt ast.Stmt, signals map[string]ast.Expr) string {
 			if i > 0 {
 				b.WriteString(", ")
 			}
-			b.WriteString(p.Name)
+			if p.Pattern != "" {
+				b.WriteString(p.Pattern)
+			} else {
+				b.WriteString(p.Name)
+			}
 		}
 		b.WriteString("){")
 		for _, stmt := range s.Body {

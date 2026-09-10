@@ -69,6 +69,9 @@ func arrowBodyExpr(arrow *ast.ArrowFn) ast.Expr {
 
 // extractJSONProp extracts a property value from a JSON-like object string.
 // e.g., extractJSONProp(`{"count":42,"items":[1,2,3]}`, "count") → "42"
+// Single-quoted values (produced by the const serializer that re-quotes JS
+// source as '...' for embedding in generated code) are handled too, so prop
+// objects serialized either way resolve their members during SSR.
 func extractJSONProp(objStr, prop string) string {
 	if objStr == "" || objStr[0] != '{' {
 		return ""
@@ -98,21 +101,21 @@ func extractJSONProp(objStr, prop string) string {
 	}
 	// Find end of value
 	depth := 0
-	inStr := false
+	quote := byte(0)
 	for j := i; j < len(objStr); j++ {
 		ch := objStr[j]
-		if inStr {
+		if quote != 0 {
 			if ch == '\\' {
 				j++
 				continue
 			}
-			if ch == '"' {
-				inStr = false
+			if ch == quote {
+				quote = 0
 			}
 			continue
 		}
-		if ch == '"' {
-			inStr = true
+		if ch == '"' || ch == '\'' {
+			quote = ch
 			continue
 		}
 		if ch == '{' || ch == '[' {
@@ -134,37 +137,46 @@ func extractJSONProp(objStr, prop string) string {
 // surrounding quotes removed (and escapes resolved) so they render as plain
 // text in SSR output (e.g. params.id → abc-123 rather than "abc-123").
 func unquoteJSONPropValue(v string) string {
-	if len(v) >= 2 && v[0] == '"' && v[len(v)-1] == '"' {
-		var sb strings.Builder
-		for i := 1; i < len(v)-1; i++ {
-			c := v[i]
-			if c == '\\' && i+1 < len(v)-1 {
-				i++
-				next := v[i]
-				switch next {
-				case 'n':
-					sb.WriteByte('\n')
-				case 't':
-					sb.WriteByte('\t')
-				case 'r':
-					sb.WriteByte('\r')
-				case '\\', '"', '/':
-					sb.WriteByte(next)
-				case 'u':
-					// Skip \uXXXX sequences (rare in params); leave as-is marker.
-					sb.WriteString("\\u")
-					if i+4 < len(v) {
-						sb.WriteString(v[i+1 : i+5])
-						i += 4
-					}
-				default:
-					sb.WriteByte(next)
-				}
-				continue
-			}
-			sb.WriteByte(c)
+	if len(v) >= 2 {
+		var q byte
+		switch v[0] {
+		case '"':
+			q = '"'
+		case '\'':
+			q = '\''
 		}
-		return sb.String()
+		if q != 0 && v[len(v)-1] == q {
+			var sb strings.Builder
+			for i := 1; i < len(v)-1; i++ {
+				c := v[i]
+				if c == '\\' && i+1 < len(v)-1 {
+					i++
+					next := v[i]
+					switch next {
+					case 'n':
+						sb.WriteByte('\n')
+					case 't':
+						sb.WriteByte('\t')
+					case 'r':
+						sb.WriteByte('\r')
+					case '\\', '"', '\'', '/':
+						sb.WriteByte(next)
+					case 'u':
+						// Skip \uXXXX sequences (rare in params); leave as-is marker.
+						sb.WriteString("\\u")
+						if i+4 < len(v) {
+							sb.WriteString(v[i+1 : i+5])
+							i += 4
+						}
+					default:
+						sb.WriteByte(next)
+					}
+					continue
+				}
+				sb.WriteByte(c)
+			}
+			return sb.String()
+		}
 	}
 	return v
 }

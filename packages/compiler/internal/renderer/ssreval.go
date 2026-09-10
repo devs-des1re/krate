@@ -1015,34 +1015,50 @@ func (e *SSREval) evalComponentFn(fn *ast.FnDecl, el *ast.JSXElement) string {
 // back to the else branch. This supports signal-less components whose function
 // body has no top-level return statement (e.g. an SVG helper that returns from
 // each if/else branch). Returns ok=false when no branch resolves to a return.
+// Block-bodied ifs (if (c) { return <x/>; }) are unwrapped so the return inside
+// the braces is found.
 func (e *SSREval) evalBranchReturns(stmts []ast.Stmt) (string, bool) {
 	for _, stmt := range stmts {
-		if ifStmt, ok := stmt.(*ast.IfStmt); ok {
-			condVal := e.eval(ifStmt.Test)
-			truthy := condVal != "" && condVal != "false" && condVal != "null" && condVal != "undefined" && condVal != "0"
-			if truthy {
-				if v, ok := e.returnFromConsequent(ifStmt.Consequent); ok {
-					return v, true
-				}
-				if v, ok := e.evalBranchReturns(ifStmt.Consequent); ok {
-					return v, true
-				}
-			} else if v, ok := e.evalBranchReturns(ifStmt.Alternate); ok {
+		switch s := stmt.(type) {
+		case *ast.BlockStmt:
+			if v, ok := e.evalBranchReturns(s.Body); ok {
 				return v, true
 			}
-		} else if retStmt, ok := stmt.(*ast.ReturnStmt); ok && retStmt.Value != nil {
-			return e.eval(retStmt.Value), true
+		case *ast.IfStmt:
+			condVal := e.eval(s.Test)
+			truthy := condVal != "" && condVal != "false" && condVal != "null" && condVal != "undefined" && condVal != "0"
+			if truthy {
+				if v, ok := e.returnFromConsequent(s.Consequent); ok {
+					return v, true
+				}
+				if v, ok := e.evalBranchReturns(s.Consequent); ok {
+					return v, true
+				}
+			} else if v, ok := e.evalBranchReturns(s.Alternate); ok {
+				return v, true
+			}
+		case *ast.ReturnStmt:
+			if s.Value != nil {
+				return e.eval(s.Value), true
+			}
 		}
 	}
 	return "", false
 }
 
 // returnFromConsequent extracts the direct return value from an if-consequent
-// statement list, if it ends in a return.
+// statement list (unwrapping a wrapping block), if it ends in a return.
 func (e *SSREval) returnFromConsequent(consequent []ast.Stmt) (string, bool) {
 	for _, stmt := range consequent {
-		if retStmt, ok := stmt.(*ast.ReturnStmt); ok && retStmt.Value != nil {
-			return e.eval(retStmt.Value), true
+		switch s := stmt.(type) {
+		case *ast.BlockStmt:
+			if v, ok := e.returnFromConsequent(s.Body); ok {
+				return v, true
+			}
+		case *ast.ReturnStmt:
+			if s.Value != nil {
+				return e.eval(s.Value), true
+			}
 		}
 	}
 	return "", false

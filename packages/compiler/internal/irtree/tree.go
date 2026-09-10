@@ -283,6 +283,18 @@ type ComponentNode struct {
 	Effects      []string
 	Memos        []string
 	ExtraVars    []string
+	// FuncProps records the call-site props whose values are function
+	// references (a local function or arrow in the parent scope) rather than
+	// const-foldable values. Such props cannot be serialized to a literal: the
+	// child must read them from the __krate_props registry at runtime, and any
+	// `var X = props.<funcProp>` local must be emitted as a live read of
+	// props.<funcProp> instead of being const-folded to the function's name.
+	FuncProps map[string]bool
+	// FuncPropAliases holds `var <local>=props.<funcProp>` declarations for
+	// locals that alias a function prop. They must be emitted after the
+	// `var props=__krate_props[...]` binding but before any effects/handlers
+	// that invoke the aliased function.
+	FuncPropAliases []string
 	// PreSignalVars holds local variable declarations that must be emitted
 	// BEFORE signal initializers. Signal RawInits like createSignal(initial.x)
 	// evaluate local values at hydration time, so any local var they reference
@@ -362,6 +374,7 @@ type ComponentSignature struct {
 	Memos         []string
 	ExtraVars     []string
 	PreSignalVars []string
+	FuncPropAliases []string
 	BodyUses      []string
 	Children      []SlotID
 	SlotBindings  []SlotBinding
