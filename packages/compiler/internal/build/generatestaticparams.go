@@ -57,6 +57,40 @@ func injectStaticParams(tree *irtree.ComponentTree, params map[string]string) {
 	}
 }
 
+// dynamicParamSentinelPrefix marks the build-time placeholder emitted for a
+// dynamic-route parameter in a statically built template. The dev/preview
+// server replaces each sentinel with the matched URL segment at request time
+// (see serve.go handleDynamicRoute), so text, <title>, and attribute positions
+// all carry a real value — not just signal-bound text nodes.
+const dynamicParamSentinelPrefix = "__KRATE_PARAM_"
+
+// dynamicParamSentinel returns the unique token emitted for the named route
+// parameter. The trailing "__" keeps names unambiguous (id vs idx).
+func dynamicParamSentinel(name string) string {
+	return dynamicParamSentinelPrefix + name + "__"
+}
+
+// dynamicParamRootProps builds the entry-component prop seed for a dynamic
+// route template: each [param] is bound to a unique sentinel (both as the
+// `params` object and as a bare key) so the build-time fold emits a replaceable
+// marker in every position the param is read. The dev/preview server swaps each
+// sentinel for the matched URL segment at request time (see serve.go).
+func dynamicParamRootProps(paramNames []string) map[string]string {
+	if len(paramNames) == 0 {
+		return nil
+	}
+	props := make(map[string]string, len(paramNames)+1)
+	obj := make(map[string]string, len(paramNames))
+	for _, name := range paramNames {
+		sentinel := dynamicParamSentinel(name)
+		props[name] = sentinel
+		obj[name] = sentinel
+	}
+	objJSON, _ := json.Marshal(obj)
+	props["params"] = string(objJSON)
+	return props
+}
+
 // extractParamNames extracts parameter names from a dynamic route filename.
 // e.g. "video/[id].tsx" → ["id"], "user/[username]/posts/[postId].tsx" → ["username", "postId"]
 func extractParamNames(pagePath, pagesDir string) []string {

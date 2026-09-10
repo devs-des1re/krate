@@ -140,6 +140,44 @@ func TestBuildTestProject(t *testing.T) {
 		}
 	}
 
+	// Dynamic-route regression: the reusable [id] template must be built with a
+	// replaceable sentinel (not a leaked variable name or a folded literal), so
+	// the server can substitute the matched URL segment anywhere the param is
+	// read — body text, <title>, and meta attributes.
+	templatePath := filepath.Join(outDir, "video", "[id]", "index.html")
+	if data, err := os.ReadFile(templatePath); err == nil {
+		content := string(data)
+		if !strings.Contains(content, "__KRATE_PARAM_id__") {
+			t.Errorf("dynamic route template missing param sentinel (dynamic params not bound in props fold)")
+		}
+		if strings.Contains(content, ">videoId<") || strings.Contains(content, "Video ID: <strong>videoId") {
+			t.Errorf("dynamic route template leaked the local variable name instead of a sentinel")
+		}
+	} else {
+		t.Errorf("reading dynamic route template: %v", err)
+	}
+
+	// generateStaticParams pages are built separately with concrete values and
+	// must not contain a sentinel.
+	for _, id := range []string{"abc123", "demo-42"} {
+		p := filepath.Join(outDir, "video", id, "index.html")
+		data, err := os.ReadFile(p)
+		if err != nil {
+			t.Errorf("reading static param page %s: %v", id, err)
+			continue
+		}
+		content := string(data)
+		if !strings.Contains(content, id) {
+			t.Errorf("static param page %s missing its concrete id value", id)
+		}
+		if strings.Contains(content, "__KRATE_PARAM_") {
+			t.Errorf("static param page %s unexpectedly contains a dynamic sentinel", id)
+		}
+		if strings.Contains(content, ">unknown<") || strings.Contains(content, "videoId") {
+			t.Errorf("static param page %s rendered a placeholder instead of its param", id)
+		}
+	}
+
 	// Verify JS hydration files exist (hashed names)
 	entries, err := os.ReadDir(outDir)
 	if err != nil {

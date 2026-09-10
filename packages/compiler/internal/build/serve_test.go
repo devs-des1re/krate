@@ -3,6 +3,7 @@ package build
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -302,5 +303,42 @@ func TestFindDynamicRoutesEmpty(t *testing.T) {
 	routes := findDynamicRoutes(dir)
 	if len(routes) != 0 {
 		t.Errorf("expected 0 dynamic routes, got %d", len(routes))
+	}
+}
+
+func TestApplyDynamicRouteParams(t *testing.T) {
+	tmpl := "<html><head><title>Video: " + dynamicParamSentinel("id") + "</title>" +
+		"<meta name=description content=\"Watch " + dynamicParamSentinel("id") + "\"></head>" +
+		"<body><p>Video ID: <strong>" + dynamicParamSentinel("id") + "</strong></p></body></html>"
+
+	got := applyDynamicRouteParams(tmpl, map[string]string{"id": "abc123"})
+
+	if strings.Contains(got, dynamicParamSentinel("id")) {
+		t.Errorf("sentinel not substituted: %s", got)
+	}
+	// Substituted in text, title, and attribute positions.
+	if !strings.Contains(got, "<title>Video: abc123</title>") {
+		t.Errorf("title not substituted: %s", got)
+	}
+	if !strings.Contains(got, "content=\"Watch abc123\"") {
+		t.Errorf("attribute not substituted: %s", got)
+	}
+	if !strings.Contains(got, "<strong>abc123</strong>") {
+		t.Errorf("body text not substituted: %s", got)
+	}
+	// Params script injected before </head>.
+	if !strings.Contains(got, `__KRATE_PARAMS__={"id":"abc123"}</script></head>`) {
+		t.Errorf("params script not injected: %s", got)
+	}
+}
+
+func TestApplyDynamicRouteParamsEscapes(t *testing.T) {
+	tmpl := "<p>" + dynamicParamSentinel("id") + "</p>"
+	got := applyDynamicRouteParams(tmpl, map[string]string{"id": `<script>&"`})
+	if strings.Contains(got, "<script>&\"") {
+		t.Errorf("param value not HTML-escaped: %s", got)
+	}
+	if !strings.Contains(got, "&lt;script&gt;&amp;") {
+		t.Errorf("expected escaped param value in output: %s", got)
 	}
 }

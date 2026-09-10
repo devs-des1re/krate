@@ -29,7 +29,11 @@ func isResourceSentinel(expr ast.Expr) bool {
 }
 
 // Build constructs a ComponentTree from a parsed program and its annotations.
-func Build(prog *ast.Program, ann *Annotations) *ComponentTree {
+// Build constructs the component tree for a page. The optional rootProps seed
+// the entry component's prop scope so references like props.params?.id fold at
+// build time (used to emit replaceable placeholders for dynamic-route
+// templates, and concrete values for generateStaticParams pages).
+func Build(prog *ast.Program, ann *Annotations, rootProps ...map[string]string) *ComponentTree {
 	entryFn := ann.Functions[ann.EntryPoint]
 	if entryFn == nil {
 		return &ComponentTree{
@@ -47,6 +51,9 @@ func Build(prog *ast.Program, ann *Annotations) *ComponentTree {
 		slotIDMap:      make(map[string]SlotID),
 		slotCounts:     make(map[string]int),
 		moduleConsts:   collectModuleConsts(prog),
+	}
+	if len(rootProps) > 0 && rootProps[0] != nil {
+		builder.localProps = rootProps[0]
 	}
 
 	root := builder.buildComponentNode(entryFn, "")
@@ -266,6 +273,12 @@ func (b *builder) buildComponentNode(fn *ast.FnDecl, parentID string) *Component
 	// prop reads (props.X and bare param identifiers) resolve during the walk.
 	// buildComponentSlot populates b.localProps before invoking this method.
 	savedLocalProps := b.localProps
+	// The entry component is built with an empty parent ID and has no call
+	// site; any non-empty parent ID means we are a child with call-site props.
+	// Root locals are folded for build-time evaluation but must NOT force the
+	// root out of its static tier (collectExtraVarJS already excludes
+	// props-derived locals for exactly this reason).
+	isPageRoot := parentID == ""
 	savedLocalFuncProps := b.localFuncProps
 	if b.localFuncProps != nil {
 		node.FuncProps = b.localFuncProps
@@ -294,33 +307,43 @@ func (b *builder) buildComponentNode(fn *ast.FnDecl, parentID string) *Component
 	// value is a live function reference, not a literal): they're emitted as a
 	// runtime read of the __krate_props registry instead.
 	var funcPropAliases []string
-	if b.localProps != nil {
-		locals := collectLocalVars(fn.Body, b.sigMap(), b.localProps)
-		if b.localFuncProps != nil && tier == TierClient {
-			// Remove function-prop aliases from the fold set so they aren't
-			// serialized as the function's name string, and re-declare them as
-			// live reads below.
-			for name := range locals {
-				if prop := funcPropAliasOf(fn.Body, name, b.localFuncProps); prop != "" {
-					funcPropAliases = append(funcPropAliases, name+"=props."+prop)
-					delete(locals, name)
-				}
+	// A page root starts with a nil localProps map, but its local variables
+	// still need folding so slot initials resolve (e.g. a dynamic-route
+	// template's `const id = props.params?.id || "default"` renders the
+	// fallback placeholder the server replaces per request).
+	if b.localProps == nil {
+		b.localProps = make(map[string]string)
+	}
+	locals := collectLocalVars(fn.Body, b.sigMap(), b.localProps)
+	if b.localFuncProps != nil && tier == TierClient {
+		// Remove function-prop aliases from the fold set so they aren't
+		// serialized as the function's name string, and re-declare them as
+		// live reads below.
+		for name := range locals {
+			if prop := funcPropAliasOf(fn.Body, name, b.localFuncProps); prop != "" {
+				funcPropAliases = append(funcPropAliases, name+"=props."+prop)
+				delete(locals, name)
 			}
 		}
-		if len(locals) > 0 {
-			for k, v := range locals {
-				if _, exists := b.localProps[k]; !exists {
-					b.localProps[k] = v
-				}
+	}
+	if len(locals) > 0 {
+		for k, v := range locals {
+			if _, exists := b.localProps[k]; !exists {
+				b.localProps[k] = v
 			}
-			if tier == TierClient {
-				declared := declaredLocalNames(node, fn)
-				for _, name := range sortedKeys(locals) {
-					if declared[name] {
-						continue
-					}
-					node.ExtraVars = append(node.ExtraVars, "var "+name+"="+jsLiteralFor(locals[name]))
+		}
+		// Emit ExtraVars for children only. collectExtraVarJS already excludes
+		// props-derived locals for every component specifically so a purely
+		// presentational root can auto-promote to TierStatic; re-adding them
+		// here for the root would block that promotion and flip the page to
+		// client (losing build-time evaluability, e.g. generateStaticParams).
+		if tier == TierClient && !isPageRoot {
+			declared := declaredLocalNames(node, fn)
+			for _, name := range sortedKeys(locals) {
+				if declared[name] {
+					continue
 				}
+				node.ExtraVars = append(node.ExtraVars, "var "+name+"="+jsLiteralFor(locals[name]))
 			}
 		}
 	}
@@ -4786,6 +4809,16 @@ func evalConstWithSignals(expr ast.Expr, signals map[string]ast.Expr, props map[
 		if v, ok := resolveMemberChainValue(e, props); ok {
 			return v
 		}
+		// A nested chain rooted at `props` whose first segment is absent is a
+		// definite undefined at runtime (props.params?.id → undefined), so a
+		// `||`/`??` fallback still folds. Without this, `props.params?.id`
+		// leaked and a local like `const id = props.params?.id || "default"`
+		// was dropped, emitting the variable name as placeholder text.
+		if rooted, first := propsChainRooted(e); rooted {
+			if _, present := props[first]; !present {
+				return "undefined"
+			}
+		}
 		if id, ok := e.Object.(*ast.Identifier); ok && id.Name == "props" {
 			if prop, ok := e.Property.(*ast.Identifier); ok {
 				if v, ok := props[prop.Name]; ok {
@@ -4829,6 +4862,32 @@ func evalConstWithSignals(expr ast.Expr, signals map[string]ast.Expr, props map[
 	default:
 		return evalConst(expr)
 	}
+}
+
+// propsChainRooted reports whether expr is a member-access chain whose root
+// object is the component's `props` identifier, and if so returns the name of
+// the innermost property — the one accessed directly off `props`.
+// e.g. props.params?.id → (true, "params"). A bare `props` is not a chain.
+func propsChainRooted(expr ast.Expr) (rooted bool, first string) {
+	var names []string
+	cur := expr
+	for {
+		mem, ok := cur.(*ast.MemberExpr)
+		if !ok {
+			break
+		}
+		pid, ok := mem.Property.(*ast.Identifier)
+		if !ok {
+			return false, ""
+		}
+		names = append(names, pid.Name)
+		cur = mem.Object
+	}
+	id, ok := cur.(*ast.Identifier)
+	if !ok || id.Name != "props" || len(names) == 0 {
+		return false, ""
+	}
+	return true, names[len(names)-1]
 }
 
 // resolveMemberChainValue resolves a member-access chain rooted at `props`
@@ -4905,6 +4964,13 @@ func operandLeaks(expr ast.Expr, signals map[string]ast.Expr, props map[string]s
 	case *ast.MemberExpr:
 		if id, ok := e.Object.(*ast.Identifier); ok && id.Name == "props" {
 			if _, ok := e.Property.(*ast.Identifier); ok {
+				return false
+			}
+		}
+		// A nested props chain whose first segment is absent resolves to a
+		// definite undefined (props.params?.id), which is not a leak.
+		if rooted, first := propsChainRooted(e); rooted {
+			if _, present := props[first]; !present {
 				return false
 			}
 		}

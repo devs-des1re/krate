@@ -697,20 +697,7 @@ func serve(root string, cfg *config.Config, reload <-chan []string, startTime ti
 					if err != nil {
 						break
 					}
-					pageHTML := string(templateHTML)
-
-					// Inject params as a script tag before </head> for client-side access
-					paramsJSON, _ := json.Marshal(params)
-					injectScript := "<script>window.__KRATE_PARAMS__=" + string(paramsJSON) + "</script>"
-					pageHTML = strings.Replace(pageHTML, "</head>", injectScript+"</head>", 1)
-
-					// Replace signal-bound text nodes with actual param values.
-					// The build renders [param] pages with placeholder values (e.g. "unknown").
-					// We replace those with the actual matched param values so the page
-					// displays correctly even before hydration runs.
-					for _, paramValue := range params {
-						pageHTML = strings.ReplaceAll(pageHTML, ">unknown<", ">"+html.EscapeString(paramValue)+"<")
-					}
+					pageHTML := applyDynamicRouteParams(string(templateHTML), params)
 
 					w.Header().Set("Content-Type", "text/html; charset=utf-8")
 					w.WriteHeader(200)
@@ -1413,4 +1400,21 @@ func matchDynamicRoute(urlPath, pattern string) (map[string]string, bool) {
 		}
 	}
 	return params, true
+}
+
+// applyDynamicRouteParams renders a built dynamic-route template for one
+// request: it injects the matched params for client-side access and replaces
+// every build-time sentinel (see dynamicParamSentinel) with the matched URL
+// segment. Because the template is built with sentinels wherever the param is
+// read — body text, <title>, and meta attributes — a single replacement pass
+// covers the whole page. Values are HTML-escaped, which is correct in both
+// text and double-quoted attribute contexts.
+func applyDynamicRouteParams(templateHTML string, params map[string]string) string {
+	paramsJSON, _ := json.Marshal(params)
+	injectScript := "<script>window.__KRATE_PARAMS__=" + string(paramsJSON) + "</script>"
+	out := strings.Replace(templateHTML, "</head>", injectScript+"</head>", 1)
+	for name, paramValue := range params {
+		out = strings.ReplaceAll(out, dynamicParamSentinel(name), html.EscapeString(paramValue))
+	}
+	return out
 }

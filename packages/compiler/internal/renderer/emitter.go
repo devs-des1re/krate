@@ -784,28 +784,40 @@ func EmitMeta(tree *irtree.ComponentTree, result *EmitResult) {
 }
 
 // walkMetaSlots recursively walks ComponentNode children looking for MetaSlots.
+//
+// SSREval'd components already capture their own <Head>/<Script>/<Style> content
+// while evaluating the component's return JSX (into EmitResult via the emitter's
+// headHTML/scriptHTML/styleHTML accumulators). Walking their MetaSlots here too
+// would append that content a second time — and, when the node was SSREval'd with
+// injected prop bindings (generateStaticParams params, dynamic-route sentinels),
+// with stale pre-binding values. So SSREval nodes are skipped; the slot-pipeline
+// path (client/non-evaluated components) is still walked.
 func walkMetaSlots(node *irtree.ComponentNode, result *EmitResult) {
 	if node == nil {
 		return
 	}
-	for _, child := range node.Children {
-		if meta, ok := child.(*irtree.MetaSlot); ok {
-			var childHTML strings.Builder
-			tmp := NewEmitter()
-			for _, c := range meta.Children {
-				out := tmp.emitSlotNode(c)
-				childHTML.WriteString(out.HTML)
-			}
-			switch strings.ToLower(meta.ComponentName) {
-			case "head":
-				result.HeadHTML += childHTML.String()
-			case "script":
-				result.ScriptHTML += childHTML.String()
-			case "style":
-				result.StyleHTML += childHTML.String()
+	if !node.IsSSREval {
+		for _, child := range node.Children {
+			if meta, ok := child.(*irtree.MetaSlot); ok {
+				var childHTML strings.Builder
+				tmp := NewEmitter()
+				for _, c := range meta.Children {
+					out := tmp.emitSlotNode(c)
+					childHTML.WriteString(out.HTML)
+				}
+				switch strings.ToLower(meta.ComponentName) {
+				case "head":
+					result.HeadHTML += childHTML.String()
+				case "script":
+					result.ScriptHTML += childHTML.String()
+				case "style":
+					result.StyleHTML += childHTML.String()
+				}
 			}
 		}
-		if comp, ok := child.(*irtree.ComponentSlot); ok {
+	}
+	for _, child := range node.Children {
+		if comp, ok := child.(*irtree.ComponentSlot); ok && comp.Component != nil && !comp.Component.IsSSREval {
 			walkMetaSlots(comp.Component, result)
 		}
 	}
