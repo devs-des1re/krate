@@ -2,10 +2,13 @@ package plugin
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kratejs/krate/packages/compiler/ast"
 	"github.com/kratejs/krate/packages/compiler/internal/astjson"
@@ -612,3 +615,117 @@ func decodeArgs(t *testing.T, args interface{}) map[string]interface{} {
 	}
 	return m
 }
+
+// captureOutput redirects stdout and stderr around fn and returns what each
+// received. Plugin console/log output is written synchronously, so the pipes
+// cannot deadlock on the small payloads these tests produce.
+func captureOutput(t *testing.T, fn func()) (string, string) {
+	t.Helper()
+	oldOut, oldErr := os.Stdout, os.Stderr
+	rOut, wOut, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rErr, wErr, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout, os.Stderr = wOut, wErr
+	defer func() { os.Stdout, os.Stderr = oldOut, oldErr }()
+
+	fn()
+	wOut.Close()
+	wErr.Close()
+	out, _ := io.ReadAll(rOut)
+	errOut, _ := io.ReadAll(rErr)
+	return string(out), string(errOut)
+}
+
+// TestJSPluginKrateLogWarn verifies krate.log is verbose-only while krate.warn
+// always prints, and both carry the [plugin:<name>] prefix.
+func TestJSPluginKrateLogWarn(t *testing.T) {
+	root, outDir, cfg := writeTestPlugin(t, `
+export default {
+  name: "log-plugin",
+  order: 10,
+  hooks: {
+    BeforeBuild(ctx, options, krate) {
+      krate.log("hello-log");
+      krate.warn("hello-warn");
+      console.log("hello-console");
+      return {};
+    },
+  },
+};
+`)
+	ctx := &BuildHookCtx{Root: root, OutDir: outDir, Pages: nil, DevMode: false}
+
+	defer SetVerbose(false)
+
+	// Verbose off: krate.log and console.log are suppressed; warn always shows.
+	SetVerbose(false)
+	stdout, stderr := captureOutput(t, func() {
+		if err := RunCommunityPlugins("BeforeBuild", []config.PluginConfig{cfg}, root, outDir, ctx); err != nil {
+			t.Fatalf("RunCommunityPlugins: %v", err)
+		}
+	})
+	if strings.Contains(stdout+stderr, "hello-log") {
+		t.Errorf("krate.log printed without --verbose:\nstdout=%q\nstderr=%q", stdout, stderr)
+	}
+	// console.log is an always-on polyfill (not gated by --verbose), and is now
+	// prefixed so it is attributable to the plugin.
+	if !strings.Contains(stdout, "hello-console") || !strings.Contains(stdout, "[plugin:test-plugin]") {
+		t.Errorf("console.log should always print, prefixed:\nstdout=%q", stdout)
+	}
+	if !strings.Contains(stderr, "hello-warn") {
+		t.Errorf("krate.warn did not print:\nstderr=%q", stderr)
+	}
+	if !strings.Contains(stderr, "[plugin:test-plugin]") {
+		t.Errorf("krate.warn missing plugin prefix:\nstderr=%q", stderr)
+	}
+
+	// Verbose on: krate.log and console.log now appear, still prefixed.
+	SetVerbose(true)
+	stdout, stderr = captureOutput(t, func() {
+		if err := RunCommunityPlugins("BeforeBuild", []config.PluginConfig{cfg}, root, outDir, ctx); err != nil {
+			t.Fatalf("RunCommunityPlugins (verbose): %v", err)
+		}
+	})
+	if !strings.Contains(stdout, "hello-log") {
+		t.Errorf("krate.log missing with --verbose:\nstdout=%q", stdout)
+	}
+	if !strings.Contains(stdout, "[plugin:test-plugin]") {
+		t.Errorf("krate.log missing plugin prefix:\nstdout=%q", stdout)
+	}
+	if !strings.Contains(stdout, "hello-console") || !strings.Contains(stdout, "[plugin:test-plugin]") {
+		t.Errorf("console.log missing with --verbose:\nstdout=%q", stdout)
+	}
+}
+
+// TestHookTrace verifies the verbose hook trace emits plugin/hook/timing lines
+// only when verbose mode is enabled, and marks failures.
+func TestHookTrace(t *testing.T) {
+	defer SetVerbose(false)
+
+	SetVerbose(false)
+	stdout, stderr := captureOutput(t, func() {
+		traceHook("demo", "BeforeBuild", 5*time.Millisecond, nil)
+	})
+	if stderr != "" || stdout != "" {
+		t.Errorf("trace printed while quiet: stdout=%q stderr=%q", stdout, stderr)
+	}
+
+	SetVerbose(true)
+	stdout, stderr = captureOutput(t, func() {
+		traceHook("demo", "BeforeBuild", 12*time.Millisecond, nil)
+		traceHook("demo", "AfterRender", 3*time.Millisecond, errTraceTest)
+	})
+	if !strings.Contains(stderr, "[plugin:demo]") || !strings.Contains(stderr, "BeforeBuild") {
+		t.Errorf("missing trace line:\nstderr=%q", stderr)
+	}
+	if !strings.Contains(stderr, "error") {
+		t.Errorf("failed hook not marked in trace:\nstderr=%q", stderr)
+	}
+}
+
+var errTraceTest = fmt.Errorf("boom")

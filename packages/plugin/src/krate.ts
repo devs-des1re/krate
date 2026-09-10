@@ -68,4 +68,16 @@ export interface Krate {
    * and CSS so far.
    */
   injectCSS(css: string): { headHTML: string; rawCSS: string };
+
+  /**
+   * Diagnostic log line, prefixed with `[plugin:<name>]`. Shown only when the
+   * build runs with `--verbose`.
+   */
+  log(...args: unknown[]): void;
+
+  /**
+   * Warning line written to stderr, prefixed with `[plugin:<name>]`. Always
+   * shown (not gated by `--verbose`).
+   */
+  warn(...args: unknown[]): void;
 }

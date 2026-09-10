@@ -52,8 +52,13 @@ export default {
 import { definePlugin, definePluginHooks } from '@krate/plugin';
 import type { Krate, PluginOutput } from '@krate/plugin';
 
-export const hooks = definePluginHooks({
+interface DemoOptions {
+  greeting?: string;
+}
+
+export const hooks = definePluginHooks<DemoOptions>({
   BeforeBuild(ctx, options, krate: Krate): PluginOutput {
+    krate.log('greeting =', options.greeting);
     return { files: [{ path: 'demo-notice.txt', content: 'hi' }] };
   },
   AfterRender(ctx, options, krate: Krate): PluginOutput {
@@ -75,7 +80,7 @@ export const hooks = definePluginHooks({
   },
 });
 
-export default function demoPlugin(options: { greeting?: string } = {}) {
+export default function demoPlugin(options: DemoOptions = {}) {
   return definePlugin({
     name: 'demo',
     order: 10,
@@ -110,11 +115,21 @@ export default function demoPlugin(options: { greeting?: string } = {}) {
     `headHTML` / `rawCSS`.
   Every path is anchored to the project root and traversal outside it is
   rejected.
+- **Logging** — `krate.warn(...)` always writes a prefixed warning to stderr;
+  `krate.log(...)` is diagnostic output shown only under `krate build --verbose`
+  (which additionally prints a per-hook trace of plugin, hook, and duration).
+  Plain `console.*` output is prefixed with `[plugin:<name>]`. To type the
+  `options` argument, pass your options type to the generic:
+  `definePluginHooks<MyOptions>({ ... })`.
 - **Return value** — hooks return `{ files, routes, generatedPages, html,
   headHTML, rawCSS, scripts, metaTags, data }` (all optional; may be a
   Promise). `files` are written to the output dir, `routes` become static HTML
   pages, `generatedPages` enter the normal page pipeline, and `html` /
   `headHTML` / `rawCSS` / `scripts` / `metaTags` mutate the build.
+- **Coverage** — every page runs the full hook chain, including pages generated
+  from `generateStaticParams`: `AfterParse` and `AfterRender` (and
+  `AfterMarkdownParse` for `.md`/`.mdx`) run for dynamic-param pages exactly as
+  they do for regular pages.
 - **Serve hooks** — `ServeRequest` returns `{ action }` where `action` is
   `'continue'` (default), `'rewrite'` (with `newURL`), or `'respond'` (with
   `status`/`headers`/`body`). `ServeResponse` returns `{ status, headers,
@@ -230,6 +245,10 @@ func main() {
   for example `ctx.EmitFile("note.txt", "hi")` or
   `ctx.InjectHead("<meta ...>")`. Paths are anchored to the project root and
   traversal outside it is rejected.
+- **Logging** — `plug.Log(...)` writes a prefixed diagnostic line to stderr
+  (shown under `krate build --verbose`), and `plug.Warn(...)` always prints a
+  prefixed warning. Like JS plugins, Go plugin hooks run for every page,
+  including pages generated from `generateStaticParams`.
 
 ### Building and distributing
 

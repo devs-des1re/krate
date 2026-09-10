@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/kratejs/krate/packages/compiler/internal/astjson"
 	"github.com/kratejs/krate/packages/compiler/internal/config"
@@ -35,10 +36,15 @@ type fileEntry struct {
 // launched as Go subprocesses, everything else runs as JavaScript inside the
 // embedded QuickJS runtime — no subprocess and no stdin/stdout protocol.
 func runCommunityHook(hookName string, pc config.PluginConfig, root, outDir string, env CommunityEnv, hookCtx interface{}) error {
+	start := time.Now()
+	var err error
 	if isGoPlugin(pc) {
-		return runGoPluginHook(hookName, pc, root, outDir, env, hookCtx)
+		err = runGoPluginHook(hookName, pc, root, outDir, env, hookCtx)
+	} else {
+		err = runJSPluginHook(hookName, pc, root, outDir, env, hookCtx)
 	}
-	return runJSPluginHook(hookName, pc, root, outDir, env, hookCtx)
+	traceHook(pc.Name, hookName, time.Since(start), err)
+	return err
 }
 
 // applyPluginOutput writes plugin-produced files/routes and applies HTML/head/CSS

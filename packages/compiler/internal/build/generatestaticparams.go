@@ -12,6 +12,7 @@ import (
 	"github.com/kratejs/krate/packages/compiler/internal/annotator"
 	"github.com/kratejs/krate/packages/compiler/internal/bundler"
 	"github.com/kratejs/krate/packages/compiler/internal/irtree"
+	"github.com/kratejs/krate/packages/compiler/internal/plugin"
 	"github.com/kratejs/krate/packages/compiler/internal/reactive"
 	"github.com/kratejs/krate/packages/compiler/internal/renderer"
 	"github.com/kratejs/krate/packages/compiler/internal/tsexec"
@@ -251,6 +252,22 @@ func (b *Builder) buildStaticParamsPage(spp staticParamsPage) (*PageResult, stri
 		return nil, "", fmt.Errorf("no entry module found")
 	}
 
+	// Run AfterParse hooks so statically generated dynamic-param pages get the
+	// same AST-inspection/edit opportunity as regular pages.
+	parseCtx := &plugin.ParseHookCtx{
+		Page:    spp.PagePath,
+		Program: entryModule.Program,
+	}
+	if err := plugin.RunAfterParse(parseCtx); err != nil {
+		fmt.Fprintf(os.Stderr, "  %sAfterParse plugin error (%s):%s %v\n", cYellow, spp.PagePath, cReset, err)
+		b.pluginFailed(fmt.Errorf("AfterParse (%s): %v", spp.PagePath, err))
+	}
+	if err := plugin.RunCommunityPlugins("AfterParse", b.Cfg.Plugins, b.Root, b.Cfg.OutDir, parseCtx, b.communityEnv()); err != nil {
+		fmt.Fprintf(os.Stderr, "  %sCommunity plugin error AfterParse (%s):%s %v\n", cYellow, spp.PagePath, cReset, err)
+		b.pluginFailed(fmt.Errorf("AfterParse (%s): %v", spp.PagePath, err))
+	}
+	entryModule.Program = parseCtx.Program
+
 	renderMode, revalidate := detectRenderMode(entryModule.Program)
 
 	// Global streaming override: if configured, all *static* pages stream.
@@ -284,6 +301,45 @@ func (b *Builder) buildStaticParamsPage(spp staticParamsPage) (*PageResult, stri
 	// Compile-time reactive dependency validation. Surfaced as warnings so
 	// dead signals / circular effects are caught before hydration ships.
 	b.printReactiveDiags(reactive.Build(emitResult.Signatures).Validate())
+
+	// Run AfterRender hooks (pre-layout) so plugins can modify HTML/head/CSS for
+	// statically generated dynamic-param pages, matching buildPage.
+	renderCtx := &plugin.RenderHookCtx{
+		Page:     spp.PagePath,
+		HTML:     emitResult.HTML,
+		HeadHTML: emitResult.HeadHTML,
+		HasJS:    len(emitResult.Signatures) > 0,
+		RawCSS:   bundle.CSS,
+	}
+	if err := plugin.RunAfterRender(renderCtx); err != nil {
+		fmt.Fprintf(os.Stderr, "  %sAfterRender plugin error (%s):%s %v\n", cYellow, spp.PagePath, cReset, err)
+		b.pluginFailed(fmt.Errorf("AfterRender (%s): %v", spp.PagePath, err))
+	}
+	if err := plugin.RunCommunityPlugins("AfterRender", b.Cfg.Plugins, b.Root, b.Cfg.OutDir, renderCtx, b.communityEnv()); err != nil {
+		fmt.Fprintf(os.Stderr, "  %sCommunity plugin error AfterRender (%s):%s %v\n", cYellow, spp.PagePath, cReset, err)
+		b.pluginFailed(fmt.Errorf("AfterRender (%s): %v", spp.PagePath, err))
+	}
+	emitResult.HTML = renderCtx.HTML
+	emitResult.HeadHTML = renderCtx.HeadHTML
+	bundle.CSS = renderCtx.RawCSS
+
+	// Run AfterMarkdownParse hooks for markdown/MDX dynamic-param pages.
+	if strings.HasSuffix(spp.PagePath, ".md") || strings.HasSuffix(spp.PagePath, ".mdx") {
+		mdCtx := &plugin.MarkdownHookCtx{
+			Page:  spp.PagePath,
+			HTML:  emitResult.HTML,
+			Route: spp.OutPath,
+		}
+		if err := plugin.RunAfterMarkdownParse(mdCtx); err != nil {
+			fmt.Fprintf(os.Stderr, "  %sAfterMarkdownParse plugin error (%s):%s %v\n", cYellow, spp.PagePath, cReset, err)
+			b.pluginFailed(fmt.Errorf("AfterMarkdownParse (%s): %v", spp.PagePath, err))
+		}
+		if err := plugin.RunCommunityPlugins("AfterMarkdownParse", b.Cfg.Plugins, b.Root, b.Cfg.OutDir, mdCtx, b.communityEnv()); err != nil {
+			fmt.Fprintf(os.Stderr, "  %sCommunity plugin error AfterMarkdownParse (%s):%s %v\n", cYellow, spp.PagePath, cReset, err)
+			b.pluginFailed(fmt.Errorf("AfterMarkdownParse (%s): %v", spp.PagePath, err))
+		}
+		emitResult.HTML = mdCtx.HTML
+	}
 
 	layoutPath := findLayout(spp.PagePath, b.Cfg.PagesDir)
 	if layoutPath != "" {

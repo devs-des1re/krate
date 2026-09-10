@@ -133,21 +133,21 @@ func (r *Runtime) injectConsole() error {
 
 	// Register Go implementations
 	if err := r.RegisterFunc("console_log", func(args []any) (any, error) {
-		fmt.Println(args...)
+		r.Log(args)
 		return nil, nil
 	}); err != nil {
 		return err
 	}
 
 	if err := r.RegisterFunc("console_error", func(args []any) (any, error) {
-		fmt.Println("ERROR:", args)
+		r.Error(args)
 		return nil, nil
 	}); err != nil {
 		return err
 	}
 
 	if err := r.RegisterFunc("console_warn", func(args []any) (any, error) {
-		fmt.Println("WARN:", args)
+		r.Warn(args)
 		return nil, nil
 	}); err != nil {
 		return err

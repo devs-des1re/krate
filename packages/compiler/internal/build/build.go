@@ -437,8 +437,14 @@ func (b *Builder) BuildAll() error {
 				HeadHTML: result.HeadHTML,
 				HasJS:    result.HasJS,
 			}
-			plugin.RunAfterPage(afterPageCtx)
-			plugin.RunCommunityPlugins("AfterPage", b.Cfg.Plugins, b.Root, b.Cfg.OutDir, afterPageCtx)
+			if err := plugin.RunAfterPage(afterPageCtx); err != nil {
+				fmt.Fprintf(os.Stderr, "  %sPlugin error (AfterPage: %s):%s %v\n", cYellow, result.Page, cReset, err)
+				b.pluginFailed(err)
+			}
+			if err := plugin.RunCommunityPlugins("AfterPage", b.Cfg.Plugins, b.Root, b.Cfg.OutDir, afterPageCtx, b.communityEnv()); err != nil {
+				fmt.Fprintf(os.Stderr, "  %sCommunity plugin error (AfterPage: %s):%s %v\n", cYellow, result.Page, cReset, err)
+				b.pluginFailed(err)
+			}
 			result.HTML = afterPageCtx.HTML
 			result.HeadHTML = afterPageCtx.HeadHTML
 		}

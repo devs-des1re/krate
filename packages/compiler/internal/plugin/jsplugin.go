@@ -42,6 +42,9 @@ func runJSPluginHook(hookName string, pc config.PluginConfig, root, outDir strin
 	}
 	defer rt.Close()
 
+	// Attribute all console/log output to this plugin.
+	rt.SetLogPrefix("[plugin:" + pc.Name + "]")
+
 	// Assemble the richer `krate` object's capabilities (resolve/read/emit/
 	// write/inject) and register their Go-backed host functions.
 	cap := newKrateCapabilities(root, outDir, env, hookName, hookCtx)
@@ -84,6 +87,8 @@ func runJSPluginHook(hookName string, pc config.PluginConfig, root, outDir strin
     krate.writeFileToRoot = function(rel, content) { _krate_writeFileToRoot(String(rel), String(content)); };
     krate.injectHead = function(html) { return _krate_injectHead(String(html)); };
     krate.injectCSS = function(css) { return _krate_injectCSS(String(css)); };
+    krate.log = function() { _krate_log(JSON.stringify(Array.prototype.slice.call(arguments))); };
+    krate.warn = function() { _krate_warn(JSON.stringify(Array.prototype.slice.call(arguments))); };
     var out = fn(%[3]s, %[2]s, krate);
     if (out && typeof out.then === 'function') {
       __krateResult = undefined;

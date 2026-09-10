@@ -33,8 +33,8 @@ export interface PluginOutput {
 }
 
 /** A build hook implementation; may return a Promise. */
-export type PluginHookFn<Ctx, Out = PluginOutput> = (
+export type PluginHookFn<Ctx, Out = PluginOutput, Options = unknown> = (
   ctx: Ctx,
-  options: unknown,
+  options: Options,
   krate: Krate,
 ) => Out | void | Promise<Out | void>;

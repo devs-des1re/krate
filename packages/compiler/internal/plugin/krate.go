@@ -175,6 +175,25 @@ func registerKrateHostFuncs(rt *jsruntime.Runtime, cap *krateCapabilities) error
 		return err
 	}
 
+	// krate.log is diagnostic output (verbose-only); krate.warn is always shown.
+	// Both go through the runtime's console so they carry the [plugin:<name>]
+	// prefix and are indistinguishable from console.* in destination.
+	if err := rt.RegisterFunc("_krate_log", func(args []any) (any, error) {
+		if verbose.Load() {
+			rt.Log(args)
+		}
+		return nil, nil
+	}); err != nil {
+		return err
+	}
+
+	if err := rt.RegisterFunc("_krate_warn", func(args []any) (any, error) {
+		rt.Warn(args)
+		return nil, nil
+	}); err != nil {
+		return err
+	}
+
 	return nil
 }
 

@@ -12,6 +12,7 @@ package plug
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/rpc"
 	"os"
 
@@ -151,6 +152,31 @@ func ReadFile(projectRoot, spec string) (string, error) {
 // `krate.writeFileToRoot`.
 func WriteFileToRoot(projectRoot, rel string, content []byte) error {
 	return pluginapi.WriteFileToRoot(projectRoot, rel, content)
+}
+
+// pluginLogName is set by Serve so Log/Warn can attribute output.
+var pluginLogName string
+
+// Log writes a diagnostic line to stderr, prefixed with the plugin name. It is
+// the Go counterpart of the JS `krate.log`.
+func Log(args ...interface{}) {
+	writePluginLog("", args...)
+}
+
+// Warn writes a warning line to stderr, prefixed with the plugin name. It is
+// the Go counterpart of the JS `krate.warn`.
+func Warn(args ...interface{}) {
+	writePluginLog("WARN: ", args...)
+}
+
+// writePluginLog formats "[plugin:<name>] <tag><args>" to stderr. Plugin
+// subprocess stderr is inherited by the Krate host, so it reaches the user.
+func writePluginLog(tag string, args ...interface{}) {
+	label := pluginLogName
+	if label == "" {
+		label = "unnamed"
+	}
+	fmt.Fprintf(os.Stderr, "[plugin:%s] %s%s\n", label, tag, fmt.Sprint(args...))
 }
 
 // KrateInfo carries build-wide metadata on hook contexts that do not already
@@ -549,6 +575,7 @@ func (s *pluginServer) dispatchServe(req DispatchRequest, out *json.RawMessage) 
 // Serve launches the plugin subprocess protocol. Call it from main and do not
 // return after invoking it; the plugin exits when the host shuts it down.
 func Serve(name string, hooks Hooks) {
+	pluginLogName = name
 	logger := hclog.New(&hclog.LoggerOptions{
 		Name:   name,
 		Level:  hclog.Warn,

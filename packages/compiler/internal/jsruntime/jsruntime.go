@@ -2,6 +2,8 @@ package jsruntime
 
 import (
 	"fmt"
+	"io"
+	"os"
 	"time"
 
 	"modernc.org/quickjs"
@@ -18,7 +20,33 @@ const (
 type Runtime struct {
 	vm          *quickjs.VM
 	projectRoot string // root directory for fs.readFile resolution
+	logPrefix   string // optional prefix for console output (e.g. "[plugin:demo]")
 }
+
+// SetLogPrefix sets a prefix prepended to every console line. Plugin hosts set
+// it so console.log/error/warn output is attributable to the plugin that ran.
+func (r *Runtime) SetLogPrefix(prefix string) { r.logPrefix = prefix }
+
+// LogPrefix returns the current console prefix.
+func (r *Runtime) LogPrefix() string { return r.logPrefix }
+
+// writeLog prints one console line to w, applying the tag and log prefix.
+func (r *Runtime) writeLog(w io.Writer, tag string, args []any) {
+	line := tag + fmt.Sprint(args...)
+	if r.logPrefix != "" {
+		line = r.logPrefix + " " + line
+	}
+	fmt.Fprintln(w, line)
+}
+
+// Log writes a console-style line to stdout.
+func (r *Runtime) Log(args []any) { r.writeLog(os.Stdout, "", args) }
+
+// Warn writes a warning line to stderr.
+func (r *Runtime) Warn(args []any) { r.writeLog(os.Stderr, "WARN: ", args) }
+
+// Error writes an error line to stderr.
+func (r *Runtime) Error(args []any) { r.writeLog(os.Stderr, "ERROR: ", args) }
 
 // New creates a new JS runtime with Web API polyfills
 func New() (*Runtime, error) {

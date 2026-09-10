@@ -10,6 +10,7 @@ import (
 
 	"github.com/kratejs/krate/packages/compiler/internal/build"
 	"github.com/kratejs/krate/packages/compiler/internal/config"
+	"github.com/kratejs/krate/packages/compiler/internal/plugin"
 	krateversion "github.com/kratejs/krate/packages/compiler/internal/version"
 )
 
@@ -38,6 +39,7 @@ func main() {
 	// Publish the build-time version to internal packages (plugins read it).
 	krateversion.Value = version
 	flags, args := parseFlags(os.Args[1:])
+	plugin.SetVerbose(flags.Verbose)
 
 	if len(args) == 0 {
 		fmt.Fprintf(os.Stderr, "Usage: krate [flags] <build|dev|serve|version> [dir]\n")

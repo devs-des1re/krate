@@ -35,8 +35,9 @@ interface MyPluginOptions {
   greeting?: string;
 }
 
-export const hooks = definePluginHooks({
+export const hooks = definePluginHooks<MyPluginOptions>({
   BeforeBuild(ctx, options, krate: Krate): PluginOutput {
+    krate.log("building with greeting", options.greeting);
     return { files: [{ path: "note.txt", content: "hi" }] };
   },
   AfterRender(ctx, options, krate: Krate): PluginOutput {
@@ -73,6 +74,21 @@ export default function myPlugin(options: MyPluginOptions = {}) {
   directory), `krate.writeFileToRoot(rel, content)` (static assets under the
   project root), and `krate.injectHead(html)` / `krate.injectCSS(css)`. Every
   path is anchored to the project root and traversal outside it is rejected.
+- **Logging** — `krate.warn(...)` always writes a prefixed warning to stderr;
+  `krate.log(...)` is diagnostic output shown only when the build runs with
+  `--verbose` (which also prints a per-hook trace: plugin, hook, and duration).
+  Plain `console.*` output is prefixed with `[plugin:<name>]` so it is
+  attributable.
+- **Typed options** — pass your plugin's options type to
+  `definePluginHooks<MyOptions>({ ... })` and every hook's `options` argument is
+  typed instead of `unknown`:
+
+  ```ts
+  interface MyOptions { greeting?: string }
+  export const hooks = definePluginHooks<MyOptions>({
+    BeforeBuild(ctx, options) { return { html: options.greeting ?? "" }; },
+  });
+  ```
 - **Return value** — hooks return `{ files, routes, generatedPages, html,
   headHTML, rawCSS, scripts, metaTags, ast }` (all optional; may be a Promise;
   `PluginOutput` in `@krate/plugin`). `files` are written into the output

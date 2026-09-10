@@ -2,13 +2,49 @@ package plugin
 
 import (
 	"fmt"
+	"os"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/kratejs/krate/packages/compiler/ast"
 	"github.com/kratejs/krate/packages/compiler/internal/config"
 )
+
+// verbose enables per-hook trace output to stderr. It is a process-global
+// because community hooks run on concurrent per-page goroutines; SetVerbose is
+// called once at startup before any build begins.
+var verbose atomic.Bool
+
+// SetVerbose toggles per-hook trace output (`--verbose`).
+func SetVerbose(v bool) { verbose.Store(v) }
+
+// hookTraceColor is a dim grey used for the verbose hook trace lines.
+const hookTraceColor = "\033[90m"
+
+// traceHook prints a one-line trace of a hook invocation (plugin name, hook,
+// duration, outcome) when verbose mode is on. It never changes the error.
+func traceHook(name, hook string, elapsed time.Duration, err error) {
+	if !verbose.Load() {
+		return
+	}
+	label := name
+	if label == "" {
+		label = "unnamed"
+	}
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "  %s[plugin:%s]%s %s %s(%.1fms, error)%s\n",
+			hookTraceColor, label, cReset, hook, hookTraceColor, float64(elapsed.Microseconds())/1000, cReset)
+		return
+	}
+	fmt.Fprintf(os.Stderr, "  %s[plugin:%s]%s %s %s(%.1fms)%s\n",
+		hookTraceColor, label, cReset, hook, hookTraceColor, float64(elapsed.Microseconds())/1000, cReset)
+}
+
+// cReset terminates ANSI styling in this package. It mirrors the build
+// package's reset sequence so trace lines and build output nest cleanly.
+const cReset = "\033[0m"
 
 // Plugin is the unified plugin interface. Every plugin — built-in or community —
 // implements this single interface. Plugins declare which lifecycle hooks they
@@ -229,19 +265,23 @@ func NewHookFunc(name string, order int, hooks PluginHooks) Plugin {
 const hookTimeout = 30 * time.Second
 
 func runHook(name, hook string, fn func() error) error {
+	start := time.Now()
 	done := make(chan error, 1)
 	go func() {
 		done <- fn()
 	}()
+
+	var err error
 	select {
-	case err := <-done:
+	case err = <-done:
 		if err != nil {
-			return fmt.Errorf("plugin %q hook %s: %w", name, hook, err)
+			err = fmt.Errorf("plugin %q hook %s: %w", name, hook, err)
 		}
-		return nil
 	case <-time.After(hookTimeout):
-		return fmt.Errorf("plugin %q hook %s timed out after %v", name, hook, hookTimeout)
+		err = fmt.Errorf("plugin %q hook %s timed out after %v", name, hook, hookTimeout)
 	}
+	traceHook(name, hook, time.Since(start), err)
+	return err
 }
 
 // RunBeforeBuild runs all BeforeBuild hooks sorted by order.

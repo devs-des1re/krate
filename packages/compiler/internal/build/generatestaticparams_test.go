@@ -235,3 +235,72 @@ func TestInjectStaticParams(t *testing.T) {
 		})
 	}
 }
+
+// TestBuildStaticParamsPageRunsPlugins verifies statically generated
+// dynamic-param pages flow through the same plugin hook chain as regular pages
+// (AfterParse + AfterRender), not just AfterPage. Regression: buildStaticParamsPage
+// previously skipped every hook except the AfterPage pass in the caller.
+func TestBuildStaticParamsPageRunsPlugins(t *testing.T) {
+	root := t.TempDir()
+	pagesDir := filepath.Join(root, "src", "pages")
+	outDir := filepath.Join(root, "dist")
+	pagePath := filepath.Join(pagesDir, "video", "[id].tsx")
+	if err := os.MkdirAll(filepath.Dir(pagePath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(outDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	pageSrc := `export default function VideoPage({ params }: { params: { id: string } }) {
+  return <div>Video {params.id}</div>;
+}`
+	if err := os.WriteFile(pagePath, []byte(pageSrc), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A JS plugin that proves AfterParse and AfterRender ran.
+	pluginDir := filepath.Join(root, "plugins", "static-hook")
+	if err := os.MkdirAll(pluginDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	pluginSrc := `
+export default {
+  name: "static-hook",
+  order: 10,
+  hooks: {
+    AfterParse(ctx, options, krate) { krate.emitFile("afterparse-ran.txt", "1"); return {}; },
+    AfterRender(ctx, options, krate) { return { rawCSS: ".static-param-hook{}" }; },
+  },
+};
+`
+	pluginPath := filepath.Join(pluginDir, "index.js")
+	if err := os.WriteFile(pluginPath, []byte(pluginSrc), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{
+		PagesDir: pagesDir,
+		OutDir:   outDir,
+		Entry:    "src/index.tsx",
+	}
+	cfg.Plugins = []config.PluginConfig{{Name: "static-hook", Module: pluginPath}}
+	b := New(root, cfg)
+
+	result, rawCSS, err := b.buildStaticParamsPage(staticParamsPage{
+		PagePath: pagePath,
+		Params:   map[string]string{"id": "abc-123"},
+		OutPath:  "video/abc-123",
+	})
+	if err != nil {
+		t.Fatalf("buildStaticParamsPage: %v", err)
+	}
+
+	// AfterParse side-effect (krate.emitFile) reached disk.
+	if _, err := os.Stat(filepath.Join(outDir, "afterparse-ran.txt")); err != nil {
+		t.Errorf("AfterParse did not run for the static-param page: %v", err)
+	}
+	// AfterRender rawCSS reached the page bundle.
+	if !strings.Contains(rawCSS, ".static-param-hook{}") || !strings.Contains(result.CSS, ".static-param-hook{}") {
+		t.Errorf("AfterRender did not run for the static-param page: rawCSS=%q result.CSS=%q", rawCSS, result.CSS)
+	}
+}
