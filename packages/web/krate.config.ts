@@ -1,4 +1,5 @@
 import { defineConfig, docs, sitemap } from '@krate/core';
+import { baseDocsTheme } from '@krate/base-docs-theme';
 
 export default defineConfig({
   entry: "src/pages/index.tsx",
@@ -30,7 +31,7 @@ export default defineConfig({
     docs({
       contentDir: "content/docs",
       title: "Krate Docs",
-      layout: "src/components/docs-layout.tsx",
+      theme: baseDocsTheme(),
       search: {
         enabled: true,
         engine: "docfind",

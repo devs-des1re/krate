@@ -54,7 +54,7 @@ order: 1
 │   └── docs/              # Markdown/MDX documentation pages
 └── src/
     ├── pages/             # Home, layout, and 404 pages
-    └── components/        # docs-layout and docs UI components
+    └── components/        # project components (docs shell comes from @krate/base-docs-theme)
 ```
 
 ## Configuration

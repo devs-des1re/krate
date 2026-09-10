@@ -9,6 +9,7 @@ The site is configured in `krate.config.ts` at the project root.
 
 ```ts
 import { defineConfig, docs, sitemap } from '@krate/core';
+import { baseDocsTheme } from '@krate/base-docs-theme';
 
 export default defineConfig({
   outDir: "dist",
@@ -16,7 +17,7 @@ export default defineConfig({
     docs({
       contentDir: "content/docs",
       title: "My Docs",
-      layout: "src/components/docs-layout.tsx",
+      theme: baseDocsTheme(),
       search: { enabled: true, engine: "docfind" },
     }),
   ],

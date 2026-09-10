@@ -1,4 +1,5 @@
 import { defineConfig, docs, sitemap } from '@krate/core';
+import { baseDocsTheme } from '@krate/base-docs-theme';
 
 // Replace with your production URL.
 const baseUrl = "https://example.com";
@@ -33,7 +34,7 @@ export default defineConfig({
     docs({
       contentDir: "content/docs",
       title: "__PROJECT_DISPLAY_NAME__",
-      layout: "src/components/docs-layout.tsx",
+      theme: baseDocsTheme(),
       search: {
         enabled: true,
         engine: "docfind",

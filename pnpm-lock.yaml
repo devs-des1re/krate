@@ -10,6 +10,9 @@ importers:
 
   examples:
     dependencies:
+      '@krate/base-docs-theme':
+        specifier: workspace:*
+        version: link:../packages/base-docs-theme
       '@krate/components':
         specifier: workspace:*
         version: link:../packages/components
@@ -41,6 +44,15 @@ importers:
         specifier: ^3.6.0
         version: 3.6.0
 
+  packages/base-docs-theme:
+    dependencies:
+      '@krate/plugin':
+        specifier: workspace:*
+        version: link:../plugin
+      '@krate/runtime':
+        specifier: workspace:*
+        version: link:../runtime
+
   packages/benchmark:
     devDependencies:
       autocannon:
@@ -54,6 +66,10 @@ importers:
         version: link:../runtime
 
   packages/core:
+    dependencies:
+      '@krate/plugin':
+        specifier: workspace:*
+        version: link:../plugin
     devDependencies:
       '@types/node':
         specifier: ^20.19.43
@@ -103,6 +119,9 @@ importers:
 
   packages/web:
     devDependencies:
+      '@krate/base-docs-theme':
+        specifier: workspace:*
+        version: link:../base-docs-theme
       '@krate/components':
         specifier: 0.2.1
         version: 0.2.1(@krate/runtime@0.2.1)

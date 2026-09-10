@@ -12,13 +12,14 @@ site. This guide walks through the moving parts.
 
 ```ts
 import { defineConfig, docs } from '@krate/core';
+import { baseDocsTheme } from '@krate/base-docs-theme';
 
 export default defineConfig({
   plugins: [
     docs({
       contentDir: "content/docs",
       title: "My Docs",
-      layout: "src/components/docs-layout.tsx",
+      theme: baseDocsTheme(),
       search: { enabled: true, engine: "docfind" },
       links: [{ icon: "lucide:github", url: "https://github.com/me/project" }],
     }),
@@ -76,13 +77,22 @@ section landing page.
 The layout is a normal Krate TSX component receiving a single `DocsLayoutProps`
 object (`title`, `pageTitle`, `sidebarItems`, `tocItems`, `breadcrumbs`,
 `prev`/`next`, `socialLinks`, `currentPath`, and optional `options`). It renders
-`{children}` for the content and owns all surrounding chrome. See
-`src/components/docs-layout.tsx` in this site for a reference implementation —
-the docs plugin expects a `src/components/docs/` directory with `SidebarNav`,
-`TOCNav`, `Breadcrumbs`, `PrevNext`, and `SocialLinks` components that the
-reference layout composes.
+`{children}` for the content and owns all surrounding chrome.
 
 ## Theming
+
+The default `@krate/base-docs-theme` package ships the stock shell — navbar,
+sidebar, table of contents, breadcrumbs, prev/next, and light/dark mode — as a
+single composable component. Use its `baseDocsTheme()` factory:
+
+```ts
+import { baseDocsTheme } from '@krate/base-docs-theme';
+
+docs({
+  contentDir: "content/docs",
+  theme: baseDocsTheme(),
+});
+```
 
 You can swap the whole docs shell with the `theme` option instead of `layout`.
 A theme is one of:
@@ -90,7 +100,7 @@ A theme is one of:
 - **A path** (`"./src/components/my-layout.tsx"` or an absolute path) — a plain
   layout component, exactly like `layout`. Setting both `layout` and a
   `theme` that points elsewhere is an error.
-- **An installed npm package** — a bare specifier like `"@kratejs/base-docs-theme"`
+- **An installed npm package** — a bare specifier like `"@krate/base-docs-theme"`
   is emitted as-is, so the theme's own CSS and sub-components flow through the
   bundler graph. Resolution walks up from the project root through
   `node_modules`.
@@ -100,7 +110,7 @@ A theme is one of:
 import { defineDocsTheme } from '@krate/plugin';
 
 export default defineDocsTheme({
-  name: "base-docs-theme",
+  name: "my-docs-theme",
   // layout?: string                     // override component path
   // module: string                      // default: this file (import.meta.url)
   options: { primaryColor: "teal" },     // forwarded as docsProps.options
@@ -134,8 +144,8 @@ Notes:
 
 - Search UI styles live in `docs/search/search.css` (generated) — override the
   `.krate-search-*` classes from your own imported stylesheet.
-- Interactive behavior (sidebar, TOC tracking, theme toggle) lives in
-  `public/docs-script.js`.
+- Interactive behavior (sidebar, TOC tracking, theme toggle) lives in the theme
+  component itself (`@krate/base-docs-theme`), not a separate script.
 
 Use CSS custom properties to retheme: `--color-primary`, `--color-bg`,
 `--color-fg`, `--color-border`, `--radius`, etc.

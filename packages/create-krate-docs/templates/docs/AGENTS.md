@@ -27,9 +27,7 @@ public/                  # static assets (site.css, search script, favicon, robo
 content/docs/            # the documentation pages (Markdown/MDX)
 src/
   pages/                 # index.tsx (home), _layout.tsx shell, 404.tsx
-  components/
-    docs-layout.tsx      # docs page shell (navbar, sidebar, toc) — imports @/components/docs + docs.css
-    docs/                # chrome components + docs.css (SidebarNav, TOCNav, Breadcrumbs, ...) — scaffold-shipped; composed by docs-layout.tsx
+  components/            # project components (docs shell comes from @krate/base-docs-theme)
 ```
 
 - `content/docs/` files are auto-discovered; `order`/`title` frontmatter control
@@ -55,29 +53,28 @@ order: 1
 - Headings become the table of contents; GFM tables, task lists, admonitions,
   and code highlighting are enabled (see `markdown` config in
   `krate.config.ts`).
-- `src/components/docs/` is scaffold-shipped chrome (SidebarNav, TOCNav,
-  Breadcrumbs, PrevNext, SocialLinks) + `docs.css`, composed/imported by
-  `docs-layout.tsx`. The `docs`
-  plugin only passes render props to `docs-layout.tsx`; it does not generate
-  chrome components. Prefer configuring behavior in `krate.config.ts` (docs
-  plugin options, e.g. `theme`/`layout`, `links`, `search`) and styling in
-  `docs.css` / `site.css`.
+- The docs shell (navbar, sidebar, TOC, breadcrumbs, prev/next, light/dark
+  mode) comes from the `@krate/base-docs-theme` package via `theme:
+  baseDocsTheme()` in `krate.config.ts`. The `docs` plugin only passes render
+  props to the theme; it does not generate chrome components. Prefer
+  configuring behavior in `krate.config.ts` (docs plugin options, e.g.
+  `theme`/`layout`, `links`, `search`) and styling in `site.css`.
 
 ## Configuring the site
 
 `krate.config.ts` is where the real site setup lives:
 
 - `seo.baseUrl` / `seo.siteName` — production URL and site name.
-- `plugins` — `sitemap(...)` and `docs(...)`: `contentDir`, `layout`
-  (`src/components/docs-layout.tsx`), `theme` (layout alias or installed npm
-  theme), `search` (docfind, `maxResults`), `links`
+- `plugins` — `sitemap(...)` and `docs(...)`: `contentDir`, `theme`
+  (`baseDocsTheme()` from `@krate/base-docs-theme`, or your own layout/theme),
+  `search` (docfind, `maxResults`), `links`
   (social links, e.g. `lucide:github`).
 - `devServer.port` — default 3000.
 
 ## Key runtime APIs
 
 - Hit pages use the shared `SiteLayout` (`src/pages/_layout.tsx`); docs pages use
-  `DocsLayout` (`src/components/docs-layout.tsx`).
+  the `@krate/base-docs-theme` layout via the docs plugin (`theme`).
 - `Head`, `Icon`, `Link` are provided globally for head/icon/link content.
 - This is NOT React — use `@krate/runtime` signals, plain `class=`, no React hooks.
 

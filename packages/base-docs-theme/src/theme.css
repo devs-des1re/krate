@@ -306,6 +306,7 @@ a:hover {
 }
 
 .sidebar-section-link {
+    position: relative;
     min-width: 0;
     flex: 1;
     display: block;

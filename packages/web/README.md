@@ -9,7 +9,7 @@ Microsoft's [docfind](https://github.com/microsoft/docfind).
 ```
 content/docs/   Documentation content (Markdown + MDX)
 src/pages/      Site pages (landing page, 404)
-src/components/ docs-layout.tsx + the docs UI components
+src/components/ home page components (docs shell comes from @krate/base-docs-theme)
 public/         Static assets (site + docs styles, scripts)
 krate.config.ts Framework config (docs plugin + search)
 ```
