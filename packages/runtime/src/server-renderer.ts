@@ -46,6 +46,10 @@ interface ServerManifest {
 interface CacheEntry {
   html: string;
   timestamp: number;
+  // params/query record the variant this entry was generated for so a
+  // time-based background refresh can regenerate it without evicting it.
+  params?: Record<string, string>;
+  query?: Record<string, string>;
 }
 
 interface RenderRequest {
@@ -130,6 +134,18 @@ class ISRCache {
     }
   }
 
+  // entriesForRoute returns a snapshot of the cached variants for a route so a
+  // background refresh can iterate them without mutating during iteration.
+  entriesForRoute(route: string): Array<[string, CacheEntry]> {
+    const out: Array<[string, CacheEntry]> = [];
+    for (const [key, entry] of this.cache) {
+      if (key === route || key.startsWith(route + "?") || key.startsWith(route + "#")) {
+        out.push([key, entry]);
+      }
+    }
+    return out;
+  }
+
   serialize(): Record<string, unknown> {
     return {
       entries: [...this.cache.entries()].map(([key, entry]) => ({ key, ...entry })),
@@ -143,6 +159,8 @@ class ISRCache {
         this.cache.set(e.key, {
           html: e.html,
           timestamp: typeof e.timestamp === "number" ? e.timestamp : Date.now(),
+          params: e.params && typeof e.params === "object" ? e.params : undefined,
+          query: e.query && typeof e.query === "object" ? e.query : undefined,
         });
       }
     }
@@ -274,6 +292,8 @@ async function renderFresh(page: ManifestPage, req: RenderRequest): Promise<Rend
       isrCache.set(variantKey(req), {
         html,
         timestamp: Date.now(),
+        params: req.params,
+        query: req.query,
       });
       scheduleIsrPersist();
     }
@@ -308,6 +328,43 @@ function revalidateInBackground(page: ManifestPage, req: RenderRequest) {
   })();
 
   inFlightRevalidations.set(key, p);
+}
+
+// Time-based ISR regeneration: re-render every cached variant of a route while
+// keeping the entries in place. This is the non-destructive counterpart of
+// /__krate/ssr/revalidate (which clears a route). The Go server's periodic ISR
+// timer calls this so cached pages stay fresh without evicting dynamic
+// variants — eviction would turn a request that should be a HIT into a MISS.
+const inFlightRouteRefreshes = new Map<string, Promise<number>>();
+
+function refreshRouteVariants(page: ManifestPage): Promise<number> {
+  const running = inFlightRouteRefreshes.get(page.route);
+  if (running) return running;
+
+  const p = (async () => {
+    try {
+      const variants = isrCache.entriesForRoute(page.route);
+      let refreshed = 0;
+      for (const [, entry] of variants) {
+        const req: RenderRequest = {
+          route: page.route,
+          url: page.route,
+          method: "GET",
+          headers: {},
+          params: entry.params,
+          query: entry.query,
+        };
+        const rendered = await renderFresh(page, req);
+        if (rendered.status === 200) refreshed++;
+      }
+      return refreshed;
+    } finally {
+      inFlightRouteRefreshes.delete(page.route);
+    }
+  })();
+
+  inFlightRouteRefreshes.set(page.route, p);
+  return p;
 }
 
 async function renderPage(req: RenderRequest): Promise<RenderResponse> {
@@ -436,7 +493,7 @@ async function renderRegion(page: ManifestPage, region: RegionMeta, req: RenderR
     const cached = regionCache.get(key);
     const stale = cached && (Date.now() - cached.timestamp) / 1000 > interval;
     if (cached && !stale) {
-      return { type: "region", id: region.id, status: 200, html: cached.html, cached: true };
+      return { type: "region", id: region.id, status: 200, html: cached.html, cached: true, cacheStatus: "hit" };
     }
     if (cached) {
       revalidateRegionInBackground(page, region, req, key);
@@ -549,6 +606,26 @@ const server = http.createServer(async (req, res) => {
       }
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
+    } catch (err: any) {
+      res.writeHead(500, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: err.message }));
+    }
+    return;
+  }
+
+  // ISR background refresh endpoint (called by the Go server on each route's
+  // revalidation cadence). Unlike /__krate/ssr/revalidate this is
+  // non-destructive: it re-renders every cached variant in place, so cached
+  // dynamic variants stay fresh instead of being evicted (which would make the
+  // next request a MISS rather than a HIT).
+  if (route === "/__krate/ssr/refresh" && req.method === "POST") {
+    const body = await parseBody(req);
+    try {
+      const { route: targetRoute } = JSON.parse(body);
+      const page = findPage(targetRoute);
+      const refreshed = page && page.mode === "isr" ? await refreshRouteVariants(page) : 0;
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, refreshed }));
     } catch (err: any) {
       res.writeHead(500, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ error: err.message }));

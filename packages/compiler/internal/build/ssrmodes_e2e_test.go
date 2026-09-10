@@ -399,6 +399,27 @@ export default function VideoPage(props) {
 		t.Fatalf("background revalidation never produced fresh HTML")
 	}
 
+	// 6b. A time-based background refresh must regenerate cached variants in
+	// place, not evict them. Regression: the periodic ISR timer previously
+	// called the destructive /__krate/ssr/revalidate endpoint (deleteRoute +
+	// render the paramless base), so every dynamic variant was wiped and the
+	// next request that should have been a HIT came back MISS.
+	postRefresh := postJSON(t, base, "/__krate/ssr/refresh", `{"route":"/video/[id]"}`)
+	if postRefresh.status != 200 {
+		t.Fatalf("refresh endpoint status %d: %s", postRefresh.status, postRefresh.body)
+	}
+	refreshed := isrRender(t, base, "/video/[id]", "video/alpha", map[string]string{"id": "alpha"})
+	if refreshed.cacheStatus != "hit" {
+		t.Fatalf("alpha after refresh: cacheStatus=%q, want hit (variant was evicted)", refreshed.cacheStatus)
+	}
+	if refreshed.html == fresh {
+		t.Fatalf("refresh did not regenerate alpha HTML")
+	}
+	betaRefreshed := isrRender(t, base, "/video/[id]", "video/beta", map[string]string{"id": "beta"})
+	if betaRefreshed.cacheStatus != "hit" {
+		t.Fatalf("beta after refresh: cacheStatus=%q, want hit (variant was evicted)", betaRefreshed.cacheStatus)
+	}
+
 	// 7. Cache persistence: the debounced writer must have flushed a file.
 	waitFile(t, filepath.Join(outDir, ".krate", "isr-cache.json"), 3*time.Second)
 	data, err := os.ReadFile(filepath.Join(outDir, ".krate", "isr-cache.json"))

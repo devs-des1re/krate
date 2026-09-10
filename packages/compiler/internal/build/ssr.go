@@ -138,7 +138,10 @@ func (s *SSRServer) IsRunning() bool {
 	return s.running
 }
 
-// RevalidatePage triggers ISR revalidation for a specific route.
+// RevalidatePage destructively invalidates a route in the SSR renderer: every
+// cached variant is cleared before the base variant is re-rendered. Use it for
+// explicit invalidation only. For time-based ISR regeneration use RefreshPage,
+// which re-renders cached variants in place without evicting them.
 func (s *SSRServer) RevalidatePage(route string) error {
 	if !s.IsRunning() {
 		return fmt.Errorf("SSR renderer not running")
@@ -148,6 +151,30 @@ func (s *SSRServer) RevalidatePage(route string) error {
 	client := &http.Client{Timeout: 10 * time.Second}
 	resp, err := client.Post(
 		fmt.Sprintf("http://localhost:%d/__krate/ssr/revalidate", s.port),
+		"application/json",
+		bytes.NewReader(body),
+	)
+	if err != nil {
+		return err
+	}
+	resp.Body.Close()
+	return nil
+}
+
+// RefreshPage triggers a non-destructive time-based ISR refresh for a route:
+// every cached variant is re-rendered in place, so cached dynamic variants stay
+// fresh instead of being evicted. The periodic ISR timer uses this rather than
+// RevalidatePage — invalidation would clear dynamic variants and turn the next
+// request into a cache miss.
+func (s *SSRServer) RefreshPage(route string) error {
+	if !s.IsRunning() {
+		return fmt.Errorf("SSR renderer not running")
+	}
+
+	body, _ := json.Marshal(map[string]string{"route": route})
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Post(
+		fmt.Sprintf("http://localhost:%d/__krate/ssr/refresh", s.port),
 		"application/json",
 		bytes.NewReader(body),
 	)

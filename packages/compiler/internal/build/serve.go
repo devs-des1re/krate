@@ -1111,8 +1111,10 @@ func serve(root string, cfg *config.Config, reload <-chan []string, startTime ti
 	// Start ISR background revalidation — one timer per page, each route
 	// revalidating on its own cadence (previously every ISR page was revalidated
 	// together on the shortest interval, stampeding every request at once). The
-	// sidecar also serves stale HTML while a revalidation runs, so expiry never
-	// blocks a request even before the timer fires.
+	// refresh is non-destructive: the sidecar re-renders each cached variant in
+	// place so dynamic variants are never evicted. The sidecar also serves stale
+	// HTML while a revalidation runs, so expiry never blocks a request even
+	// before the timer fires.
 	var isrWg sync.WaitGroup
 	isrDone := make(chan struct{})
 	if ssrStarted {
@@ -1134,7 +1136,7 @@ func serve(root string, cfg *config.Config, reload <-chan []string, startTime ti
 						if !ssr.IsRunning() {
 							return
 						}
-						if err := ssr.RevalidatePage(page.Route); err != nil {
+						if err := ssr.RefreshPage(page.Route); err != nil {
 							fmt.Fprintf(os.Stderr, "  %sISR revalidation failed (%s):%s %v\n", cYellow, page.Route, cReset, err)
 						}
 						select {
