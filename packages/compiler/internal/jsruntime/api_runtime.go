@@ -14,7 +14,13 @@ import (
 // APIRouteRuntime executes compiled API routes via embedded quickjs
 type APIRouteRuntime struct {
 	apiDir string
+	env    map[string]string
 	mu     sync.Mutex
+}
+
+// SetEnv injects environment variables into every VM created by Execute.
+func (a *APIRouteRuntime) SetEnv(env map[string]string) {
+	a.env = env
 }
 
 // APIRequest is the input to an API route handler
@@ -142,6 +148,8 @@ func (a *APIRouteRuntime) Execute(req APIRequest) APIResult {
 		return APIResult{Status: 500, Body: `{"error":"Failed to create JS runtime"}`}
 	}
 	defer rt.Close()
+
+	rt.SetEnv(a.env)
 
 	code, err := os.ReadFile(targetFile)
 	if err != nil {

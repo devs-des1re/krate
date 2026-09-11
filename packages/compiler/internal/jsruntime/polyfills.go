@@ -2,6 +2,7 @@ package jsruntime
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -366,21 +367,17 @@ func (r *Runtime) injectProcessEnv() error {
 	return err
 }
 
-// SetEnv sets environment variables for the runtime
+// SetEnv sets environment variables for the runtime. Values are JSON-encoded
+// so keys/values containing quotes or backslashes are safe.
 func (r *Runtime) SetEnv(env map[string]string) error {
-	// Convert to JSON and inject
-	jsonEnv := "{"
-	first := true
-	for k, v := range env {
-		if !first {
-			jsonEnv += ","
-		}
-		jsonEnv += fmt.Sprintf(`"%s":"%s"`, k, v)
-		first = false
+	if env == nil {
+		env = map[string]string{}
 	}
-	jsonEnv += "}"
-
-	_, err := r.Execute(fmt.Sprintf("process.env = %s;", jsonEnv))
+	b, err := json.Marshal(env)
+	if err != nil {
+		return fmt.Errorf("marshaling env: %w", err)
+	}
+	_, err = r.Execute(fmt.Sprintf("process.env = %s;", string(b)))
 	return err
 }
 

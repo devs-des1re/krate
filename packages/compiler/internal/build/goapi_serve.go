@@ -20,6 +20,7 @@ type goAPISupervisor struct {
 	binPath      string
 	manifestPath string
 	port         int
+	env          []string
 
 	proxy     *httputil.ReverseProxy
 	stopCh    chan struct{}
@@ -42,6 +43,11 @@ func newGoAPISupervisor(binPath, manifestPath string, port int) *goAPISupervisor
 		proxy:        httputil.NewSingleHostReverseProxy(target),
 		stopCh:       make(chan struct{}),
 	}
+}
+
+// SetEnv provides environment variables for the sidecar process.
+func (g *goAPISupervisor) SetEnv(env []string) {
+	g.env = env
 }
 
 // Start loads the route manifest, spawns the sidecar, and begins watching the
@@ -92,7 +98,8 @@ func (g *goAPISupervisor) spawn() error {
 	g.stop()
 
 	cmd := exec.Command(g.binPath)
-	cmd.Env = append(os.Environ(), fmt.Sprintf("KRATE_GOAPI_PORT=%d", g.port))
+	cmd.Env = append(os.Environ(), g.env...)
+	cmd.Env = append(cmd.Env, fmt.Sprintf("KRATE_GOAPI_PORT=%d", g.port))
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {

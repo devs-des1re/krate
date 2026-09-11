@@ -97,6 +97,32 @@ function GET(request) {
 	}
 }
 
+// TestAPIRouteProcessEnv verifies environment variables configured on the
+// runtime are visible inside an API route via process.env.
+func TestAPIRouteProcessEnv(t *testing.T) {
+	tmpDir := t.TempDir()
+	apiDir := filepath.Join(tmpDir, "api")
+	os.MkdirAll(apiDir, 0755)
+
+	routeCode := `
+function GET(request) {
+	return { status: 200, text: function() { return process.env.KRATE_TEST_ENV || 'missing'; } };
+}
+`
+	os.WriteFile(filepath.Join(apiDir, "env.js"), []byte(routeCode), 0644)
+
+	rt := NewAPIRouteRuntime(apiDir)
+	rt.SetEnv(map[string]string{"KRATE_TEST_ENV": "api-env"})
+	result := rt.Execute(APIRequest{Method: "GET", Path: "/api/env"})
+
+	if result.Status != 200 {
+		t.Fatalf("Expected 200, got %d (%s)", result.Status, result.Error)
+	}
+	if result.Body != "api-env" {
+		t.Errorf("Body = %q, want %q (process.env not visible in route)", result.Body, "api-env")
+	}
+}
+
 func TestAPIRouteNotFound(t *testing.T) {
 	tmpDir := t.TempDir()
 	apiDir := filepath.Join(tmpDir, "api")

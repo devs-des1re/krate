@@ -47,6 +47,10 @@ Thumbs.db
 .vscode/
 *.swp
 
+# Environment overrides (never commit secrets)
+.env.local
+.env.*.local
+
 .fingerprint/
 packages/compiler/third_party/*/target/
 .opencode/

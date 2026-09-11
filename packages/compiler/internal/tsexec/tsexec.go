@@ -29,10 +29,11 @@ func ImportPath(abs string) string {
 // executes it with `npx --yes tsx` from the given working directory. The `--yes`
 // flag is required for non-interactive environments (CI): plain `npx tsx` would
 // otherwise prompt "Ok to proceed?" and fail when tsx is neither installed nor
-// cached. It returns the
+// cached. env is an optional set of KEY=VALUE strings appended to the subprocess
+// environment (may be nil). It returns the
 // script's stdout and stderr separately, plus a descriptive error (including
 // stderr and timeout detection) when execution fails.
-func RunBootstrap(name, content, cwd string, timeout time.Duration) (stdout []byte, stderr string, err error) {
+func RunBootstrap(name, content, cwd string, timeout time.Duration, env []string) (stdout []byte, stderr string, err error) {
 	buf := make([]byte, 8)
 	rand.Read(buf)
 	suffix := hex.EncodeToString(buf)
@@ -48,6 +49,9 @@ func RunBootstrap(name, content, cwd string, timeout time.Duration) (stdout []by
 
 	cmd := exec.CommandContext(ctx, "npx", "--yes", "tsx", path)
 	cmd.Dir = cwd
+	if len(env) > 0 {
+		cmd.Env = append(os.Environ(), env...)
+	}
 	configureProcessTree(cmd)
 	// A timeout must not outlive itself. On Windows `npx` is a shim that spawns
 	// a child `node`; killing only the shim leaves the child holding the

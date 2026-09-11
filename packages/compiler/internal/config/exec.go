@@ -34,7 +34,7 @@ func executeTSConfig(configPath string, cfg *Config) error {
 
 	root := filepath.Dir(configPath)
 
-	output, stderr, err := tsexec.RunBootstrap("krate-config-bootstrap", configBootstrapContent(configPath), root, configExecTimeout)
+	output, stderr, err := tsexec.RunBootstrap("krate-config-bootstrap", configBootstrapContent(configPath), root, configExecTimeout, nil)
 	if err != nil {
 		if idx := strings.Index(stderr, validatePrefix); idx >= 0 {
 			return &ConfigValidationError{Message: stderr[idx+len(validatePrefix) : endOfLine(stderr, idx)]}

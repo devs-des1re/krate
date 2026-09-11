@@ -70,6 +70,7 @@ type Builder struct {
 	Cfg      *config.Config
 	DevMode  bool
 	Verbose  bool
+	Env      map[string]string   // resolved .env values (build/serve-time only, never client-facing)
 	depGraph map[string][]string // file path → page source paths that depend on it
 	pageDeps map[string][]string // page source path → files it depends on
 	depMu    sync.Mutex          // protects depGraph/pageDeps

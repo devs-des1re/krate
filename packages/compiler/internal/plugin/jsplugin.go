@@ -11,6 +11,7 @@ import (
 	"github.com/evanw/esbuild/pkg/api"
 	"github.com/kratejs/krate/packages/compiler/internal/astjson"
 	"github.com/kratejs/krate/packages/compiler/internal/config"
+	"github.com/kratejs/krate/packages/compiler/internal/environ"
 	"github.com/kratejs/krate/packages/compiler/internal/jsruntime"
 )
 
@@ -41,6 +42,8 @@ func runJSPluginHook(hookName string, pc config.PluginConfig, root, outDir strin
 		return fmt.Errorf("creating JS runtime: %w", err)
 	}
 	defer rt.Close()
+
+	rt.SetEnv(environ.Current)
 
 	// Attribute all console/log output to this plugin.
 	rt.SetLogPrefix("[plugin:" + pc.Name + "]")

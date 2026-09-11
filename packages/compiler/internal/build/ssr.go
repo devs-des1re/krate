@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/evanw/esbuild/pkg/api"
+	"github.com/kratejs/krate/packages/compiler/internal/environ"
 )
 
 // SSRServer manages the SSR sidecar renderer process (node/bun/deno).
@@ -20,10 +21,16 @@ type SSRServer struct {
 	port     int
 	root     string
 	runtime  string // "node" (default) | "bun" | "deno"
+	env      []string
 	cmd      *exec.Cmd
 	mu       sync.Mutex
 	running  bool
 	manifest *ServerManifest
+}
+
+// SetEnv provides environment variables for the sidecar process.
+func (s *SSRServer) SetEnv(env map[string]string) {
+	s.env = environ.KVList(env)
 }
 
 // NewSSRServer creates a new SSR server manager. runtime selects the sidecar
@@ -71,6 +78,7 @@ func (s *SSRServer) Start() error {
 	}
 
 	env := os.Environ()
+	env = append(env, s.env...)
 	env = append(env,
 		fmt.Sprintf("KRATE_SSR_PORT=%d", s.port),
 		fmt.Sprintf("KRATE_MANIFEST=%s", manifestPath),

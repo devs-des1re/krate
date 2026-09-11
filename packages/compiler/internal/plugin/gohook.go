@@ -6,6 +6,7 @@ import (
 
 	"github.com/kratejs/krate/packages/compiler/internal/astjson"
 	"github.com/kratejs/krate/packages/compiler/internal/config"
+	"github.com/kratejs/krate/packages/compiler/internal/environ"
 	"github.com/kratejs/krate/packages/compiler/internal/jsruntime"
 	"github.com/kratejs/krate/packages/compiler/internal/version"
 	pluginsdk "github.com/kratejs/krate/packages/compiler/pluginsdk"
@@ -147,6 +148,7 @@ func runJSManifest(module string) (goPluginDescriptor, error) {
 		return goPluginDescriptor{}, fmt.Errorf("creating JS runtime for manifest: %w", err)
 	}
 	defer rt.Close()
+	rt.SetEnv(environ.Current)
 	// Prelude a CommonJS shim so descriptor files written as
 	// `module.exports = ...` (the documented Go-plugin shape) load even when
 	// esbuild leaves the `module.exports` assignment unwrapped — which happens

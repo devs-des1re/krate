@@ -13,6 +13,7 @@ import (
 	"github.com/kratejs/krate/packages/compiler/ast"
 	"github.com/kratejs/krate/packages/compiler/internal/astjson"
 	"github.com/kratejs/krate/packages/compiler/internal/config"
+	"github.com/kratejs/krate/packages/compiler/internal/environ"
 	"github.com/kratejs/krate/packages/compiler/internal/lexer"
 	"github.com/kratejs/krate/packages/compiler/internal/parser"
 )
@@ -389,6 +390,38 @@ export default {
 	}
 	if !contains(string(doc), "hello plugin") {
 		t.Errorf("re-encoded doc does not contain the plugin edit")
+	}
+}
+
+// TestJSPluginProcessEnv verifies the resolved .env (environ.Current) is
+// visible inside a JS plugin's hook via process.env.
+func TestJSPluginProcessEnv(t *testing.T) {
+	old := environ.Current
+	environ.Current = map[string]string{"KRATE_TEST_ENV": "plugin-env"}
+	defer func() { environ.Current = old }()
+
+	root, outDir, cfg := writeTestPlugin(t, `
+export default {
+  name: "env-plugin",
+  order: 10,
+  hooks: {
+    BeforeBuild(ctx, options, krate) {
+      return { files: [{ path: "env.txt", content: process.env.KRATE_TEST_ENV || "missing" }] };
+    },
+  },
+};
+`)
+
+	ctx := &BuildHookCtx{Root: root, OutDir: outDir, Pages: nil}
+	if err := RunCommunityPlugins("BeforeBuild", []config.PluginConfig{cfg}, root, outDir, ctx); err != nil {
+		t.Fatalf("RunCommunityPlugins: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(outDir, "env.txt"))
+	if err != nil {
+		t.Fatalf("env.txt not written: %v", err)
+	}
+	if want := "plugin-env"; string(data) != want {
+		t.Errorf("env.txt = %q, want %q (process.env not visible in plugin)", data, want)
 	}
 }
 

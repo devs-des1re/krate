@@ -108,7 +108,7 @@ export function generateStaticParams() {
 		t.Fatal(err)
 	}
 
-	paramSets, err := executeGenerateStaticParams(pagePath)
+	paramSets, err := executeGenerateStaticParams(pagePath, nil)
 	if err != nil {
 		t.Fatalf("executeGenerateStaticParams: %v", err)
 	}
@@ -371,4 +371,3 @@ func TestInjectDynamicRoutePlaceholdersSkipsClientRoot(t *testing.T) {
 		t.Error("client dynamic-route root must not be frozen to a sentinel")
 	}
 }
-

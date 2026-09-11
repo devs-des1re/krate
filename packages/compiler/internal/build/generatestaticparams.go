@@ -11,6 +11,7 @@ import (
 	"github.com/kratejs/krate/packages/compiler/ast"
 	"github.com/kratejs/krate/packages/compiler/internal/annotator"
 	"github.com/kratejs/krate/packages/compiler/internal/bundler"
+	"github.com/kratejs/krate/packages/compiler/internal/environ"
 	"github.com/kratejs/krate/packages/compiler/internal/irtree"
 	"github.com/kratejs/krate/packages/compiler/internal/plugin"
 	"github.com/kratejs/krate/packages/compiler/internal/reactive"
@@ -140,7 +141,7 @@ func hasGenerateStaticParams(prog *ast.Program) bool {
 
 // executeGenerateStaticParams runs the page's generateStaticParams via npx tsx
 // and returns the parsed param combinations.
-func executeGenerateStaticParams(pagePath string) ([]map[string]string, error) {
+func executeGenerateStaticParams(pagePath string, env []string) ([]map[string]string, error) {
 	abs, err := filepath.Abs(pagePath)
 	if err != nil {
 		return nil, err
@@ -159,7 +160,7 @@ console.log(JSON.stringify(result));
 		tsexec.ImportPath(abs),
 	)
 
-	output, _, err := tsexec.RunBootstrap("krate-gsp-bootstrap", content, filepath.Dir(abs), 30*time.Second)
+	output, _, err := tsexec.RunBootstrap("krate-gsp-bootstrap", content, filepath.Dir(abs), 30*time.Second, env)
 	if err != nil {
 		return nil, fmt.Errorf("generateStaticParams execution: %w", err)
 	}
@@ -243,7 +244,7 @@ func (b *Builder) resolveStaticParamsPages(pages []string) ([]staticParamsPage, 
 
 		fmt.Printf("  %s⚡%s generateStaticParams: %s\n", cCyan, cReset, filepath.Base(page))
 
-		paramSets, err := executeGenerateStaticParams(page)
+		paramSets, err := executeGenerateStaticParams(page, environ.KVList(b.Env))
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("generateStaticParams (%s): %v", filepath.Base(page), err))
 			continue

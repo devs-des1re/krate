@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/kratejs/krate/packages/compiler/internal/config"
+	"github.com/kratejs/krate/packages/compiler/internal/environ"
 	"github.com/kratejs/krate/packages/compiler/internal/jsruntime"
 	"github.com/kratejs/krate/packages/compiler/internal/plugin"
 )
@@ -569,6 +570,7 @@ func serve(root string, cfg *config.Config, reload <-chan []string, startTime ti
 	if _, err := os.Stat(goAPIManifestPath); err == nil {
 		goAPIPort := port + 2
 		goAPI = newGoAPISupervisor(goAPIServerBinPath(root), goAPIManifestPath, goAPIPort)
+		goAPI.SetEnv(environ.KVList(environ.Current))
 		if err := goAPI.Start(); err != nil {
 			fmt.Fprintf(os.Stderr, "  %s⚠ Go API sidecar not started:%s %v\n", cYellow, cReset, err)
 		} else {
@@ -591,6 +593,7 @@ func serve(root string, cfg *config.Config, reload <-chan []string, startTime ti
 		apiDir := filepath.Join(cfg.OutDir, "api")
 		if _, err := os.Stat(apiDir); err == nil {
 			apiRT = jsruntime.NewAPIRouteRuntime(apiDir)
+			apiRT.SetEnv(environ.Current)
 		}
 	}
 
@@ -647,6 +650,7 @@ func serve(root string, cfg *config.Config, reload <-chan []string, startTime ti
 		ssrPort = port + 10
 	}
 	ssr := NewSSRServer(root, ssrPort, cfg.SSR.SSRRuntime)
+	ssr.SetEnv(environ.Current)
 	ssrStarted := false
 	if err := ssr.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "  %s⚠ SSR renderer not started:%s %v\n", cYellow, cReset, err)

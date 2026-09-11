@@ -10,6 +10,7 @@ import (
 
 	"github.com/kratejs/krate/packages/compiler/internal/build"
 	"github.com/kratejs/krate/packages/compiler/internal/config"
+	"github.com/kratejs/krate/packages/compiler/internal/environ"
 	"github.com/kratejs/krate/packages/compiler/internal/plugin"
 	krateversion "github.com/kratejs/krate/packages/compiler/internal/version"
 )
@@ -120,14 +121,33 @@ func resolveConfig(flags cliFlags, args []string) (string, *config.Config) {
 	return root, cfg
 }
 
+// loadProjectEnv resolves the project environment mode (KRATE_ENV/NODE_ENV)
+// and loads the merged .env values. The result becomes the process-wide
+// environ.Current (read by serve-time JS VMs and sidecars) and the Builder's
+// Env (merged into build-time npx tsx subprocesses). Loaded before any
+// `<ServerComponent>` executes so setup code sees process.env.
+func loadProjectEnv(root, defaultMode string, verbose bool) map[string]string {
+	environ.Verbose = verbose
+	mode := environ.Mode(defaultMode)
+	env, err := environ.Load(root, mode)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%sEnv error:%s %v\n", cRed, cReset, err)
+		os.Exit(1)
+	}
+	environ.Current = env
+	return env
+}
+
 func runBuild(flags cliFlags, args []string) {
 	root, cfg := resolveConfig(flags, args)
+	env := loadProjectEnv(root, "production", flags.Verbose)
 
 	fmt.Printf("%s%s  Building %s \u2192 %s%s\n", cBold, cCyan, root, cfg.OutDir, cReset)
 
 	start := time.Now()
 	builder := build.New(root, cfg)
 	builder.Verbose = flags.Verbose
+	builder.Env = env
 	if err := builder.BuildAll(); err != nil {
 		fmt.Fprintf(os.Stderr, "%sBuild error:%s %v\n", cRed, cReset, err)
 		os.Exit(1)
@@ -156,6 +176,7 @@ func runBuild(flags cliFlags, args []string) {
 
 func runDev(flags cliFlags, args []string) {
 	root, cfg := resolveConfig(flags, args)
+	env := loadProjectEnv(root, "development", flags.Verbose)
 
 	fmt.Printf("%s%s  Starting dev server...%s\n", cBold, cCyan, cReset)
 	start := time.Now()
@@ -163,6 +184,7 @@ func runDev(flags cliFlags, args []string) {
 	builder := build.New(root, cfg)
 	builder.Verbose = flags.Verbose
 	builder.DevMode = true
+	builder.Env = env
 	if err := builder.BuildAll(); err != nil {
 		fmt.Fprintf(os.Stderr, "%sBuild error:%s %v\n", cRed, cReset, err)
 		os.Exit(1)
@@ -190,12 +212,14 @@ func runDev(flags cliFlags, args []string) {
 
 func runServe(flags cliFlags, args []string) {
 	root, cfg := resolveConfig(flags, args)
+	env := loadProjectEnv(root, "production", flags.Verbose)
 
 	fmt.Printf("%s%s  Building for preview...%s\n", cBold, cCyan, cReset)
 	start := time.Now()
 
 	builder := build.New(root, cfg)
 	builder.Verbose = flags.Verbose
+	builder.Env = env
 	if err := builder.BuildAll(); err != nil {
 		fmt.Fprintf(os.Stderr, "%sBuild error:%s %v\n", cRed, cReset, err)
 		os.Exit(1)
