@@ -299,7 +299,7 @@ func ssrRuntimeCommand(runtime, rendererPath string) (string, []string, error) {
 	switch runtime {
 	case "", "node":
 		if isTS {
-			return "npx", []string{"tsx", rendererPath}, nil
+			return "npx", []string{"--yes", "tsx", rendererPath}, nil
 		}
 		return "node", []string{rendererPath}, nil
 	case "bun":

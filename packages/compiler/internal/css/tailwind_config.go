@@ -55,12 +55,13 @@ func LoadTailwindConfig(root string) *TailwindConfig {
 		return cfg
 	}
 
-	// Bound the npx tsx execution so a hung tailwind.config (blocking import,
-	// infinite loop) falls back to defaults instead of blocking the build.
+	// Bound the npx --yes tsx execution so a hung tailwind.config (blocking
+	// import, infinite loop) falls back to defaults instead of blocking the
+	// build. The --yes flag stops npx from prompting (e.g. in CI).
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "npx", "tsx", tmpFile)
+	cmd := exec.CommandContext(ctx, "npx", "--yes", "tsx", tmpFile)
 	cmd.Dir = root
 	output, err := cmd.Output()
 	if err != nil {

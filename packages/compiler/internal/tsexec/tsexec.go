@@ -1,5 +1,5 @@
 // Package tsexec runs TypeScript helper scripts (config bootstraps,
-// generateStaticParams, etc.) via `npx tsx`. It centralizes the temp-bootstrap
+// generateStaticParams, etc.) via `npx --yes tsx`. It centralizes the temp-bootstrap
 // write, file:// URL conversion, subprocess execution, timeout handling, and
 // stderr capture that the compiler uses to evaluate user TS at build time.
 package tsexec
@@ -26,7 +26,10 @@ func ImportPath(abs string) string {
 }
 
 // RunBootstrap writes `content` to a uniquely-named temporary .mjs file and
-// executes it with `npx tsx` from the given working directory. It returns the
+// executes it with `npx --yes tsx` from the given working directory. The `--yes`
+// flag is required for non-interactive environments (CI): plain `npx tsx` would
+// otherwise prompt "Ok to proceed?" and fail when tsx is neither installed nor
+// cached. It returns the
 // script's stdout and stderr separately, plus a descriptive error (including
 // stderr and timeout detection) when execution fails.
 func RunBootstrap(name, content, cwd string, timeout time.Duration) (stdout []byte, stderr string, err error) {
@@ -43,7 +46,7 @@ func RunBootstrap(name, content, cwd string, timeout time.Duration) (stdout []by
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "npx", "tsx", path)
+	cmd := exec.CommandContext(ctx, "npx", "--yes", "tsx", path)
 	cmd.Dir = cwd
 	configureProcessTree(cmd)
 	// A timeout must not outlive itself. On Windows `npx` is a shim that spawns
