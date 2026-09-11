@@ -44,6 +44,13 @@ cd ../..
 ./packages/compiler/krate build examples   # (or krate.exe on Windows)
 ```
 
+### Continuous Integration
+
+The `CI` workflow (`.github/workflows/ci.yml`) runs on every pull request and
+push to `main`/`dev`: a frozen pnpm install, Go build/vet/test, and the JS
+package build. The `test` job is enforced by branch protection on `main` —
+a pull request cannot merge until it is green.
+
 ## Project Layout
 
 ```

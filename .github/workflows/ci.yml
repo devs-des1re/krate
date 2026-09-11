@@ -1,0 +1,58 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+      - dev
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: packages/compiler/go.mod
+          cache: true
+
+      - name: Enable pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+          run_install: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install JS dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Go build
+        run: go build ./...
+        working-directory: packages/compiler
+
+      - name: Go vet
+        run: go vet ./...
+        working-directory: packages/compiler
+
+      - name: Go test
+        run: go test ./...
+        working-directory: packages/compiler
+
+      - name: Build JS packages
+        run: pnpm -r --filter '!@krate/web' --filter '!@krate/benchmark' build
