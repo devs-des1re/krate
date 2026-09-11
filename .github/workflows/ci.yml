@@ -56,3 +56,24 @@ jobs:
 
       - name: Build JS packages
         run: pnpm -r --filter '!@krate/web' --filter '!@krate/benchmark' build
+
+  fuzz:
+    name: Fuzz
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: packages/compiler/go.mod
+          cache: true
+
+      - name: Fuzz lexer
+        run: go test -fuzz=FuzzLexer -fuzztime=30s -run=^$ ./internal/lexer
+        working-directory: packages/compiler
+
+      - name: Fuzz parser
+        run: go test -fuzz=FuzzParse -fuzztime=30s -run=^$ ./internal/parser
+        working-directory: packages/compiler
