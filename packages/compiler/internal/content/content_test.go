@@ -77,7 +77,7 @@ func TestGenerateCollections(t *testing.T) {
 			},
 		},
 		"docs": {
-			Dir:    "content/docs",
+			Dir:    "src/content/docs",
 			Schema: map[string]Field{"title": {Type: TypeString}},
 		},
 	}}

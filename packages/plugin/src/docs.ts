@@ -108,7 +108,7 @@ export interface DocsLayoutProps<Options = DocsThemeOptions> {
  * Options accepted by the docs plugin (`docs({ ... })` in krate.config.ts).
  */
 export interface DocsOptions {
-  /** Directory holding the markdown/mdx docs (default: "content/docs"). */
+  /** Directory holding the markdown/mdx docs (default: "src/content/docs"). */
   contentDir?: string;
   /** Site title used in the layout and page titles. */
   title?: string;

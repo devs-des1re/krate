@@ -6,7 +6,7 @@ order: 1
 # Welcome
 
 This is your new documentation site, powered by Krate. Everything under
-`content/docs/` is rendered into the docs section automatically — Markdown and
+`src/content/docs/` is rendered into the docs section automatically — Markdown and
 MDX files become pages, and directories become sidebar sections.
 
 ## What you get

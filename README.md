@@ -190,7 +190,7 @@ export default defineConfig({
   redirects: [{ source: "/old", destination: "/new", permanent: true }],
   plugins: [
     sitemap({ baseUrl: "https://example.com" }),
-    docs({ contentDir: "content/docs", title: "Docs", search: { engine: "docfind" } }),
+    docs({ contentDir: "src/content/docs", title: "Docs", search: { engine: "docfind" } }),
   ],
 });
 ```

@@ -29,7 +29,7 @@ export default defineConfig({
   plugins: [
     sitemap({ baseUrl: "https://krate.js.org", changeFreq: "daily", priority: "0.8" }),
     docs({
-      contentDir: "content/docs",
+      contentDir: "src/content/docs",
       title: "Krate Docs",
       theme: baseDocsTheme(),
       editLinkBase: "https://github.com/kratejs/krate/blob/main/packages/web",

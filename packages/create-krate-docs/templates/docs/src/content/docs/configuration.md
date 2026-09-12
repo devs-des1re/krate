@@ -15,7 +15,7 @@ export default defineConfig({
   outDir: "dist",
   plugins: [
     docs({
-      contentDir: "content/docs",
+      contentDir: "src/content/docs",
       title: "My Docs",
       theme: baseDocsTheme(),
       search: { enabled: true, engine: "docfind" },

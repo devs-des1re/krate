@@ -5,12 +5,12 @@ order: 2
 
 # Getting Started
 
-Add documentation by creating Markdown or MDX files under `content/docs/`.
+Add documentation by creating Markdown or MDX files under `src/content/docs/`.
 Each file becomes a page at `/docs/<path>`.
 
 ## Create your first page
 
-Create `content/docs/hello.md`:
+Create `src/content/docs/hello.md`:
 
 ```md
 ---

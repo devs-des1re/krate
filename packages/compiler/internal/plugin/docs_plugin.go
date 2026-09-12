@@ -62,7 +62,7 @@ func parseDocsOptions(cfg *config.Config) *DocsPluginOptions {
 	for _, pc := range cfg.Plugins {
 		if pc.Name == "docs" {
 			opts := &DocsPluginOptions{
-				ContentDir: "content/docs",
+				ContentDir: "src/content/docs",
 				Title:      "Docs",
 			}
 			if pc.Options != nil {

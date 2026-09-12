@@ -26,7 +26,7 @@ export default defineConfig({
   redirects: [{ source: "/old", destination: "/new", permanent: true }],
   plugins: [
     sitemap({ baseUrl: "https://example.com" }),
-    docs({ contentDir: "content/docs", title: "Docs" }),
+    docs({ contentDir: "src/content/docs", title: "Docs" }),
   ],
 });
 ```
@@ -153,7 +153,7 @@ runtimeDirs: ["src/components/runtime"],
 ```typescript
 plugins: [
   sitemap({ baseUrl: "https://example.com" }),
-  docs({ contentDir: "content/docs", title: "Docs" }),
+  docs({ contentDir: "src/content/docs", title: "Docs" }),
   demoPlugin({ greeting: "Hello!" }),
 ]
 ```

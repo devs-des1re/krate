@@ -5,7 +5,7 @@ order: 2
 
 # Customizing the Docs Site
 
-The `docs` plugin turns a `content/docs/` directory into a full documentation
+The `docs` plugin turns a `src/content/docs/` directory into a full documentation
 site. This guide walks through the moving parts.
 
 ## Enable the plugin
@@ -17,7 +17,7 @@ import { baseDocsTheme } from '@krate/base-docs-theme';
 export default defineConfig({
   plugins: [
     docs({
-      contentDir: "content/docs",
+      contentDir: "src/content/docs",
       title: "My Docs",
       theme: baseDocsTheme(),
       search: { enabled: true, engine: "docfind" },
@@ -29,7 +29,7 @@ export default defineConfig({
 
 | Option | Description |
 |--------|-------------|
-| `contentDir` | Markdown/MDX docs directory (default `content/docs`) |
+| `contentDir` | Markdown/MDX docs directory (default `src/content/docs`) |
 | `title` | Title shown in the docs navbar |
 | `layout` | Path to your layout component |
 | `theme` | Alias for `layout` (path, installed npm package, or factory — see [Theming](#theming)) |
@@ -60,7 +60,7 @@ the WASM search assets under `docs/search/`.
 ## File conventions
 
 ```
-content/docs/
+src/content/docs/
   index.md               → /docs/
   getting-started.md     → /docs/getting-started/
   guides/
@@ -89,7 +89,7 @@ single composable component. Use its `baseDocsTheme()` factory:
 import { baseDocsTheme } from '@krate/base-docs-theme';
 
 docs({
-  contentDir: "content/docs",
+  contentDir: "src/content/docs",
   theme: baseDocsTheme(),
 });
 ```

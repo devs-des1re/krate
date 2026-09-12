@@ -11,7 +11,7 @@
  *   outDir: "dist",
  *   plugins: [
  *     sitemap({ baseUrl: "https://example.com" }),
- *     docs({ contentDir: "content/docs", title: "Docs" }),
+ *     docs({ contentDir: "src/content/docs", title: "Docs" }),
  *   ],
  * });
  * ```

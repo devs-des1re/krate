@@ -17,7 +17,7 @@ export interface BaseDocsThemeOptions {
  * import { baseDocsTheme } from "@krate/base-docs-theme";
  *
  * docs({
- *   contentDir: "content/docs",
+ *   contentDir: "src/content/docs",
  *   theme: baseDocsTheme(),
  * })
  * ```

@@ -47,7 +47,7 @@ dist/docs/
 
 ```ts
 docs({
-  contentDir: "content/docs",
+  contentDir: "src/content/docs",
   title: "Docs",
   search: {
     enabled: true,        // default: true

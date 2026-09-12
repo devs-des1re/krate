@@ -7,7 +7,7 @@ Microsoft's [docfind](https://github.com/microsoft/docfind).
 ## Layout
 
 ```
-content/docs/   Documentation content (Markdown + MDX)
+src/content/docs/ Documentation content (Markdown + MDX)
 src/pages/      Site pages (landing page, 404)
 src/components/ home page components (docs shell comes from @krate/base-docs-theme)
 public/         Static assets (site + docs styles, scripts)
@@ -27,6 +27,6 @@ pnpm serve          # preview the production build
 
 ## Writing docs
 
-Add Markdown or MDX files under `content/docs/`. Frontmatter supports `title`,
+Add Markdown or MDX files under `src/content/docs/`. Frontmatter supports `title`,
 `order`, `sidebar`, and optional `keywords`. See the search feature docs for how
 indexing works.

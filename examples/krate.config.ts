@@ -27,7 +27,7 @@ export default defineConfig({
   plugins: [
     sitemap({ baseUrl: "https://example.com" }),
     docs({
-      contentDir: "content/docs",
+      contentDir: "src/content/docs",
       title: "Krate Docs",
       theme: baseDocsTheme(),
       search: {

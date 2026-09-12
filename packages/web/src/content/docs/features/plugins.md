@@ -146,7 +146,7 @@ import demoPlugin from './plugins/krate-plugin-demo';
 export default defineConfig({
   plugins: [
     sitemap({ baseUrl: "https://example.com" }),
-    docs({ contentDir: "content/docs", title: "Docs" }),
+    docs({ contentDir: "src/content/docs", title: "Docs" }),
     demoPlugin({ greeting: "Hello!" }),
   ],
 });

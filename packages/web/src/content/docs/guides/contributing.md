@@ -58,7 +58,7 @@ Test suites:
 ## The docs website
 
 This site lives in `packages/web`. Docs content is markdown under
-`content/docs/`. Rebuild it to verify plugin changes:
+`src/content/docs/`. Rebuild it to verify plugin changes:
 
 ```sh
 cd packages/web

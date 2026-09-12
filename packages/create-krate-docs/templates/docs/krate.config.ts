@@ -32,7 +32,7 @@ export default defineConfig({
   plugins: [
     sitemap({ baseUrl, changeFreq: "daily", priority: "0.8" }),
     docs({
-      contentDir: "content/docs",
+      contentDir: "src/content/docs",
       title: "__PROJECT_DISPLAY_NAME__",
       theme: baseDocsTheme(),
       search: {

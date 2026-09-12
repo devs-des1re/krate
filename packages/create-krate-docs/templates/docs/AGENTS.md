@@ -3,7 +3,7 @@
 Guidance for AI agents and human contributors working in this Krate docs site.
 
 __PROJECT_DISPLAY_NAME__ is a [Krate](https://github.com/kratejs/krate)
-documentation site. Content is Markdown/MDX under `content/docs/`; each file
+documentation site. Content is Markdown/MDX under `src/content/docs/`; each file
 becomes a page and each directory becomes a sidebar section. It ships with a
 sidebar, table of contents, breadcrumbs, prev/next navigation, light/dark theme,
 and WASM-powered full-text search (docfind). It's built with the Krate `docs`
@@ -24,13 +24,13 @@ npm run serve    # build and serve the production output
 krate.config.ts          # Krate config: entry, outDir (dist), pagesDir, plugins (docs, sitemap)
 tsconfig.json            # targets ES2022, jsx preserve, @/* -> src/* alias
 public/                  # static assets (site.css, search script, favicon, robots)
-content/docs/            # the documentation pages (Markdown/MDX)
 src/
+  content/docs/          # the documentation pages (Markdown/MDX)
   pages/                 # index.tsx (home), _layout.tsx shell, 404.tsx
   components/            # project components (docs shell comes from @krate/base-docs-theme)
 ```
 
-- `content/docs/` files are auto-discovered; `order`/`title` frontmatter control
+- `src/content/docs/` files are auto-discovered; `order`/`title` frontmatter control
   sidebar position and page title.
 - `@/` maps to `src/` (see `tsconfig.json` paths); use `@/components/...` for imports.
 - Treat any file/dir whose name starts with `_` as internal/private; the watcher
@@ -38,7 +38,7 @@ src/
 
 ## Writing docs
 
-Add Markdown/MDX files under `content/docs/`. Frontmatter:
+Add Markdown/MDX files under `src/content/docs/`. Frontmatter:
 
 ```md
 ---
