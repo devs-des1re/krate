@@ -58,7 +58,12 @@ export interface BuildContext {
 /** Context passed to AfterParse. `program` is the AST document (kind-tagged). */
 export interface ParseContext {
   page: string;
-  program?: unknown;
+  /**
+   * The page's AST as a kind-tagged document ({@link AstNode}, rooted at
+   * `kind: "Program"`). Mutate it and return `{ ast: ctx.program }` to rewrite
+   * the tree. See {@link ASTTypes} / {@link isAstKind} for typed discriminators.
+   */
+  program?: import("./ast.js").AstNode;
 }
 
 /** Context passed to AfterMarkdownParse. */

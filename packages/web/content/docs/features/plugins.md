@@ -96,7 +96,9 @@ export default function myPlugin(options: MyPluginOptions = {}) {
   `generatedPages` feed the page pipeline, and
   `html`/`headHTML`/`rawCSS`/`scripts`/`metaTags` mutate the hook context.
   At `AfterParse`, `ctx.program` is the kind-tagged AST document; mutate it and
-  return it as `ast` to rewrite the tree (same capability as Go plugins).
+  return it as `ast` to rewrite the tree (same capability as Go plugins). Use
+  `ASTTypes` / `isAstKind` from `@krate/plugin` for type-safe `kind` checks
+  instead of raw strings.
 - **Runtime capabilities** — bundled plugins can use `import fs from 'fs'` /
   `import path from 'path'` (polyfilled) plus Web API polyfills (`fetch`, `URL`,
   `Headers`, `Response`, `TextEncoder`, timers, `process.env`). Non-relative

@@ -151,12 +151,14 @@ node has a `kind` discriminator plus lowercase-cased fields (position is
 `{ line, col }`). Mutate it and return it as `ast`:
 
 ```javascript
+import { ASTTypes } from '@krate/plugin';
+
 export const hooks = {
   AfterParse(ctx, options, krate) {
     // Depth-first search for a JSX text node.
     const walk = (node) => {
       if (!node || typeof node !== 'object') return null;
-      if (node.kind === 'JSXText' && node.value === 'GO-PLUGIN') return node;
+      if (node.kind === ASTTypes.JSXText && node.value === 'GO-PLUGIN') return node;
       for (const k in node) {
         for (const v of [].concat(node[k])) { const r = walk(v); if (r) return r; }
       }
@@ -172,6 +174,11 @@ export const hooks = {
 - The AST is the exact same shape Go plugins receive — **JS plugins can do
   everything Go plugins can**, just slower (the JSON round-trip climbs per
   page; Go plugins mutate the live tree in-process).
+- Import **`ASTTypes`** (plus the `AstNode` / `AstKind` types and the
+  `isAstKind(node, kind)` guard) from `@krate/plugin` instead of hard-coding
+  `kind` strings: the object mirrors the compiler's node registry, so
+  discriminators are typo-proof and autocompleted. `ASTLiteralKinds` /
+  `ASTVarKinds` cover `literalKind` / `variableKind` (numeric enums).
 - Return **`ast`** (not `program`) as the output key; it is decoded by the host
   into the program Krate renders. Re-encoding and structural edits are supported;
   returning an invalid doc is a build error.

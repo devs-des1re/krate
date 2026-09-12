@@ -22,6 +22,21 @@ export type {
   ServeResponseContext,
   ServeResponseResult,
 } from "./context.js";
+export {
+  AST_KINDS,
+  ASTLiteralKinds,
+  ASTTypes,
+  ASTVarKinds,
+  isAstKind,
+} from "./ast.js";
+export type {
+  AstKind,
+  AstLiteralKind,
+  AstNode,
+  AstNodeOf,
+  AstPosition,
+  AstVarKind,
+} from "./ast.js";
 export type {
   DocsHeadTag,
   DocsHero,

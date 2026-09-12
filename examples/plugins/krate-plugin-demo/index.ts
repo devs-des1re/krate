@@ -29,8 +29,8 @@
 // krate.injectHead / krate.injectCSS for head/CSS injection, typed hooks via
 // definePluginHooks<DemoPluginOptions>, and krate.log / krate.warn for output.
 
-import { definePlugin, definePluginHooks } from "@krate/plugin";
-import type { Krate, PluginOutput } from "@krate/plugin";
+import { ASTTypes, definePlugin, definePluginHooks, isAstKind } from "@krate/plugin";
+import type { AstNode, Krate, PluginOutput } from "@krate/plugin";
 
 // Typed plugin options: `demoPlugin({ greeting: "..." })` now typechecks, and
 // `definePluginHooks<DemoPluginOptions>` types every hook's `options` argument.
@@ -61,8 +61,21 @@ export const hooks = definePluginHooks<DemoPluginOptions>({
     return {};
   },
 
-  // Log each page that gets parsed (console.error surfaces as a warning).
-  AfterParse(): PluginOutput {
+  // Walk the parsed AST with the typed kind discriminators. This demo counts
+  // JSX elements; the same walk could mutate nodes and return { ast }.
+  AfterParse(ctx, options, krate: Krate): PluginOutput {
+    let jsxCount = 0;
+    const walk = (node: unknown): void => {
+      if (Array.isArray(node)) {
+        for (const child of node) walk(child);
+        return;
+      }
+      if (!node || typeof node !== "object") return;
+      if (isAstKind(node, ASTTypes.JSXElement)) jsxCount++;
+      for (const value of Object.values(node as AstNode)) walk(value);
+    };
+    walk(ctx.program);
+    krate.log("AfterParse:", ctx.page, "->", jsxCount, "JSX element(s)");
     return {};
   },
 
