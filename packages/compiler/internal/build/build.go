@@ -2236,9 +2236,21 @@ func (b *Builder) compileImageToPicture(orig *ast.JSXElement) *ast.JSXElement {
 		return imageErrorSpan("[Image: missing src]")
 	}
 
+	publicDir := b.Cfg.PublicDir
+	if publicDir == "" {
+		publicDir = filepath.Join(b.Root, "public")
+	}
+
+	// `src` is a URL, not a filesystem path. A leading "/" is the site root on
+	// every platform — do NOT let filepath.IsAbs treat it as an OS-absolute
+	// path (it does on Linux, which made `/hero.png` resolve to the drive root).
+	// Only a genuinely absolute filesystem path (e.g. `C:\assets\hero.png`) is
+	// used verbatim.
 	resolvedSrc := src
-	if !filepath.IsAbs(src) {
-		resolvedSrc = filepath.Join(b.Root, "public", src)
+	if strings.HasPrefix(src, "/") {
+		resolvedSrc = filepath.Join(publicDir, strings.TrimPrefix(src, "/"))
+	} else if !filepath.IsAbs(src) {
+		resolvedSrc = filepath.Join(publicDir, src)
 	}
 
 	result, err := imageproc.ProcessImage(b.Root, resolvedSrc, reqW, reqH, quality, placeholder != "empty")
