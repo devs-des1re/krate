@@ -12,6 +12,7 @@ The `krate` CLI is the single entry point for building and serving Krate sites.
 | `krate build [dir]` | Production build |
 | `krate dev [dir]` | Build + dev server (port 3000) + hot reload |
 | `krate serve [dir]` | Build + static HTTP server (production preview) |
+| `krate types [dir]` | Generate route/content TypeScript declarations only |
 | `krate version` | Print the version |
 
 ## `krate build`

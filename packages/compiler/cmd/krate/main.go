@@ -43,7 +43,7 @@ func main() {
 	plugin.SetVerbose(flags.Verbose)
 
 	if len(args) == 0 {
-		fmt.Fprintf(os.Stderr, "Usage: krate [flags] <build|dev|serve|version> [dir]\n")
+		fmt.Fprintf(os.Stderr, "Usage: krate [flags] <build|dev|serve|types|version> [dir]\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		fmt.Fprintf(os.Stderr, "  --config <path>   Path to config file (default: project/krate.config.ts)\n")
 		fmt.Fprintf(os.Stderr, "  --out-dir <path>  Override output directory\n")
@@ -59,6 +59,8 @@ func main() {
 		runDev(flags, args)
 	case "serve":
 		runServe(flags, args)
+	case "types":
+		runTypes(flags, args)
 	case "version":
 		fmt.Println("krate v" + version)
 	default:
@@ -231,4 +233,20 @@ func runServe(flags cliFlags, args []string) {
 		fmt.Fprintf(os.Stderr, "%sServe error:%s %v\n", cRed, cReset, err)
 		os.Exit(1)
 	}
+}
+
+// runTypes generates route and content TypeScript declarations without running
+// a full build. Useful in CI (`krate types && tsc --noEmit`) and for editors.
+func runTypes(flags cliFlags, args []string) {
+	root, cfg := resolveConfig(flags, args)
+	fmt.Printf("%s%s  Generating types for %s%s\n", cBold, cCyan, root, cReset)
+
+	if errs := build.GenerateTypes(root, cfg); len(errs) > 0 {
+		for _, e := range errs {
+			fmt.Fprintf(os.Stderr, "%s  Type error:%s %v\n", cRed, cReset, e)
+		}
+		os.Exit(1)
+	}
+
+	fmt.Printf("%s%s  Types written to %s%s\n", cBold, cGreen, filepath.Join(root, ".krate", "types"), cReset)
 }

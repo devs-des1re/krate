@@ -1,4 +1,4 @@
-import { defineConfig, docs, sitemap } from '@krate/core';
+import { defineConfig, defineContent, docs, sitemap } from '@krate/core';
 import demoPlugin from './plugins/krate-plugin-demo';
 import { baseDocsTheme } from '@krate/base-docs-theme';
 
@@ -57,4 +57,20 @@ export default defineConfig({
   rewrites: [
     { source: "/help/:path*", destination: "/about" },
   ],
+  // Typed content collections: entries under src/content/blog are validated
+  // against this schema and typed in .krate/types/content.d.ts.
+  content: defineContent({
+    blog: {
+      dir: 'src/content/blog',
+      schema: {
+        title: 'string',
+        description: 'string',
+        date: 'date',
+        author: 'string',
+        tags: 'string[]',
+        draft: 'boolean',
+        order: { type: 'number', required: true },
+      },
+    },
+  }),
 });

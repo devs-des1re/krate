@@ -187,6 +187,11 @@ type Config struct {
 	// Runtime directories: all components in these dirs are treated as @runtime.
 	// Paths are relative to project root (e.g. "src/components/runtime").
 	RuntimeDirs []string `json:"runtimeDirs,omitempty"`
+
+	// Content declares typed content collections (`content: defineContent({...})`
+	// or a plain object). Each key is a collection name mapping to a `dir` and
+	// a frontmatter `schema`. Krate validates entries and generates types.
+	Content map[string]any `json:"content,omitempty"`
 }
 
 func (c *Config) ShouldMinifyHTML() bool { return c.MinifyHTML || c.Minify }

@@ -105,10 +105,31 @@ func (p *configParser) parseKey() (string, error) {
 	if t.Kind == lexer.String {
 		return t.Value, nil
 	}
-	if t.Kind == lexer.Identifier {
+	// Accept identifiers AND reserved words used as property names (e.g.
+	// `type`, `default`, `class`). Any token whose value is a valid identifier
+	// is a valid unquoted object key in JS/TS.
+	if isIdentifierName(t.Value) {
 		return t.Value, nil
 	}
 	return "", fmt.Errorf("expected property key (identifier or string), got %q at line %d", t.Value, t.Line)
+}
+
+// isIdentifierName reports whether s is a valid JS identifier (ASCII subset),
+// used to accept reserved words as object keys.
+func isIdentifierName(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i, r := range s {
+		switch {
+		case r == '_' || r == '$':
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z':
+		case i > 0 && r >= '0' && r <= '9':
+		default:
+			return false
+		}
+	}
+	return true
 }
 
 func (p *configParser) parseValue() (interface{}, error) {
@@ -477,6 +498,12 @@ func applyConfigProp(cfg *Config, key string, val interface{}) error {
 			}
 			cfg.Rewrites = append(cfg.Rewrites, rw)
 		}
+	case "content":
+		m, ok := val.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("expected object, got %T", val)
+		}
+		cfg.Content = m
 	default:
 		// Unknown config keys are silently ignored for forward compatibility
 	}

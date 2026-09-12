@@ -173,6 +173,27 @@ Path aliases are also read automatically from `tsconfig.json`
 (`compilerOptions.paths` and `baseUrl`) — e.g. `@/components/Button` →
 `src/components/Button`.
 
+## Content collections
+
+```typescript
+content: {
+  blog: {
+    dir: "src/content/blog",              // default: src/content/<name>
+    schema: {
+      title: "string",
+      order: { type: "number", required: true },
+      tags: "string[]",
+    },
+  },
+},
+```
+
+`content` may be a plain object or `defineContent({...})` (an optional identity
+helper for editor assistance). Entries under each `dir` are validated against
+the schema; violations fail the build. Types are generated into
+`.krate/types/content.d.ts`. See
+[Typed Routes & Content](/docs/features/typed-routes/).
+
 ## Validation
 
 ```typescript

@@ -102,6 +102,55 @@ func TestExportFunction(t *testing.T) {
 	}
 }
 
+// TestExportDefaultExpression verifies `export default <expression>` (object,
+// call, literal) is parsed rather than silently dropped. Regression: the
+// parser only handled identifiers/functions, so `export default defineContent({...})`
+// vanished and config descriptors were lost.
+func TestExportDefaultExpression(t *testing.T) {
+	cases := []string{
+		`export default { a: 1, b: { c: "x" } };`,
+		`export default defineContent({ blog: { dir: "content/blog" } });`,
+		`export default 42;`,
+	}
+	for _, src := range cases {
+		prog, errs := parse(t, src)
+		if len(errs) > 0 {
+			t.Fatalf("parse %q: unexpected errors: %v", src, errs)
+		}
+		exp, ok := prog.Body[0].(*ast.ExportStmt)
+		if !ok {
+			t.Fatalf("parse %q: expected ExportStmt, got %T", src, prog.Body[0])
+		}
+		if !exp.Default {
+			t.Errorf("parse %q: expected default export", src)
+		}
+		if exp.Declaration == nil {
+			t.Errorf("parse %q: expected declaration, got nil", src)
+		}
+	}
+}
+
+// TestExportDefaultIdentifier verifies a bare identifier default is recorded as
+// Local (not a declaration), preserving component resolution.
+func TestExportDefaultIdentifier(t *testing.T) {
+	prog, errs := parse(t, `function App() {} export default App;`)
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	var exp *ast.ExportStmt
+	for _, s := range prog.Body {
+		if e, ok := s.(*ast.ExportStmt); ok {
+			exp = e
+		}
+	}
+	if exp == nil {
+		t.Fatal("expected ExportStmt")
+	}
+	if exp.Local != "App" {
+		t.Errorf("expected Local=App, got %q", exp.Local)
+	}
+}
+
 func TestImport(t *testing.T) {
 	prog, errs := parse(t, `import { foo as bar } from "./utils";`)
 	if len(errs) > 0 {

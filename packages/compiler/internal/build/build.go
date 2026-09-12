@@ -548,6 +548,25 @@ func (b *Builder) BuildAll() error {
 		fmt.Fprintf(os.Stderr, "  %sWarning: failed to write manifest:%s %v\n", cYellow, cReset, err)
 	}
 
+	// Generate typed route declarations (.krate/types/routes.d.ts + bridge).
+	// Warnings only — type generation must never fail a build.
+	if err := b.writeRouteTypes(results); err != nil {
+		fmt.Fprintf(os.Stderr, "  %sWarning: failed to generate route types:%s %v\n", cYellow, cReset, err)
+	}
+
+	// Validate content collections and generate content types. Schema
+	// violations are build errors (they indicate a content bug); missing or
+	// unreadable config/IO problems are warnings.
+	cres := b.writeContentTypes()
+	for _, w := range cres.Warnings {
+		fmt.Fprintf(os.Stderr, "  %sWarning: content types:%s %v\n", cYellow, cReset, w)
+	}
+	for _, ve := range cres.Validation {
+		fmt.Fprintf(os.Stderr, "  %sContent error:%s %v\n", cRed, cReset, ve)
+		failureMessages = append(failureMessages, "  content: "+ve.Error())
+		errorCount++
+	}
+
 	// Report SSR/ISR page count
 	ssrCount, isrCount, streamingCount := 0, 0, 0
 	for _, r := range results {

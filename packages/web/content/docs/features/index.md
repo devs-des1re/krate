@@ -26,6 +26,7 @@ A tour of the features that ship with Krate beyond the core compiler.
 | [Environment Variables](/docs/features/environment-variables/) | `.env` files, precedence, `process.env` in server contexts |
 | [Analytics](/docs/features/analytics/) | Snippets via `<Head>`/`<Script>` + the SPA route-change hook |
 | [HTTP Headers](/docs/features/http-headers/) | Middleware headers, automatic cache/security headers, ISR `Cache-Control` |
+| [Typed Routes & Content](/docs/features/typed-routes/) | Generated `.d.ts` for routes, params, and content collections |
 
 Also see the [component library](/docs/reference/component-library/), a
 shadcn/ui-style set of components built on the runtime.

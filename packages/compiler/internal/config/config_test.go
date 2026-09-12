@@ -295,6 +295,34 @@ func TestParseTSConfigRewrites(t *testing.T) {
 	}
 }
 
+func TestParseTSConfigContent(t *testing.T) {
+	src := `export default {
+		content: {
+			blog: {
+				dir: "src/content/blog",
+				schema: { title: "string", order: { type: "number", required: true } },
+			},
+		},
+	}`
+	cfg := &Config{}
+	if err := parseTSConfig(src, cfg); err != nil {
+		t.Fatalf("parseTSConfig: %v", err)
+	}
+	if cfg.Content == nil {
+		t.Fatal("expected content config")
+	}
+	blog, ok := cfg.Content["blog"].(map[string]interface{})
+	if !ok {
+		t.Fatalf("expected blog collection, got %T", cfg.Content["blog"])
+	}
+	if blog["dir"] != "src/content/blog" {
+		t.Errorf("dir = %v", blog["dir"])
+	}
+	if _, ok := blog["schema"].(map[string]interface{}); !ok {
+		t.Errorf("schema should be an object, got %T", blog["schema"])
+	}
+}
+
 func TestParseTSConfigSSR(t *testing.T) {
 	src := `export default {
 		ssr: {

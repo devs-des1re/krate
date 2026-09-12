@@ -1,4 +1,28 @@
 declare global {
+  /**
+   * Extension point for Krate-generated types. `krate build` writes
+   * `krate-env.d.ts`, which augments these interfaces with the project's
+   * routes and content collections (see `.krate/types/`).
+   *
+   * `TypedRoutes` is intentionally empty by default so the runtime type-checks
+   * with no generated files present.
+   */
+  namespace Krate {
+    interface TypedRoutes {}
+  }
+
+  /**
+   * A navigation target. When the project has generated route types,
+   * `Krate.TypedRoutes.href` is a union of its routes, which gives `<Link href>`
+   * and `<a href>` autocomplete. `string` is always accepted so arbitrary URLs
+   * (external, query strings, hashes) keep working.
+   */
+  type KrateHref = Krate.TypedRoutes extends { href: infer H }
+    ? H extends string
+      ? H | (string & {})
+      : string
+    : string;
+
   namespace JSX {
     interface Element extends Node {}
     interface ElementChildrenAttribute { children: {} }
@@ -233,7 +257,7 @@ declare global {
 
     interface AnchorHTMLAttributes extends HTMLAttributes {
       download?: string;
-      href?: string;
+      href?: KrateHref;
       hrefLang?: string;
       media?: string;
       ping?: string;
@@ -1012,7 +1036,7 @@ declare global {
     }
 
     interface LinkProps extends AnchorHTMLAttributes {
-      href: string;
+      href: KrateHref;
       className?: string;
       external?: boolean;
       children?: any;

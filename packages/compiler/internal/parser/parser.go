@@ -688,6 +688,16 @@ func (p *Parser) parseExport() ast.Stmt {
 		}
 		p.match(lexer.SEMI)
 	case lexer.LBRACE:
+		if exp.Default {
+			// `export default { ... }` is an object-literal expression, not a
+			// named re-export. Fall through to expression parsing below.
+			expr := p.parseExpr(precLowest)
+			if expr != nil {
+				exp.Declaration = &ast.ExprStmt{Expression: expr}
+			}
+			p.match(lexer.SEMI)
+			break
+		}
 		// export { name } from 'source' — named re-export
 		names := p.parseExportNames()
 		if p.match(lexer.From) && p.peek().Kind == lexer.String {
@@ -696,7 +706,24 @@ func (p *Parser) parseExport() ast.Stmt {
 		}
 		p.match(lexer.SEMI)
 	default:
-		if isIdentifierToken(p.peek().Kind) {
+		if exp.Default {
+			// `export default <expression>` — object/call/literal/JSX/identifier.
+			// Previously non-identifier expression defaults were dropped
+			// silently; represent them as an ExprStmt so config descriptors
+			// (e.g. `export default defineContent({...})`) survive parsing.
+			// A bare identifier is recorded as Local so the annotator can
+			// resolve the default component name.
+			if p.peek().Kind == lexer.EOF {
+				break
+			}
+			expr := p.parseExpr(precLowest)
+			if id, ok := expr.(*ast.Identifier); ok {
+				exp.Local = id.Name
+			} else if expr != nil {
+				exp.Declaration = &ast.ExprStmt{Expression: expr}
+			}
+			p.match(lexer.SEMI)
+		} else if isIdentifierToken(p.peek().Kind) {
 			exp.Local = p.next().Value
 			p.match(lexer.SEMI)
 		} else {

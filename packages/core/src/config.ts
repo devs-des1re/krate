@@ -186,6 +186,19 @@ export interface KrateConfig {
   pathAliases?: Record<string, string[]>;
   tsBaseDir?: string;
 
+  /**
+   * Typed content collections. Either a plain object or `defineContent({...})`:
+   *
+   * ```ts
+   * export default defineConfig({
+   *   content: defineContent({
+   *     blog: { dir: "src/content/blog", schema: { title: "string" } },
+   *   }),
+   * });
+   * ```
+   */
+  content?: ContentConfig;
+
   /** Optional validation function called at build time with the loaded config. */
   validate?: (config: KrateConfig) => void | Promise<void>;
 }
@@ -211,4 +224,66 @@ export function sitemap(options: SitemapPluginOptions): PluginConfig {
  */
 export function docs(options: DocsPluginOptions = {}): PluginConfig {
   return { name: "docs", order: 10, options };
+}
+
+// ─── Content collections ─────────────────────────────────────────────────────
+
+/** Shorthand field types accepted in a collection schema. */
+export type ContentFieldType =
+  | "string"
+  | "number"
+  | "boolean"
+  | "string[]"
+  | "number[]"
+  | "date";
+
+/** Object form of a schema field. */
+export interface ContentField {
+  type: ContentFieldType;
+  /** Require the field to be present in frontmatter (default: false). */
+  required?: boolean;
+}
+
+/** One field: a shorthand type string or a {@link ContentField} object. */
+export type ContentFieldSpec = ContentFieldType | ContentField;
+
+/** A single content collection. */
+export interface ContentCollection {
+  /** Directory containing the collection's markdown/mdx entries, relative to
+   * the project root (default: `src/content/<name>`). */
+  dir?: string;
+  /** Frontmatter schema; each key maps to a field spec. */
+  schema?: Record<string, ContentFieldSpec>;
+}
+
+/** The shape passed to {@link defineContent}. */
+export type ContentConfig = Record<string, ContentCollection>;
+
+/**
+ * Define typed content collections. Optional identity helper — you can also
+ * pass a plain object to `defineConfig({ content: {...} })`; it exists purely
+ * for type-checking and editor assistance.
+ *
+ * Krate validates each entry's frontmatter against the schema at build time and
+ * generates typed declarations (`.krate/types/content.d.ts`).
+ *
+ * ```ts
+ * import { defineConfig, defineContent } from "@krate/core";
+ *
+ * export default defineConfig({
+ *   content: defineContent({
+ *     blog: {
+ *       dir: "src/content/blog",
+ *       schema: {
+ *         title: "string",
+ *         order: { type: "number", required: true },
+ *         tags: "string[]",
+ *       },
+ *     },
+ *   }),
+ * });
+ * ```
+ */
+export function defineContent(config: ContentConfig): ContentConfig {
+  return config;
 }
