@@ -16,6 +16,10 @@ type Manifest struct {
 	RuntimeComponents []RuntimeComponentMeta `json:"runtimeComponents,omitempty"` // runtime server components
 	// Regions maps each server-rendered page route to its dynamic regions.
 	Regions map[string][]RegionMeta `json:"regions,omitempty"`
+	// StaticOnlyRoutes lists dynamic route patterns (e.g. "/blog/[slug]") whose
+	// parameters are closed — the server must 404 for params not baked at build
+	// time. Populated from `output: "static"` or `dynamicParams = false`.
+	StaticOnlyRoutes []string `json:"staticOnlyRoutes,omitempty"`
 }
 
 // RuntimeComponentMeta describes a compiled runtime component bundle.
@@ -57,10 +61,12 @@ func BuildManifest(results []*PageResult, cssFile string, runtimeJS string) *Man
 			continue
 		}
 		meta := PageMeta{
-			Route:      routeFromOutName(r.OutName),
-			Source:     r.SourcePath,
-			Mode:       r.Mode,
-			Revalidate: r.Revalidate,
+			Route:         routeFromOutName(r.OutName),
+			Source:        r.SourcePath,
+			Mode:          r.Mode,
+			Revalidate:    r.Revalidate,
+			DynamicParams: r.DynamicParams,
+			StaticOnly:    r.StaticOnly,
 		}
 		m.Pages = append(m.Pages, meta)
 		m.Routes[meta.Route] = meta

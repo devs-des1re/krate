@@ -64,6 +64,12 @@ type Bundler struct {
 	runtimeComponents []string
 	serverDirs        []string
 	runtimeDirs       []string
+
+	// virtualModules maps a bare import specifier (e.g. "krate/content") to a
+	// generated file path on disk. Krate codegens these (content collections,
+	// route manifests) so pages can import build-time data without a real
+	// package on disk.
+	virtualModules map[string]string
 }
 
 // assetExtensions are file extensions that get copied to /assets/ with a
@@ -96,12 +102,25 @@ var reactNames = map[string]string{
 
 func New(root string) *Bundler {
 	return &Bundler{
-		root:       root,
-		seen:       make(map[string]bool),
-		assets:     make(map[string]string),
-		workers:    make(map[string]string),
-		workerEsm:  make(map[string]bool),
-		dynImports: make(map[string]string),
+		root:           root,
+		seen:           make(map[string]bool),
+		assets:         make(map[string]string),
+		workers:        make(map[string]string),
+		workerEsm:      make(map[string]bool),
+		dynImports:     make(map[string]string),
+		virtualModules: make(map[string]string),
+	}
+}
+
+// SetVirtualModules maps bare import specifiers to generated files on disk.
+// The bundler resolves these before node_modules so codegen'd modules such as
+// `krate/content` can be imported by pages.
+func (b *Bundler) SetVirtualModules(mods map[string]string) {
+	if b.virtualModules == nil {
+		b.virtualModules = make(map[string]string)
+	}
+	for spec, path := range mods {
+		b.virtualModules[spec] = path
 	}
 }
 
@@ -132,8 +151,14 @@ func (b *Bundler) SetServerComponents(server []string, runtime []string, serverD
 	b.runtimeDirs = runtimeDirs
 }
 
-// resolveImportForModule resolves an import, checking path aliases first.
+// resolveImportForModule resolves an import, checking virtual modules and path
+// aliases first.
 func (b *Bundler) resolveImportForModule(importer, imp string) string {
+	if b.virtualModules != nil {
+		if path, ok := b.virtualModules[imp]; ok {
+			return path
+		}
+	}
 	resolved := resolveImport(importer, imp)
 	if resolved != "" {
 		return resolved

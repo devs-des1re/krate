@@ -94,7 +94,7 @@ func TestWriteContentTypesValidatesAndGenerates(t *testing.T) {
 	}
 
 	b := New(root, cfg)
-	res := b.writeContentTypes()
+	res := b.prepareContent()
 	if len(res.Warnings) != 0 {
 		t.Errorf("unexpected warnings: %v", res.Warnings)
 	}

@@ -504,6 +504,12 @@ func applyConfigProp(cfg *Config, key string, val interface{}) error {
 			return fmt.Errorf("expected object, got %T", val)
 		}
 		cfg.Content = m
+	case "output":
+		s, ok := val.(string)
+		if !ok {
+			return fmt.Errorf("expected string, got %T", val)
+		}
+		cfg.Output = s
 	default:
 		// Unknown config keys are silently ignored for forward compatibility
 	}

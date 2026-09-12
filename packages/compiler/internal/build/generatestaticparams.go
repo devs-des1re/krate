@@ -10,7 +10,6 @@ import (
 
 	"github.com/kratejs/krate/packages/compiler/ast"
 	"github.com/kratejs/krate/packages/compiler/internal/annotator"
-	"github.com/kratejs/krate/packages/compiler/internal/bundler"
 	"github.com/kratejs/krate/packages/compiler/internal/environ"
 	"github.com/kratejs/krate/packages/compiler/internal/irtree"
 	"github.com/kratejs/krate/packages/compiler/internal/plugin"
@@ -140,8 +139,10 @@ func hasGenerateStaticParams(prog *ast.Program) bool {
 }
 
 // executeGenerateStaticParams runs the page's generateStaticParams via npx tsx
-// and returns the parsed param combinations.
-func executeGenerateStaticParams(pagePath string, env []string) ([]map[string]string, error) {
+// and returns the parsed param combinations. tsconfig, when non-empty, is the
+// generated `.krate/tsconfig.json` passed to tsx so `krate/content` and the
+// project's path aliases resolve inside the user's module.
+func executeGenerateStaticParams(pagePath string, env []string, tsconfig string) ([]map[string]string, error) {
 	abs, err := filepath.Abs(pagePath)
 	if err != nil {
 		return nil, err
@@ -160,7 +161,7 @@ console.log(JSON.stringify(result));
 		tsexec.ImportPath(abs),
 	)
 
-	output, _, err := tsexec.RunBootstrap("krate-gsp-bootstrap", content, filepath.Dir(abs), 30*time.Second, env)
+	output, _, err := tsexec.RunBootstrapOpts("krate-gsp-bootstrap", content, filepath.Dir(abs), 30*time.Second, env, tsconfig)
 	if err != nil {
 		return nil, fmt.Errorf("generateStaticParams execution: %w", err)
 	}
@@ -222,10 +223,7 @@ func (b *Builder) resolveStaticParamsPages(pages []string) ([]staticParamsPage, 
 		}
 
 		// Bundle the page to check for generateStaticParams
-		bnd := bundler.New(b.Root)
-		bnd.SetEmitReact(b.Cfg.EmitReact)
-		bnd.SetPathAliases(b.cfgPathAliasPrefixes(), b.cfgPathAliasTargets(), b.Cfg.TSBaseDir)
-		bnd.SetServerComponents(b.Cfg.ServerComponents, b.Cfg.RuntimeComponents, b.Cfg.ServerDirs, b.Cfg.RuntimeDirs)
+		bnd := b.newBundler()
 
 		bundle, err := bnd.Bundle(page)
 		if err != nil {
@@ -244,7 +242,7 @@ func (b *Builder) resolveStaticParamsPages(pages []string) ([]staticParamsPage, 
 
 		fmt.Printf("  %s⚡%s generateStaticParams: %s\n", cCyan, cReset, filepath.Base(page))
 
-		paramSets, err := executeGenerateStaticParams(page, environ.KVList(b.Env))
+		paramSets, err := executeGenerateStaticParams(page, environ.KVList(b.Env), b.tsxTsconfig)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("generateStaticParams (%s): %v", filepath.Base(page), err))
 			continue
@@ -284,10 +282,7 @@ func (b *Builder) resolveStaticParamsPages(pages []string) ([]staticParamsPage, 
 // buildStaticParamsPage builds a single page with its params injected into the
 // page component's props (via injectStaticParams).
 func (b *Builder) buildStaticParamsPage(spp staticParamsPage) (*PageResult, string, error) {
-	bnd := bundler.New(b.Root)
-	bnd.SetEmitReact(b.Cfg.EmitReact)
-	bnd.SetPathAliases(b.cfgPathAliasPrefixes(), b.cfgPathAliasTargets(), b.Cfg.TSBaseDir)
-	bnd.SetServerComponents(b.Cfg.ServerComponents, b.Cfg.RuntimeComponents, b.Cfg.ServerDirs, b.Cfg.RuntimeDirs)
+	bnd := b.newBundler()
 
 	bundle, err := bnd.Bundle(spp.PagePath)
 	if err != nil {
@@ -327,6 +322,12 @@ func (b *Builder) buildStaticParamsPage(spp staticParamsPage) (*PageResult, stri
 
 	b.TransformUniversalIcons(entryModule.Program)
 	b.TransformUniversalImages(entryModule.Program)
+	b.FlattenComponentSpreadAttrs(entryModule.Program)
+	// Bind route params (e.g. slug) to their concrete values, then inline
+	// getCollection so `[slug].tsx` pages can look up the matching entry at
+	// build time.
+	substituteParamBindings(entryModule.Program, spp.Params)
+	b.InlineContent(entryModule.Program)
 
 	// ─── New pipeline: Annotate → Build IR → Emit ──────────────────────────
 	ann := annotator.Annotate(entryModule.Program, b.Cfg, spp.PagePath, entryModule.SourceCode)

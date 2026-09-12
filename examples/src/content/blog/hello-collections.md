@@ -11,6 +11,6 @@ order: 1
 # Hello, Collections
 
 This file lives in `src/content/blog` and is validated against the `blog`
-collection schema in `content.config.ts`. Because `order` is required, a build
-fails if this entry omits it — and `.krate/types/content.d.ts` types the entry
-for editors.
+collection schema declared in `krate.config.ts`. Because `order` is required, a
+build fails if this entry omits it — and `getCollection('blog')` reads it with
+full types during the build.

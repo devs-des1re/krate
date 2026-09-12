@@ -172,6 +172,14 @@ type Config struct {
 	SEO         SEOConfig       `json:"seo,omitempty"`         // SEO metadata (baseUrl, siteName, description)
 	Robots      RobotsConfig    `json:"robots,omitempty"`      // robots.txt config
 
+	// Output selects the site output mode. "" (default) allows request-time
+	// rendering (SSR/ISR/streaming + dynamic route fallbacks). "static" makes
+	// the build fully static: dynamic routes render only the params returned by
+	// generateStaticParams, unknown params 404, and SSR/ISR/streaming are
+	// disabled. Per-page `export const dynamicParams = true` can re-enable
+	// dynamic fallback for a specific route.
+	Output string `json:"output,omitempty"`
+
 	// Server components: build-time rendered, no client JS shipped
 	// Can also be marked via // @server directive or *.server.tsx file convention
 	ServerComponents []string `json:"serverComponents,omitempty"`

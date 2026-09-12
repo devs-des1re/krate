@@ -17,6 +17,7 @@ import (
 	"github.com/kratejs/krate/packages/compiler/internal/annotator"
 	"github.com/kratejs/krate/packages/compiler/internal/bundler"
 	"github.com/kratejs/krate/packages/compiler/internal/config"
+	"github.com/kratejs/krate/packages/compiler/internal/content"
 	"github.com/kratejs/krate/packages/compiler/internal/css"
 	"github.com/kratejs/krate/packages/compiler/internal/escape"
 	"github.com/kratejs/krate/packages/compiler/internal/fsutil"
@@ -60,6 +61,17 @@ type PageResult struct {
 	SourcePath       string // relative path to source file
 	ServerBundlePath string // path to server bundle (for SSR/ISR pages)
 
+	// DynamicParams is false when a dynamic route must 404 for params other
+	// than those returned by generateStaticParams.
+	DynamicParams bool
+	// StaticOnly marks a dynamic route template (e.g. blog/[slug].tsx) whose
+	// valid params are closed: the build must not emit its `[param]` fallback
+	// HTML. The concrete generateStaticParams pages are emitted normally.
+	StaticOnly bool
+	// IsDynamicTemplate is true for the canonical `[...]` template page result
+	// (as opposed to the concrete pages expanded from generateStaticParams).
+	IsDynamicTemplate bool
+
 	// Regions lists this page's dynamic regions (Suspense primaries + runtime
 	// components) discovered from the IR tree. Populated for non-SSG pages.
 	Regions []Region
@@ -88,6 +100,29 @@ type Builder struct {
 	// dropping the plugin's contribution and exiting 0.
 	pluginErrs []string
 	pluginMu   sync.Mutex
+
+	// contentMods maps virtual import specifiers (e.g. "krate/content") to the
+	// codegen'd module on disk. Populated by prepareContent before page builds
+	// and installed on every bundler instance.
+	contentMods map[string]string
+
+	// contentCollections maps a collection name to its entries, used to inline
+	// `getCollection("...")` into literal arrays for build-time folding.
+	contentCollections map[string][]content.Entry
+
+	// contentModuleDTS holds ambient `krate/content` declarations, appended to
+	// the generated krate-env.d.ts bridge.
+	contentModuleDTS string
+
+	// tsxTsconfig is the absolute path to the generated `.krate/tsconfig.json`
+	// used by `npx tsx` bootstraps so user source resolves Krate aliases
+	// (krate/content) and the project's own path aliases.
+	tsxTsconfig string
+
+	// staticOnlyRoutes collects dynamic route patterns (e.g. "/blog/[slug]")
+	// whose params are closed, so the manifest and server can 404 unknown params.
+	staticOnlyRoutes []string
+	staticOnlyMu     sync.Mutex
 }
 
 func New(root string, cfg *config.Config) *Builder {
@@ -282,6 +317,15 @@ func (b *Builder) BuildAll() error {
 
 	b.Cfg.Markdown.Root = b.Root
 
+	// Generate `.krate/tsconfig.json` so `npx tsx` bootstraps (config load,
+	// generateStaticParams) resolve `krate/content` and the project's path
+	// aliases. Non-fatal on failure.
+	if tsPath, err := b.writeTsxTsconfig(); err != nil {
+		fmt.Fprintf(os.Stderr, "  %sWarning: failed to write .krate/tsconfig.json:%s %v\n", cYellow, cReset, err)
+	} else {
+		b.tsxTsconfig = tsPath
+	}
+
 	pages, err := findPages(b.Cfg.PagesDir)
 	if err != nil {
 		return fmt.Errorf("finding pages: %w", err)
@@ -338,6 +382,18 @@ func (b *Builder) BuildAll() error {
 		rawCSS string
 		err    error
 		page   string
+	}
+
+	// Prepare content collections before building pages: this validates
+	// frontmatter, emits `.krate/types/content.d.ts`, and codegens the
+	// `krate/content` module pages can import. Schema violations are build
+	// errors (a content bug); IO problems are warnings.
+	cres := b.prepareContent()
+	for _, w := range cres.Warnings {
+		fmt.Fprintf(os.Stderr, "  %sWarning: content:%s %v\n", cYellow, cReset, w)
+	}
+	for _, ve := range cres.Validation {
+		fmt.Fprintf(os.Stderr, "  %sContent error:%s %v\n", cRed, cReset, ve)
 	}
 
 	totalPages := len(pages) + len(routes)
@@ -451,6 +507,30 @@ func (b *Builder) BuildAll() error {
 		}
 	}
 
+	// Static-only dynamic routes: drop their canonical `[param]` fallback
+	// template so the output contains only the concrete pages baked from
+	// generateStaticParams. On a plain static host, any other param therefore
+	// 404s with no server involvement.
+	{
+		filtered := results[:0]
+		var dropped []string
+		for _, r := range results {
+			if r != nil && r.StaticOnly && r.IsDynamicTemplate {
+				pat := routeFromOutName(r.OutName)
+				dropped = append(dropped, pat)
+				b.staticOnlyMu.Lock()
+				b.staticOnlyRoutes = append(b.staticOnlyRoutes, pat)
+				b.staticOnlyMu.Unlock()
+				continue
+			}
+			filtered = append(filtered, r)
+		}
+		results = filtered
+		if len(dropped) > 0 {
+			fmt.Printf("  %s⚡%s Static-only dynamic routes (no fallback template): %s\n", cCyan, cReset, strings.Join(dropped, ", "))
+		}
+	}
+
 	// Write shared runtime chunk only if at least one page needs client JS.
 	// Fully static sites (no signals/handlers anywhere) ship zero JavaScript.
 	anyPageHasJS := false
@@ -523,6 +603,7 @@ func (b *Builder) BuildAll() error {
 		manifestCSS = globalCSS[0]
 	}
 	manifest := BuildManifest(results, manifestCSS, runtimeJS)
+	manifest.StaticOnlyRoutes = append([]string(nil), b.staticOnlyRoutes...)
 
 	// Compile server bundles for SSR/ISR/streaming pages
 	serverBundles := CompileServerBundles(results, b.Root, b.Cfg.OutDir)
@@ -552,19 +633,6 @@ func (b *Builder) BuildAll() error {
 	// Warnings only — type generation must never fail a build.
 	if err := b.writeRouteTypes(results); err != nil {
 		fmt.Fprintf(os.Stderr, "  %sWarning: failed to generate route types:%s %v\n", cYellow, cReset, err)
-	}
-
-	// Validate content collections and generate content types. Schema
-	// violations are build errors (they indicate a content bug); missing or
-	// unreadable config/IO problems are warnings.
-	cres := b.writeContentTypes()
-	for _, w := range cres.Warnings {
-		fmt.Fprintf(os.Stderr, "  %sWarning: content types:%s %v\n", cYellow, cReset, w)
-	}
-	for _, ve := range cres.Validation {
-		fmt.Fprintf(os.Stderr, "  %sContent error:%s %v\n", cRed, cReset, ve)
-		failureMessages = append(failureMessages, "  content: "+ve.Error())
-		errorCount++
 	}
 
 	// Report SSR/ISR page count
@@ -822,11 +890,21 @@ func (b *Builder) cfgPathAliasTargets() [][]string {
 	return targets
 }
 
-func (b *Builder) buildPage(page string) (*PageResult, string, error) {
+// newBundler creates a bundler configured with this build's path aliases,
+// component tiers, and virtual modules (codegen'd `krate/content`).
+func (b *Builder) newBundler() *bundler.Bundler {
 	bnd := bundler.New(b.Root)
 	bnd.SetEmitReact(b.Cfg.EmitReact)
 	bnd.SetPathAliases(b.cfgPathAliasPrefixes(), b.cfgPathAliasTargets(), b.Cfg.TSBaseDir)
 	bnd.SetServerComponents(b.Cfg.ServerComponents, b.Cfg.RuntimeComponents, b.Cfg.ServerDirs, b.Cfg.RuntimeDirs)
+	if b.contentMods != nil {
+		bnd.SetVirtualModules(b.contentMods)
+	}
+	return bnd
+}
+
+func (b *Builder) buildPage(page string) (*PageResult, string, error) {
+	bnd := b.newBundler()
 	bundle, err := bnd.Bundle(page)
 	if err != nil {
 		return nil, "", fmt.Errorf("bundling page %s: %w", page, err)
@@ -887,9 +965,26 @@ func (b *Builder) buildPage(page string) (*PageResult, string, error) {
 		fmt.Fprintf(os.Stderr, "  %s⚡%s %s → streaming (global override)\n", cCyan, cReset, filepath.Base(page))
 	}
 
+	// Static output mode disables request-time rendering entirely: a page that
+	// would have been SSR/ISR/streaming is downgraded to SSG. Dynamic routes
+	// are additionally closed to the params generateStaticParams returns (see
+	// dynamicParams below).
+	staticMode := strings.EqualFold(b.Cfg.Output, "static")
+	if staticMode && renderMode != RenderSSG {
+		fmt.Fprintf(os.Stderr, "  %s⚡%s %s → ssg (static output mode)\n", cCyan, cReset, filepath.Base(page))
+		renderMode = RenderSSG
+	}
+
+	isDynRoute := isDynamicRoute(page, b.Cfg.PagesDir)
+	allowDynamic := dynamicParamsAllowed(entryModule.Program, staticMode)
+	// A dynamic route is "static only" when it must not be served for
+	// arbitrary params. Only meaningful for dynamic routes.
+	staticOnly := isDynRoute && !allowDynamic
+
 	b.TransformUniversalIcons(entryModule.Program)
 	b.TransformUniversalImages(entryModule.Program)
 	b.FlattenComponentSpreadAttrs(entryModule.Program)
+	b.InlineContent(entryModule.Program)
 
 	// ─── New pipeline: Annotate → Build IR → Emit ──────────────────────────
 	// Transform <Icon>/<Image> in imported component modules too. These are
@@ -903,6 +998,7 @@ func (b *Builder) buildPage(page string) (*PageResult, string, error) {
 		b.TransformUniversalIcons(mp.Program)
 		b.TransformUniversalImages(mp.Program)
 		b.FlattenComponentSpreadAttrs(mp.Program)
+		b.InlineContent(mp.Program)
 	}
 	annotator.MergeModuleFunctions(ann, extraPrograms)
 	annotator.MergeImportAliases(ann, extraPrograms, annotator.ModuleSource{Program: entryModule.Program, Path: entryModule.Path, RawSource: entryModule.SourceCode})
@@ -993,6 +1089,35 @@ func (b *Builder) buildPage(page string) (*PageResult, string, error) {
 
 	outName := pageToOutput(page, b.Cfg.PagesDir)
 	pageDir := filepath.Join(b.Cfg.OutDir, outName)
+	pageBase := strings.TrimSuffix(filepath.Base(page), filepath.Ext(page))
+	relSrc, _ := filepath.Rel(b.Root, page)
+
+	// A static-only dynamic route has no fallback template: skip all page-dir
+	// output for the canonical `[param]` result. Concrete pages expanded from
+	// generateStaticParams are built separately and write normally.
+	if staticOnly {
+		b.recordDeps(page, deps)
+		return &PageResult{
+			Page:              page,
+			OutName:           outName,
+			HTML:              emitResult.HTML,
+			HeadHTML:          emitResult.HeadHTML,
+			ScriptHTML:        emitResult.ScriptHTML,
+			StyleHTML:         emitResult.StyleHTML,
+			HasCSS:            bundle.CSS != "",
+			IsErrorPage:       pageBase == "404" || pageBase == "500",
+			CSS:               bundle.CSS,
+			UsedCSS:           emitResult.UsedCSS,
+			UsedFuncs:         emitResult.UsedFuncs,
+			Mode:              renderMode,
+			Revalidate:        revalidate,
+			SourcePath:        relSrc,
+			Regions:           regions,
+			DynamicParams:     allowDynamic,
+			StaticOnly:        true,
+			IsDynamicTemplate: true,
+		}, bundle.CSS, nil
+	}
 
 	if err := os.MkdirAll(pageDir, 0755); err != nil {
 		return nil, "", fmt.Errorf("creating page dir: %w", err)
@@ -1044,8 +1169,6 @@ func (b *Builder) buildPage(page string) (*PageResult, string, error) {
 	loadingHTML := b.renderLoadingComponent(page)
 
 	// Return data structures without triggering an intermediate disk write
-	pageBase := strings.TrimSuffix(filepath.Base(page), filepath.Ext(page))
-	relSrc, _ := filepath.Rel(b.Root, page)
 	return &PageResult{
 		Page:        page,
 		OutName:     outName,
@@ -1067,6 +1190,10 @@ func (b *Builder) buildPage(page string) (*PageResult, string, error) {
 		Revalidate: revalidate,
 		SourcePath: relSrc,
 		Regions:    regions,
+
+		DynamicParams:     allowDynamic,
+		StaticOnly:        staticOnly,
+		IsDynamicTemplate: isDynRoute,
 	}, bundle.CSS, nil
 }
 
@@ -1171,10 +1298,7 @@ func (b *Builder) executeLayoutPipeline(layoutPath string, content string, props
 		}
 	}
 
-	bnd := bundler.New(b.Root)
-	bnd.SetEmitReact(b.Cfg.EmitReact)
-	bnd.SetPathAliases(b.cfgPathAliasPrefixes(), b.cfgPathAliasTargets(), b.Cfg.TSBaseDir)
-	bnd.SetServerComponents(b.Cfg.ServerComponents, b.Cfg.RuntimeComponents, b.Cfg.ServerDirs, b.Cfg.RuntimeDirs)
+	bnd := b.newBundler()
 	layoutBundle, err := bnd.Bundle(layoutPath)
 	if err != nil {
 		return nil, "", fmt.Errorf("bundling layout %s: %w", layoutPath, err)
@@ -1318,10 +1442,7 @@ func (b *Builder) renderLoadingComponent(pagePath string) string {
 		}
 	}
 
-	bnd := bundler.New(b.Root)
-	bnd.SetEmitReact(b.Cfg.EmitReact)
-	bnd.SetPathAliases(b.cfgPathAliasPrefixes(), b.cfgPathAliasTargets(), b.Cfg.TSBaseDir)
-	bnd.SetServerComponents(b.Cfg.ServerComponents, b.Cfg.RuntimeComponents, b.Cfg.ServerDirs, b.Cfg.RuntimeDirs)
+	bnd := b.newBundler()
 	bundle, err := bnd.Bundle(loadingPath)
 	if err != nil {
 		return ""

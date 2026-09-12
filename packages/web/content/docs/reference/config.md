@@ -194,6 +194,18 @@ the schema; violations fail the build. Types are generated into
 `.krate/types/content.d.ts`. See
 [Typed Routes & Content](/docs/features/typed-routes/).
 
+## Output mode
+
+```typescript
+output: "static",   // default: request-time rendering allowed
+```
+
+`"static"` makes the build fully static: dynamic routes only render the params
+returned by `generateStaticParams` (unknown params 404), and SSR/ISR/streaming
+are disabled. Individual pages can re-enable dynamic params with
+`export const dynamicParams = true`. See
+[Static output & dynamic params](/docs/features/typed-routes/#static-output--dynamic-params).
+
 ## Validation
 
 ```typescript

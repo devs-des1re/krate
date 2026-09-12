@@ -38,7 +38,7 @@ func GenerateTypes(root string, cfg *config.Config) []error {
 	if err := b.writeRouteTypes(results); err != nil {
 		errs = append(errs, err)
 	}
-	cres := b.writeContentTypes()
+	cres := b.prepareContent()
 	errs = append(errs, cres.Warnings...)
 	errs = append(errs, cres.Validation...)
 	if len(errs) == 0 {
@@ -103,6 +103,7 @@ func (b *Builder) writeRouteTypes(results []*PageResult) error {
 		contentSpec = relImportSpec(bridgePath, filepath.Join(typesDir, "content.d.ts"))
 	}
 	bridge := routetypes.Bridge(routesSpec, contentSpec)
+	bridge += b.contentModuleDTS
 	if err := os.WriteFile(bridgePath, []byte(bridge), 0644); err != nil {
 		return fmt.Errorf("writing %s: %w", bridgePath, err)
 	}

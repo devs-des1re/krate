@@ -586,6 +586,10 @@ func serve(root string, cfg *config.Config, reload <-chan []string, startTime ti
 	fileServer := http.FileServer(http.Dir(absOut))
 	mux := http.NewServeMux()
 
+	// Load the build manifest to learn which dynamic routes are closed
+	// (static-only: unknown params must 404, not serve the [param] template).
+	staticOnlyRoutes := loadStaticOnlyRoutes(absOut)
+
 	// Load embedded API route runtime if configured (default: quickjs)
 	var apiRT *jsruntime.APIRouteRuntime
 	apiRTOption := strings.ToLower(cfg.SSR.APIRuntime)
@@ -695,6 +699,11 @@ func serve(root string, cfg *config.Config, reload <-chan []string, startTime ti
 		if !staticRouteExists(absOut, r.URL.Path) {
 			// Check dynamic routes — if a URL matches a [param] pattern, serve the template
 			for _, dr := range dynRoutes {
+				if staticOnlyRoutes[normalizeRoutePattern(dr.pattern)] {
+					// Static-only route: valid params were baked at build time and
+					// the fallback template was not emitted. Unknown params 404.
+					continue
+				}
 				if params, ok := matchDynamicRoute(r.URL.Path, dr.pattern); ok {
 					templatePath := filepath.Join(dr.dir, "index.html")
 					templateHTML, err := os.ReadFile(templatePath)
@@ -1357,6 +1366,41 @@ func shouldServeStatic(absOut, urlPath string, page *ManifestPage) bool {
 type dynamicRoute struct {
 	pattern string // e.g. "video/[id]"
 	dir     string // absolute path to the directory, e.g. dist/video/[id]
+}
+
+// loadStaticOnlyRoutes reads dist/manifest.json and returns the set of dynamic
+// route patterns whose params are closed (static-only). Keys are normalized
+// ("/blog/[slug]" and "blog/[slug]" are equivalent).
+func loadStaticOnlyRoutes(absOut string) map[string]bool {
+	out := map[string]bool{}
+	data, err := os.ReadFile(filepath.Join(absOut, "manifest.json"))
+	if err != nil {
+		return out
+	}
+	var m Manifest
+	if err := json.Unmarshal(data, &m); err != nil {
+		return out
+	}
+	for _, r := range m.StaticOnlyRoutes {
+		out[normalizeRoutePattern(r)] = true
+	}
+	return out
+}
+
+// normalizeRoutePattern canonicalizes a route/pattern for comparison: leading
+// slash, no trailing slash.
+func normalizeRoutePattern(p string) string {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return "/"
+	}
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	if len(p) > 1 {
+		p = strings.TrimRight(p, "/")
+	}
+	return p
 }
 
 // findDynamicRoutes scans the output directory for directories containing [param]

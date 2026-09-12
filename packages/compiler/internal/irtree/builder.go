@@ -4928,6 +4928,11 @@ func evalConstWithSignals(expr ast.Expr, signals map[string]ast.Expr, props map[
 		if v, ok := resolveMemberChainValue(e, props); ok {
 			return v
 		}
+		// Member reads on an object literal (e.g. a list item substituted from a
+		// content-collection entry: post.data.title) fold through the literal.
+		if v, ok := resolveMemberOnLiteral(e, signals, props); ok {
+			return v
+		}
 		if id, ok := e.Object.(*ast.Identifier); ok && id.Name == "props" {
 			if prop, ok := e.Property.(*ast.Identifier); ok {
 				if v, ok := props[prop.Name]; ok {
@@ -5039,10 +5044,83 @@ func resolveMemberChainValue(expr ast.Expr, props map[string]string) (string, bo
 	return v, true
 }
 
-// operandLeaks reports whether a binary-operand expression contains an
-// unresolvable identifier/call that would leak a name or "" into a stringified
-// result. Missing props (props.X) resolve to "" which is a legitimate falsy
-// value, so those do NOT count as leaks.
+// resolveMemberOnLiteral folds a member chain against an object/array literal
+// expression. It handles reads like `post.data.title` where `post` is an
+// object literal (e.g. a list item substituted from a content-collection
+// entry), plus `.length` on array literals. Returns (value, true) when the
+// whole chain resolves.
+func resolveMemberOnLiteral(expr *ast.MemberExpr, signals map[string]ast.Expr, props map[string]string) (string, bool) {
+	// Collect the property chain (innermost first) and the base expression.
+	var names []string
+	var cur ast.Expr = expr
+	for {
+		mem, ok := cur.(*ast.MemberExpr)
+		if !ok {
+			break
+		}
+		pid, ok := mem.Property.(*ast.Identifier)
+		if !ok {
+			return "", false
+		}
+		names = append(names, pid.Name)
+		cur = mem.Object
+	}
+	if len(names) == 0 {
+		return "", false
+	}
+
+	// Resolve the base: an object/array literal, or a signal/local binding
+	// whose value is one.
+	base := cur
+	switch b := cur.(type) {
+	case *ast.Identifier:
+		if initial, ok := signals[b.Name]; ok {
+			base = initial
+		} else if v, ok := props[b.Name]; ok {
+			if lit := constSourceToAST(v); lit != nil {
+				base = lit
+			} else {
+				return "", false
+			}
+		} else {
+			return "", false
+		}
+	case *ast.ObjectExpr, *ast.ArrayExpr:
+		// use as-is
+	default:
+		return "", false
+	}
+
+	// Walk outer→inner is not needed; names are innermost-first, so reverse to
+	// resolve outermost property first.
+	for i := len(names) - 1; i >= 0; i-- {
+		name := names[i]
+		if name == "length" {
+			if n, ok := constLength(base); ok {
+				base = &ast.Literal{Kind: ast.NumberLit, Value: strconv.Itoa(n)}
+				continue
+			}
+			return "", false
+		}
+		obj, ok := base.(*ast.ObjectExpr)
+		if !ok {
+			return "", false
+		}
+		var found bool
+		for _, p := range obj.Properties {
+			if p.Spread || p.Key != name || p.Value == nil {
+				continue
+			}
+			base = p.Value
+			found = true
+			break
+		}
+		if !found {
+			return "", false
+		}
+	}
+	return evalConstWithSignals(base, signals, props), true
+}
 func operandLeaks(expr ast.Expr, signals map[string]ast.Expr, props map[string]string) bool {
 	switch e := expr.(type) {
 	case *ast.Identifier:

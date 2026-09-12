@@ -108,7 +108,7 @@ export function generateStaticParams() {
 		t.Fatal(err)
 	}
 
-	paramSets, err := executeGenerateStaticParams(pagePath, nil)
+	paramSets, err := executeGenerateStaticParams(pagePath, nil, "")
 	if err != nil {
 		t.Fatalf("executeGenerateStaticParams: %v", err)
 	}

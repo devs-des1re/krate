@@ -187,6 +187,15 @@ export interface KrateConfig {
   tsBaseDir?: string;
 
   /**
+   * Output mode. Default (`undefined`) allows request-time rendering
+   * (SSR/ISR/streaming and dynamic route fallbacks). `"static"` produces a
+   * fully static build: dynamic routes render only the params returned by
+   * `generateStaticParams`, unknown params 404, and SSR/ISR/streaming are
+   * disabled. A page can opt back in with `export const dynamicParams = true`.
+   */
+  output?: "static";
+
+  /**
    * Typed content collections. Either a plain object or `defineContent({...})`:
    *
    * ```ts

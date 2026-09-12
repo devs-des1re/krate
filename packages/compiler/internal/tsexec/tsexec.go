@@ -34,6 +34,14 @@ func ImportPath(abs string) string {
 // script's stdout and stderr separately, plus a descriptive error (including
 // stderr and timeout detection) when execution fails.
 func RunBootstrap(name, content, cwd string, timeout time.Duration, env []string) (stdout []byte, stderr string, err error) {
+	return RunBootstrapOpts(name, content, cwd, timeout, env, "")
+}
+
+// RunBootstrapOpts is RunBootstrap with an optional tsconfig path passed to tsx
+// via `--tsconfig`. This lets Krate-provided module aliases (e.g.
+// `krate/content` -> a codegen'd module) resolve inside bootstraps that import
+// user source, since tsx honors compilerOptions.paths.
+func RunBootstrapOpts(name, content, cwd string, timeout time.Duration, env []string, tsconfig string) (stdout []byte, stderr string, err error) {
 	buf := make([]byte, 8)
 	rand.Read(buf)
 	suffix := hex.EncodeToString(buf)
@@ -47,7 +55,12 @@ func RunBootstrap(name, content, cwd string, timeout time.Duration, env []string
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
-	cmd := exec.CommandContext(ctx, "npx", "--yes", "tsx", path)
+	args := []string{"--yes", "tsx"}
+	if tsconfig != "" {
+		args = append(args, "--tsconfig", tsconfig)
+	}
+	args = append(args, path)
+	cmd := exec.CommandContext(ctx, "npx", args...)
 	cmd.Dir = cwd
 	if len(env) > 0 {
 		cmd.Env = append(os.Environ(), env...)
