@@ -47,7 +47,7 @@ export default function Home() {
         </a>
         <a class="feature-card" href="/docs/features/plugins/">
           <h3>Plugin system</h3>
-          <p>Go hooks plus community plugins written in JavaScript, executed inside an embedded QuickJS runtime.</p>
+          <p>Native plugins compiled with Go, or plugins written in JavaScript, executed inside an embedded QuickJS runtime.</p>
         </a>
         <a class="feature-card" href="/docs/features/search/">
           <h3>WASM-powered search</h3>
