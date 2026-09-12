@@ -46,6 +46,9 @@ jobs:
         run: go build ./...
         working-directory: packages/compiler
 
+      - name: Build JS packages
+        run: pnpm -r --filter '!@krate/web' --filter '!@krate/benchmark' build
+
       - name: Go vet
         run: go vet ./...
         working-directory: packages/compiler
@@ -53,9 +56,6 @@ jobs:
       - name: Go test
         run: go test ./...
         working-directory: packages/compiler
-
-      - name: Build JS packages
-        run: pnpm -r --filter '!@krate/web' --filter '!@krate/benchmark' build
 
   fuzz:
     name: Fuzz
