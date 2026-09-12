@@ -183,6 +183,18 @@ export function initRouter(): void {
     }
   }
 
+  // Analytics hook: fires once after every successful SPA navigation
+  // (click, prefetch-cache, back/forward, and error-page replacements all flow
+  // through swapContent/replacePage). A throw inside the hook is ignored.
+  function notifyNavigation(url: string): void {
+    try {
+      const hook = (globalThis as any).__krate_onNavigation;
+      if (typeof hook === 'function') hook(url);
+    } catch {
+      /* ignore hook failures */
+    }
+  }
+
   function swapContent(
     html: string,
     url: string,
@@ -288,6 +300,7 @@ export function initRouter(): void {
     updateActiveLinks();
 
     window.dispatchEvent(new CustomEvent('krate:navigate', { detail: { url } }));
+    notifyNavigation(url);
   }
 
   function handleHashScroll(url: string): boolean {
@@ -396,6 +409,7 @@ export function initRouter(): void {
       (globalThis as any).disposeAll();
     }
     history.pushState({}, '', url);
+    notifyNavigation(url);
     document.open();
     document.write(html);
     document.close();
