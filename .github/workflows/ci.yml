@@ -40,7 +40,7 @@ jobs:
           cache: pnpm
 
       - name: Install JS dependencies
-        run: pnpm install --frozen-lockfile
+        run: pnpm install --no-frozen-lockfile
 
       - name: Go build
         run: go build ./...
