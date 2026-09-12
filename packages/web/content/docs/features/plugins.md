@@ -1,6 +1,6 @@
 ---
 title: Plugin System
-order: 5
+order: 6
 ---
 
 # Plugin System

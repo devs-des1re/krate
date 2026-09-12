@@ -1,6 +1,6 @@
 ---
 title: Redirects & Rewrites
-order: 7
+order: 8
 ---
 
 # Redirects & Rewrites
