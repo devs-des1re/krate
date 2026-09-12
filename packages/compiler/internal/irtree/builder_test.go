@@ -413,6 +413,12 @@ func findStaticHTML(children []irtree.SlotNode, pred func(string) bool) bool {
 			if findStaticHTML(n.Consequent, pred) || findStaticHTML(n.Alternate, pred) {
 				return true
 			}
+		case *irtree.ListSlot:
+			for _, item := range n.Items {
+				if findStaticHTML(item.Contents, pred) {
+					return true
+				}
+			}
 		}
 	}
 	return false
@@ -658,6 +664,118 @@ export default function App() {
 	}
 	if !foundRuntime {
 		t.Errorf("expected a nested runtime ComponentSlot in the resolved content, got %#v", susp.Resolved)
+	}
+}
+
+// findConditional reports whether any node in the slot tree is a
+// ConditionalSlot (i.e. a guard that could not be folded at build time).
+func findConditional(children []irtree.SlotNode) bool {
+	for _, child := range children {
+		switch n := child.(type) {
+		case *irtree.ConditionalSlot:
+			return true
+		case *irtree.ComponentSlot:
+			if n.Component != nil && (findConditional(n.Component.Children) || findConditional(n.Component.ReturnSlots)) {
+				return true
+			}
+		case *irtree.SuspenseSlot:
+			if findConditional(n.Resolved) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// TestBuildPropsGuardLengthFolds verifies that guards reading a prop array's
+// `.length` (e.g. `{props.actions && props.actions.length > 0 && <div>…</div>}`)
+// fold at build time so SSR renders the real markup instead of an empty
+// hydration-only ConditionalSlot wrapper. Regression: resolveMemberChainValue
+// could not hop `.length` over a resolved array literal, so the guard leaked
+// and the list content was dropped from SSR.
+func TestBuildPropsGuardLengthFolds(t *testing.T) {
+	tree := annotateAndBuild(t, `function Card(props) {
+	const [n, setN] = createSignal(0);
+	return <section>
+		{props.actions && props.actions.length > 0 && <div class="actions">{props.actions.map((a) => <a class="act" href={a.link}>{a.text}</a>)}</div>}
+		{props.tags && props.tags.length > 0 && <div class="tags">{props.tags.map((tag) => <span class="tag">{tag}</span>)}</div>}
+	</section>;
+}
+export default function App() {
+	return <Card actions={[{text: "Go", link: "/go"}]} tags={["a", "b"]} />;
+}`)
+
+	if !findStaticHTML(tree.Root.Children, func(html string) bool {
+		return strings.Contains(html, `class="act"`) && strings.Contains(html, ">Go</a>")
+	}) {
+		t.Error("expected hero-action-style link from prop array to render in SSR")
+	}
+	if !findStaticHTML(tree.Root.Children, func(html string) bool {
+		return strings.Contains(html, `class="tag"`) && strings.Contains(html, ">a</span>")
+	}) {
+		t.Error("expected tag span from prop array to render in SSR")
+	}
+	if findConditional(tree.Root.Children) {
+		t.Error("expected props `.length` guards to fold statically, got a ConditionalSlot")
+	}
+}
+
+// TestBuildPropsGuardAbsentFolds verifies that a guard on an absent prop
+// (`{props.editUrl && <a/>}`) folds to nothing rather than a ConditionalSlot.
+func TestBuildPropsGuardAbsentFolds(t *testing.T) {
+	tree := annotateAndBuild(t, `function Card(props) {
+	return <section>{props.editUrl && <a class="edit" href={props.editUrl}>Edit</a>}</section>;
+}
+export default function App() {
+	return <Card />;
+}`)
+
+	if findStaticHTML(tree.Root.Children, func(html string) bool {
+		return strings.Contains(html, `class="edit"`)
+	}) {
+		t.Error("expected absent-prop guard to render nothing")
+	}
+	if findConditional(tree.Root.Children) {
+		t.Error("expected absent-prop guard to fold, got a ConditionalSlot")
+	}
+}
+
+// TestBuildNegatedPropGuardFolds verifies that a negated prop guard
+// (`{!props.tocHidden && <aside/>}`) folds to a real boolean. Regression:
+// evalConstWithSignals stringified `!` to "!true", which isTruthyValue treated
+// as truthy, so a hidden TOC still rendered at SSR.
+func TestBuildNegatedPropGuardFolds(t *testing.T) {
+	build := func(t *testing.T, props string) *irtree.ComponentTree {
+		t.Helper()
+		return annotateAndBuild(t, `function Card(props) {
+	const [n, setN] = createSignal(0);
+	return <section>{!props.tocHidden && <aside class="toc">TOC</aside>}</section>;
+}
+export default function App() {
+	return <Card `+props+` />;
+}`)
+	}
+
+	// tocHidden: true → negation false → nothing renders.
+	hidden := build(t, `tocHidden={true}`)
+	if findStaticHTML(hidden.Root.Children, func(html string) bool {
+		return strings.Contains(html, `class="toc"`)
+	}) {
+		t.Error("expected toc to be hidden when tocHidden is true")
+	}
+	if findConditional(hidden.Root.Children) {
+		t.Error("expected negated guard to fold, got a ConditionalSlot")
+	}
+
+	// no tocHidden → undefined is falsy → !undefined is true → TOC renders.
+	visible := build(t, ``)
+	if !findStaticHTML(visible.Root.Children, func(html string) bool {
+		return strings.Contains(html, `class="toc"`)
+	}) {
+		t.Error("expected toc to render when tocHidden is absent")
+	}
+	if findConditional(visible.Root.Children) {
+		t.Error("expected negated guard to fold, got a ConditionalSlot")
 	}
 }
 

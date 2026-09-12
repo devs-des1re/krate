@@ -2199,10 +2199,68 @@ func (b *builder) knownTestValue(test ast.Expr) (string, bool) {
 		}
 	}
 	v := evalConstWithSignals(test, b.sigMap(), b.localProps)
-	if b.testFullyKnown(test) {
+	if b.testFullyKnown(test) || b.propsReadsClosed(test) {
 		return v, true
 	}
 	return v, false
+}
+
+// propsReadsClosed reports whether every leaf of a guard/ternary test is
+// either resolvable at build time or a direct `props.<name>` member read.
+// A component's props are closed at the call site: any name not present in
+// localProps is a definitive undefined, so `{props.optional && <X/>}` folds to
+// nothing instead of degrading to a hydration-only ConditionalSlot.
+func (b *builder) propsReadsClosed(e ast.Expr) bool {
+	switch x := e.(type) {
+	case nil:
+		return true
+	case *ast.Literal:
+		return true
+	case *ast.Identifier:
+		if _, ok := b.sigMap()[x.Name]; ok {
+			return true
+		}
+		if _, ok := b.localProps[x.Name]; ok {
+			return true
+		}
+		if _, ok := b.moduleConsts[x.Name]; ok {
+			return true
+		}
+		return false
+	case *ast.MemberExpr:
+		// A direct props.<name> read is always closed: present in localProps or
+		// a definitive undefined. Function props have no build-time value.
+		if id, ok := x.Object.(*ast.Identifier); ok && id.Name == "props" {
+			if prop, ok := x.Property.(*ast.Identifier); ok {
+				if b.localFuncProps != nil && b.localFuncProps[prop.Name] {
+					return false
+				}
+				return true
+			}
+		}
+		// Deeper chains (props.a.b, props.a.length) are closed only when they
+		// fully const-fold against the call-site props.
+		if _, ok := resolveMemberChainValue(x, b.localProps); ok {
+			return true
+		}
+		return false
+	case *ast.BinaryExpr:
+		return b.propsReadsClosed(x.Left) && b.propsReadsClosed(x.Right)
+	case *ast.UnaryExpr:
+		return b.propsReadsClosed(x.Arg)
+	case *ast.ConditionalExpr:
+		return b.propsReadsClosed(x.Test) && b.propsReadsClosed(x.Consequent) && b.propsReadsClosed(x.Alternate)
+	case *ast.TemplateExpr:
+		for _, p := range x.Parts {
+			if !b.propsReadsClosed(p) {
+				return false
+			}
+		}
+		return true
+	case *ast.TypeAssertion:
+		return b.propsReadsClosed(x.Expr)
+	}
+	return false
 }
 
 func (b *builder) testFullyKnown(e ast.Expr) bool {
@@ -2243,6 +2301,11 @@ func (b *builder) testFullyKnown(e ast.Expr) bool {
 				_, ok := b.localProps[prop.Name]
 				return ok
 			}
+		}
+		// Nested chains rooted at props (props.a.b, props.a.length) are known
+		// whenever the whole chain const-folds against the call-site props.
+		if _, ok := resolveMemberChainValue(x, b.localProps); ok {
+			return true
 		}
 		return false
 	case *ast.BinaryExpr:
@@ -4849,6 +4912,14 @@ func evalConstWithSignals(expr ast.Expr, signals map[string]ast.Expr, props map[
 		}
 	case *ast.UnaryExpr:
 		arg := evalConstWithSignals(e.Arg, signals, props)
+		if e.Op == "!" {
+			// Logical negation must fold to a real boolean; returning "!true"
+			// would stringify to a truthy value and invert the guard at SSR.
+			// Callers only trust this value when testFullyKnown is true, so an
+			// empty arg here means a resolved falsy operand (null/""), not an
+			// unresolved leak.
+			return strconv.FormatBool(!isTruthyValue(arg))
+		}
 		if arg == "" {
 			return ""
 		}
@@ -4938,6 +5009,16 @@ func resolveMemberChainValue(expr ast.Expr, props map[string]string) (string, bo
 	for i := len(names) - 2; i >= 0; i-- {
 		name := names[i]
 		lit := constSourceToAST(v)
+		// `.length` on a resolved array/string literal (e.g. props.tags.length,
+		// props.hero.actions.length) folds to a number so guards like
+		// `{props.x && props.x.length > 0 && ...}` resolve at build time.
+		if name == "length" {
+			if n, ok := constLength(lit); ok {
+				v = strconv.Itoa(n)
+				continue
+			}
+			return "", false
+		}
 		obj, ok := lit.(*ast.ObjectExpr)
 		if !ok {
 			return "", false
@@ -5511,6 +5592,21 @@ func constSourceToAST(v string) ast.Expr {
 		return &ast.Literal{Kind: ast.NumberLit, Value: v}
 	}
 	return &ast.Literal{Kind: ast.StringLit, Value: v}
+}
+
+// constLength returns the `.length` of a resolved const expression: the number
+// of elements for an array literal, or the rune count for a string literal.
+// Returns ok=false for anything else (objects, numbers, unresolved values).
+func constLength(expr ast.Expr) (int, bool) {
+	switch e := expr.(type) {
+	case *ast.ArrayExpr:
+		return len(e.Elements), true
+	case *ast.Literal:
+		if e.Kind == ast.StringLit {
+			return len([]rune(unescapeStringValue(e.Value))), true
+		}
+	}
+	return 0, false
 }
 
 // singleExprFromProgram returns the single expression statement of a program,
