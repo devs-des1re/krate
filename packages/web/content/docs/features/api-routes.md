@@ -1,6 +1,9 @@
 ---
 title: API Routes
 order: 5
+badge:
+  text: New
+  variant: new
 ---
 
 # API Routes

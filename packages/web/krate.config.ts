@@ -32,6 +32,7 @@ export default defineConfig({
       contentDir: "content/docs",
       title: "Krate Docs",
       theme: baseDocsTheme(),
+      editLinkBase: "https://github.com/kratejs/krate/blob/main/packages/web",
       search: {
         enabled: true,
         engine: "docfind",

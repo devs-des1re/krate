@@ -28,6 +28,28 @@ export interface DocsSidebarItem {
   collapsible?: boolean;
   /** Whether the section is expanded for the current page. */
   expanded?: boolean;
+  /** Icon name rendered next to the label (resolved by the theme). */
+  icon?: string;
+  /** Small colored chip rendered next to the label. */
+  badge?: { text: string; variant?: string };
+}
+
+/** Hero block rendered by `template: hero` pages. */
+export interface DocsHero {
+  /** Main hero heading (defaults to the page title). */
+  title?: string;
+  /** Subtitle under the heading. */
+  tagline?: string;
+  /** Optional image/illustration URL. */
+  image?: string;
+  /** Call-to-action buttons. */
+  actions?: { text: string; link: string; variant?: string }[];
+}
+
+/** Page-level head tag emitted from frontmatter `head:`. */
+export interface DocsHeadTag {
+  tag: string;
+  attrs?: Record<string, string | undefined>;
 }
 
 /** Search configuration forwarded to the theme via the layout props. */
@@ -62,10 +84,50 @@ export interface DocsLayoutProps<Options = DocsThemeOptions> {
   socialLinks: { icon?: string; url?: string }[];
   /** Current page path (e.g. "getting-started"). */
   currentPath: string;
+  /** Page description (from frontmatter) for subtitle/meta rendering. */
+  description?: string;
+  /** Page layout template: "doc" (default) or "hero". */
+  template?: "doc" | "hero";
+  /** Hero block for `template: hero` pages. */
+  hero?: DocsHero;
+  /** Hide the TOC panel (from `toc: false`). */
+  tocHidden?: boolean;
+  /** Rename the TOC panel heading (from `toc: { label }`). */
+  tocLabel?: string;
+  /** "Edit this page" link (from `editUrl` or `editLinkBase`). */
+  editUrl?: string;
+  /** Page tags (rendered as chips + included in search). */
+  tags?: string[];
   /** Rendered markdown content. */
   children?: unknown;
   /** Theme options forwarded when the descriptor declares them. */
   options?: Options;
+}
+
+/**
+ * Options accepted by the docs plugin (`docs({ ... })` in krate.config.ts).
+ */
+export interface DocsOptions {
+  /** Directory holding the markdown/mdx docs (default: "content/docs"). */
+  contentDir?: string;
+  /** Site title used in the layout and page titles. */
+  title?: string;
+  /** Legacy root-relative path to a custom layout component. */
+  layout?: string;
+  /**
+   * Docs theme: a package name, a component path, a theme factory descriptor
+   * (see {@link defineDocsTheme}), or a theme object returned by one.
+   */
+  theme?: string | DocsThemeDescriptor;
+  /** Extra social links rendered in the sidebar/header. */
+  links?: { icon?: string; url?: string }[];
+  /** Search configuration. */
+  search?: DocsSearchOptions;
+  /**
+   * Base URL for "Edit this page" links (e.g. a GitHub blob URL). The frontmatter
+   * `editUrl` key overrides it per page.
+   */
+  editLinkBase?: string;
 }
 
 /**

@@ -1,6 +1,12 @@
 ---
 title: Features
 order: 1
+description: A tour of the features that ship with Krate beyond the core compiler.
+sidebar:
+  label: Features
+  order: 2
+  collapsible: true
+  defaultOpen: true
 ---
 
 # Features

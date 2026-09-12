@@ -1878,6 +1878,23 @@ func (b *builder) buildExprContainerChildrenMode(ec *ast.JSXExprContainer, paren
 		}
 	}
 
+	// Boolean short-circuit with JSX on the right: {left && <A/>} and
+	// {left || <A/>}.  The static-value path const-evaluates the right
+	// operand via evalConst, which cannot serialize JSX to HTML (returns "")
+	// so client-tier layouts (e.g. the docs theme shell) that gate sections
+	// on props would silently lose that markup.  Route guards through the
+	// conditional-slot machinery instead: statically-known tests fold to
+	// the winning branch so SSR renders real content; reactive guards
+	// become hidable ConditionalSlots.
+	if bin, ok := ec.Expression.(*ast.BinaryExpr); ok && (bin.Op == "&&" || bin.Op == "||") {
+		if hasJSXInExpr(bin.Right) {
+			if nodes, resolved := b.tryResolveGuard(bin, parentID); resolved {
+				return nodes
+			}
+			return []SlotNode{b.buildGuardSlot(bin, parentID)}
+		}
+	}
+
 	// Check if expression references any signal
 	if !b.referencesSignal(ec.Expression) {
 		// Simple identifiers that reference local variables (not signals,
@@ -2126,6 +2143,45 @@ func (b *builder) tryResolveConditional(cond *ast.ConditionalExpr, parentID stri
 		v := evalConstWithSignals(branch, b.sigMap(), b.localProps)
 		return []SlotNode{&StaticHTML{HTML: v}}
 	}
+}
+
+// tryResolveGuard folds a boolean short-circuit guard ({cond && <A/>} /
+// {cond || <A/>}) when the guard test is statically known, rendering the
+// JSX operand that would be active.  Returns slot nodes and true when the
+// guard was resolved; returns nil and false when the test depends on a
+// signal or otherwise cannot be determined at build time.
+func (b *builder) tryResolveGuard(bin *ast.BinaryExpr, parentID string) ([]SlotNode, bool) {
+	if b.referencesSignal(bin.Left) {
+		return nil, false
+	}
+	val, known := b.knownTestValue(bin.Left)
+	if !known {
+		return nil, false
+	}
+	truthy := isTruthyValue(val)
+	// && renders the right operand when the left is truthy;
+	// || renders the right operand when the left is falsy.
+	renderJSX := (bin.Op == "&&") == truthy
+	if !renderJSX {
+		// Guard renders nothing — emit nothing (nil slice).
+		return nil, true
+	}
+	return b.buildSlotNodes(bin.Right, parentID), true
+}
+
+// buildGuardSlot converts a BinaryExpr guard ({A && B} / {A || B}) to a
+// ConditionalSlot.  For {A && B} the equivalent ternary is A ? B : <empty>;
+// for {A || B} it is A ? <empty> : B.
+func (b *builder) buildGuardSlot(bin *ast.BinaryExpr, parentID string) *ConditionalSlot {
+	// Normalize: {A && B} -> A ? B : <empty/nil>, {A || B} -> A ? nil : B.
+	var consequent, alternate ast.Expr
+	if bin.Op == "&&" {
+		consequent = bin.Right
+	} else {
+		alternate = bin.Right
+	}
+	norm := &ast.ConditionalExpr{Test: bin.Left, Consequent: consequent, Alternate: alternate}
+	return b.buildConditionalSlot(norm, parentID)
 }
 
 // knownTestValue resolves a ternary test to a value and reports whether the

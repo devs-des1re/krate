@@ -1,6 +1,9 @@
 ---
 title: Creating Plugins
 order: 6
+badge:
+  text: Beta
+  variant: beta
 ---
 
 # Creating Plugins

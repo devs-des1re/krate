@@ -22,7 +22,11 @@ export type {
   ServeResponseContext,
   ServeResponseResult,
 } from "./context.js";
-export type { DocsLayoutProps } from "./docs.js";
+export type {
+  DocsHeadTag,
+  DocsHero,
+  DocsLayoutProps,
+} from "./docs.js";
 export type {
   DocsSearchOptions,
   DocsSidebarItem,

@@ -1,6 +1,15 @@
 ---
 title: Reference
 order: 1
+description: Deep reference material for the Krate APIs.
+sidebar:
+  label: Reference
+  order: 4
+  collapsible: true
+  defaultOpen: true
+next:
+  text: Overview
+  link: /docs/
 ---
 
 # Reference

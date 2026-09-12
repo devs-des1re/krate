@@ -49,18 +49,48 @@ func searchConfig(opts *DocsPluginOptions) (enabled bool, engine string, maxResu
 }
 
 // buildSearchDocuments converts docs pages into docfind index documents.
+// Tags and categories are merged into the WASM index keywords so searches
+// against the tags/categories surface the page. The JSON fallback index gets
+// the same terms appended to content (see docs.BuildSearchIndex).
 func buildSearchDocuments(pages []docs.Page) []docfind.Document {
 	documents := make([]docfind.Document, 0, len(pages))
 	for _, p := range pages {
+		keywords := mergeFieldTerms(p.Keywords, p.Tags, p.Categories)
+		body := p.Content
+		if extra := mergeFieldTerms(p.Tags, p.Categories); len(extra) > 0 {
+			body = strings.Join(append([]string{docs.StripHTMLTags(p.Content)}, extra...), " ")
+		} else {
+			body = docs.StripHTMLTags(p.Content)
+		}
 		documents = append(documents, docfind.Document{
 			Title:    p.Title,
 			Category: p.Dir,
 			Href:     docs.PageURL(p.Path),
-			Body:     docs.StripHTMLTags(p.Content),
-			Keywords: p.Keywords,
+			Body:     body,
+			Keywords: keywords,
 		})
 	}
 	return documents
+}
+
+// mergeFieldTerms concatenates and de-duplicates non-empty string slices.
+func mergeFieldTerms(slices ...[]string) []string {
+	seen := make(map[string]struct{})
+	var out []string
+	for _, s := range slices {
+		for _, v := range s {
+			v = strings.TrimSpace(v)
+			if v == "" {
+				continue
+			}
+			if _, dup := seen[v]; dup {
+				continue
+			}
+			seen[v] = struct{}{}
+			out = append(out, v)
+		}
+	}
+	return out
 }
 
 // buildSearchAssets writes the search UI and (when the engine is "docfind")

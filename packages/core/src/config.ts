@@ -130,9 +130,16 @@ export interface DocsPluginOptions {
   links?: { icon?: string; url?: string }[];
   /** Search bar configuration (docfind WASM search). */
   search?: DocsSearchOptions;
+  /**
+   * Base URL for "Edit this page" links (e.g. a GitHub blob URL). The per-page
+   * frontmatter `editUrl` key overrides it.
+   */
+  editLinkBase?: string;
 }
 
 export type {
+  DocsHeadTag,
+  DocsHero,
   DocsLayoutProps,
   DocsSearchOptions,
   DocsSidebarItem,

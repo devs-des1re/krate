@@ -9,6 +9,8 @@ interface SidebarItem {
   indexURL?: string;
   collapsible?: boolean;
   expanded?: boolean;
+  icon?: string;
+  badge?: { text: string; variant?: string };
   children?: SidebarItem[];
 }
 
@@ -30,6 +32,19 @@ interface SocialLinkItem {
   name: string;
 }
 
+interface HeroAction {
+  text: string;
+  link: string;
+  variant?: string;
+}
+
+interface HeroData {
+  title?: string;
+  tagline?: string;
+  image?: string;
+  actions?: HeroAction[];
+}
+
 interface BaseDocsLayoutProps {
   pageTitle: string;
   siteTitle: string;
@@ -43,11 +58,28 @@ interface BaseDocsLayoutProps {
   nextLink?: string;
   socialLinks: SocialLinkItem[];
   currentPath: string;
+  description?: string;
+  template?: "doc" | "hero";
+  hero?: HeroData;
+  tocHidden?: boolean;
+  tocLabel?: string;
+  editUrl?: string;
+  tags?: string[];
 }
 
 export default function BaseDocsLayout(props: BaseDocsLayoutProps) {
   const pageTitle = props.pageTitle;
   const siteTitle = props.siteTitle;
+  const showToc = !props.tocHidden;
+  const tocHeading = props.tocLabel || "On this page";
+  const description = props.description;
+  const editUrl = props.editUrl;
+  const hasTags = props.tags && props.tags.length > 0;
+  const tags = props.tags;
+  const isHero = props.template === "hero";
+  const heroTitle = props.hero && props.hero.title ? props.hero.title : pageTitle;
+  const heroTagline = props.hero && props.hero.tagline;
+  const heroActions = props.hero && props.hero.actions && props.hero.actions.length > 0 ? props.hero.actions : null;
   const [theme, setTheme] = createSignal("light");
   const [sidebarOpen, setSidebarOpen] = createSignal(false);
   const [tocOpen, setTocOpen] = createSignal(false);
@@ -152,13 +184,15 @@ export default function BaseDocsLayout(props: BaseDocsLayoutProps) {
       </header>
 
       <div class="toc-mobile-shell">
-        <button class="toc-mobile-toggle" id="toc-toggle" ref={tocBtnRef} aria-label="Toggle table of contents" aria-controls="toc" aria-expanded="false" onClick={() => setTocOpen(!tocOpen())}>
-          <span class="toc-mobile-copy">
-            <span class="toc-mobile-label">On this page</span>
-            <span class="toc-current" id="toc-current">Introduction</span>
-          </span>
-          <Icon name="tabler:chevron-down" width="18" height="18" />
-        </button>
+        {showToc && (
+          <button class="toc-mobile-toggle" id="toc-toggle" ref={tocBtnRef} aria-label="Toggle table of contents" aria-controls="toc" aria-expanded="false" onClick={() => setTocOpen(!tocOpen())}>
+            <span class="toc-mobile-copy">
+              <span class="toc-mobile-label">{tocHeading}</span>
+              <span class="toc-current" id="toc-current">Introduction</span>
+            </span>
+            <Icon name="tabler:chevron-down" width="18" height="18" />
+          </button>
+        )}
       </div>
 
       <div class="sidebar-overlay" id="sidebar-overlay" ref={overlayRef} onClick={closeNav}></div>
@@ -180,24 +214,56 @@ export default function BaseDocsLayout(props: BaseDocsLayoutProps) {
       <div class="docs-body">
         <main class="docs-main">
           <Breadcrumbs items={props.breadcrumbs} />
+          {description && <p class="docs-description">{description}</p>}
+          {isHero && (
+            <section class="docs-hero">
+              <h1 class="docs-hero-title">{heroTitle}</h1>
+              {heroTagline && <p class="docs-hero-tagline">{heroTagline}</p>}
+              {heroActions && (
+                <div class="docs-hero-actions">
+                  {heroActions.map((action) => (
+                    <a
+                      class={`docs-hero-action${action.variant ? " docs-hero-action-" + action.variant : ""}`}
+                      href={action.link}
+                    >
+                      {action.text}
+                    </a>
+                  ))}
+                </div>
+              )}
+            </section>
+          )}
           <div class="docs-content">{props.children}</div>
+          {hasTags && (
+            <div class="docs-tags">
+              {tags.map((tag) => (<span class="docs-tag">{tag}</span>))}
+            </div>
+          )}
           <PrevNext
             prevTitle={props.prevTitle}
             prevLink={props.prevLink}
             nextTitle={props.nextTitle}
             nextLink={props.nextLink}
           />
+          {editUrl && (
+            <a class="docs-edit-link" href={editUrl}>
+              <Icon name="tabler:pencil" width="14" height="14" />
+              <span>Edit this page</span>
+            </a>
+          )}
         </main>
 
-        <aside class="toc" id="toc" ref={tocRef}>
-          <div class="toc-panel">
-            <div class="toc-header">
-              <Icon name="lucide:text-align-start" width="16" height="16" />
-              <span>On this page</span>
+        {showToc && (
+          <aside class="toc" id="toc" ref={tocRef}>
+            <div class="toc-panel">
+              <div class="toc-header">
+                <Icon name="lucide:text-align-start" width="16" height="16" />
+                <span>{tocHeading}</span>
+              </div>
+              <TOCNav items={props.tocItems} onNavigate={closeNav} />
             </div>
-            <TOCNav items={props.tocItems} onNavigate={closeNav} />
-          </div>
-        </aside>
+          </aside>
+        )}
       </div>
     </div>
   );

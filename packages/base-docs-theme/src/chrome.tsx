@@ -7,6 +7,8 @@ interface SidebarItem {
   indexURL?: string;
   collapsible?: boolean;
   expanded?: boolean;
+  icon?: string;
+  badge?: { text: string; variant?: string };
   children?: SidebarItem[];
 }
 
@@ -41,7 +43,9 @@ function SidebarSection(props: SidebarSectionProps) {
         class={`sidebar-link${containsActive ? ' active' : ''}`}
         href={item.url}
       >
-        {item.title}
+        {item.icon && <span class="sidebar-icon"><Icon name={item.icon} width="16" height="16" /></span>}
+        <span class="sidebar-label">{item.title}</span>
+        {item.badge && <span class={`sidebar-badge${item.badge.variant ? " sidebar-badge-" + item.badge.variant : ""}`}>{item.badge.text}</span>}
       </a>
     );
   }
@@ -56,10 +60,16 @@ function SidebarSection(props: SidebarSectionProps) {
             class={`sidebar-section-link${item.indexURL === currentPath ? ' active' : ''}`}
             href={item.indexURL}
           >
-            {item.title}
+            {item.icon && <span class="sidebar-icon"><Icon name={item.icon} width="16" height="16" /></span>}
+            <span class="sidebar-label">{item.title}</span>
+            {item.badge && <span class={`sidebar-badge${item.badge.variant ? " sidebar-badge-" + item.badge.variant : ""}`}>{item.badge.text}</span>}
           </a>
         ) : (
-          <span class="sidebar-section-link">{item.title}</span>
+          <span class="sidebar-section-link">
+            {item.icon && <span class="sidebar-icon"><Icon name={item.icon} width="16" height="16" /></span>}
+            <span class="sidebar-label">{item.title}</span>
+            {item.badge && <span class={`sidebar-badge${item.badge.variant ? " sidebar-badge-" + item.badge.variant : ""}`}>{item.badge.text}</span>}
+          </span>
         )}
         {isCollapsible && (
           <button

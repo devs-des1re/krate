@@ -1,6 +1,12 @@
 ---
 title: Guides
 order: 1
+description: Practical, end-to-end walkthroughs for building and shipping Krate sites.
+sidebar:
+  label: Guides
+  order: 3
+  collapsible: true
+  defaultOpen: true
 ---
 
 # Guides

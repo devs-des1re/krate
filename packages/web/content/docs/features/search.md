@@ -1,6 +1,12 @@
 ---
 title: Search
 order: 7
+tags:
+  - search
+  - docfind
+  - wasm
+categories:
+  - features
 ---
 
 # Search

@@ -43,7 +43,7 @@ type Bundle struct {
 	WorkerFiles    map[string]string // worker source path → hashed site URL (/workers/…)
 	WorkerEsm      map[string]bool   // worker source path → true when built with `type: 'module'`
 	DynImportFiles map[string]string // dynamic-import source path → hashed site URL (/chunks/…)
-	Frontmatter    map[string]string // .mdx frontmatter, if any
+	Frontmatter    map[string]any   // .mdx frontmatter, if any
 }
 
 type Bundler struct {
@@ -56,7 +56,7 @@ type Bundler struct {
 	workers           map[string]string // worker source path → hashed site URL (/workers/…)
 	workerEsm         map[string]bool   // worker source path → built as ES module
 	dynImports        map[string]string // dynamic-import source path → hashed site URL (/chunks/…)
-	frontmatter       map[string]string // from .mdx frontmatter
+	frontmatter       map[string]any   // from .mdx frontmatter
 	emitReact         bool
 	pathAliases       []pathAlias
 	tsBaseDir         string

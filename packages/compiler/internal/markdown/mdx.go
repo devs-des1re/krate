@@ -5,11 +5,13 @@ import (
 	"regexp"
 	"strings"
 	"unicode"
+
+	"github.com/kratejs/krate/packages/compiler/internal/frontmatter"
 )
 
 // MDXResult holds the parsed result of an MDX file.
 type MDXResult struct {
-	Frontmatter map[string]string
+	Frontmatter map[string]any
 	HTML        string
 	JSXBlocks   []JSXBlock
 }
@@ -161,34 +163,11 @@ func (r *MDXResult) ReinsertJSXBlocks() string {
 	return result
 }
 
-func extractFrontmatter(src string) (map[string]string, string) {
-	// Strip a leading UTF-8 BOM so files saved with one still parse their
-	// frontmatter and body correctly.
-	src = strings.TrimPrefix(src, "\ufeff")
-	lines := strings.Split(src, "\n")
-	if len(lines) < 2 || strings.TrimSpace(lines[0]) != "---" {
-		return nil, src
-	}
-
-	fm := make(map[string]string)
-	i := 1
-	for i < len(lines) {
-		if strings.TrimSpace(lines[i]) == "---" {
-			i++
-			break
-		}
-		line := lines[i]
-		if idx := strings.IndexByte(line, ':'); idx >= 0 {
-			key := strings.TrimSpace(line[:idx])
-			val := strings.TrimSpace(line[idx+1:])
-			val = strings.Trim(val, "\"'")
-			fm[key] = val
-		}
-		i++
-	}
-
-	body := strings.Join(lines[i:], "\n")
-	return fm, body
+// extractFrontmatter delegates to the shared mini-YAML parser
+// (internal/frontmatter) so the docs plugin and the markdown renderer always
+// parse frontmatter identically.
+func extractFrontmatter(src string) (map[string]any, string) {
+	return frontmatter.Parse(src)
 }
 
 func isJSXStart(s string) bool {
@@ -366,7 +345,7 @@ func makePlaceholder(prefix string, idx int) string {
 // JSX blocks are returned as raw JSX strings, and fenced code blocks are
 // returned as Code segments that render the <Code> component — both are
 // embedded directly in TSX output.
-func ParseMDXSegments(src string, cfg Config) (frontmatter map[string]string, segments []MDXSegment) {
+func ParseMDXSegments(src string, cfg Config) (frontmatter map[string]any, segments []MDXSegment) {
 	frontmatter, body := extractFrontmatter(src)
 
 	// Strip import lines from the body so they don't render as markdown text.

@@ -1,6 +1,11 @@
 ---
 title: Configuration
 order: 3
+description: Every krate.config.ts option, type-checked with defineConfig.
+toc:
+  minLevel: 2
+  maxLevel: 3
+  label: Config sections
 ---
 
 # Configuration

@@ -1,6 +1,12 @@
 ---
 title: Core Concepts
 order: 1
+description: How Krate thinks about building sites: signals not hooks, SSG-first output, and a real Go-native compiler.
+sidebar:
+  label: Concepts
+  order: 1
+  collapsible: true
+  defaultOpen: true
 ---
 
 # Core Concepts
