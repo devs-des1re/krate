@@ -4,13 +4,13 @@ export default function Home() {
   return (
     <>
       <Head>
-        <title>Krate — Go-native static site generator</title>
+        <title>Krate — Go-native web framework</title>
         <meta name="description" content="Krate compiles TSX/JSX pages into static HTML at build time with a tiny signal-based hydration bundle. No React, no bundler subprocess, no Node.js required." />
       </Head>
 
       <section class="hero">
         <div class="hero-badge">Signal-based · SSG-first · Go-native</div>
-        <h1 class="hero-title">Static sites with the power of a compiler.</h1>
+        <h1 class="hero-title">Web applications with the power of a compiler.</h1>
         <p class="hero-subtitle">
           Krate compiles TSX/JSX into static HTML at build time and ships a tiny
           signal-based hydration bundle. Fine-grained reactivity, file-based
