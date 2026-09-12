@@ -27,6 +27,7 @@ A tour of the features that ship with Krate beyond the core compiler.
 | [Analytics](/docs/features/analytics/) | Snippets via `<Head>`/`<Script>` + the SPA route-change hook |
 | [HTTP Headers](/docs/features/http-headers/) | Middleware headers, automatic cache/security headers, ISR `Cache-Control` |
 | [Typed Routes & Content](/docs/features/typed-routes/) | Generated `.d.ts` for routes, params, and content collections |
+| [Quality Checks](/docs/features/quality-checks/) | Compiler-enforced a11y, SEO, and performance gates (`krate check`) |
 
 Also see the [component library](/docs/reference/component-library/), a
 shadcn/ui-style set of components built on the runtime.

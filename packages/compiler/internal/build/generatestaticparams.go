@@ -445,5 +445,6 @@ func (b *Builder) buildStaticParamsPage(spp staticParamsPage) (*PageResult, stri
 		Mode:        renderMode,
 		Revalidate:  revalidate,
 		SourcePath:  relSrc,
+		Program:     entryModule.Program,
 	}, bundle.CSS, nil
 }

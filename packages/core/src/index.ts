@@ -23,5 +23,8 @@ export type {
   ContentField,
   ContentFieldSpec,
   ContentFieldType,
+  ChecksConfig,
+  CheckSeverity,
+  CheckRuleId,
 } from "./config.js";
 export type { DocsLayoutProps } from "./config.js";

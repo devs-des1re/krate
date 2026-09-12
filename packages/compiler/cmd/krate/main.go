@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/kratejs/krate/packages/compiler/internal/build"
+	"github.com/kratejs/krate/packages/compiler/internal/check"
 	"github.com/kratejs/krate/packages/compiler/internal/config"
 	"github.com/kratejs/krate/packages/compiler/internal/environ"
 	"github.com/kratejs/krate/packages/compiler/internal/plugin"
@@ -16,12 +17,13 @@ import (
 )
 
 const (
-	cReset = "\033[0m"
-	cRed   = "\033[31m"
-	cGreen = "\033[32m"
-	cCyan  = "\033[36m"
-	cGray  = "\033[90m"
-	cBold  = "\033[1m"
+	cReset  = "\033[0m"
+	cRed    = "\033[31m"
+	cGreen  = "\033[32m"
+	cYellow = "\033[33m"
+	cCyan   = "\033[36m"
+	cGray   = "\033[90m"
+	cBold   = "\033[1m"
 )
 
 // version is set at build time via `-ldflags "-X main.version=<version>"`.
@@ -43,7 +45,7 @@ func main() {
 	plugin.SetVerbose(flags.Verbose)
 
 	if len(args) == 0 {
-		fmt.Fprintf(os.Stderr, "Usage: krate [flags] <build|dev|serve|types|version> [dir]\n")
+		fmt.Fprintf(os.Stderr, "Usage: krate [flags] <build|dev|serve|types|check|version> [dir]\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		fmt.Fprintf(os.Stderr, "  --config <path>   Path to config file (default: project/krate.config.ts)\n")
 		fmt.Fprintf(os.Stderr, "  --out-dir <path>  Override output directory\n")
@@ -61,6 +63,8 @@ func main() {
 		runServe(flags, args)
 	case "types":
 		runTypes(flags, args)
+	case "check":
+		runCheck(flags, args)
 	case "version":
 		fmt.Println("krate v" + version)
 	default:
@@ -250,3 +254,51 @@ func runTypes(flags cliFlags, args []string) {
 
 	fmt.Printf("%s%s  Types written to %s%s\n", cBold, cGreen, filepath.Join(root, ".krate", "types"), cReset)
 }
+
+// runCheck builds the site and runs the compiler-enforced quality gates,
+// exiting non-zero when findings meet or exceed the configured fail-on
+// severity. Backs CI (`krate check`) and the future MCP `check` primitive.
+func runCheck(flags cliFlags, args []string) {
+	root, cfg := resolveConfig(flags, args)
+	env := loadProjectEnv(root, "production", flags.Verbose)
+
+	fmt.Printf("%s%s  Building for checks %s \u2192 %s%s\n", cBold, cCyan, root, cfg.OutDir, cReset)
+	start := time.Now()
+
+	builder := build.New(root, cfg)
+	builder.Verbose = flags.Verbose
+	builder.Env = env
+	// This command owns the single check pass (CheckSite re-reads dist/), so
+	// suppress the in-build gates to avoid duplicate reporting.
+	builder.SkipQualityChecks = true
+	if err := builder.BuildAll(); err != nil {
+		fmt.Fprintf(os.Stderr, "%sBuild error:%s %v\n", cRed, cReset, err)
+		os.Exit(1)
+	}
+
+	findings, checkCfg, err := builder.CheckSite(true)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%sCheck error:%s %v\n", cRed, cReset, err)
+		os.Exit(1)
+	}
+
+	fopts := check.DefaultFormatOptions()
+
+	if len(findings) == 0 {
+		fmt.Printf("%s%s  ✓ No quality issues found.%s\n", cBold, cGreen, cReset)
+		return
+	}
+
+	errs, warns := check.Counts(findings)
+	fmt.Printf("\n%s%s  Quality report%s %s(%s)%s\n\n", cBold, cCyan, cReset, cGray, check.Summary(errs, warns, fopts), cReset)
+	fmt.Print(check.FormatWith(findings, fopts))
+	fmt.Printf("\n%s  Checks: %s in %s%s\n", cCyan, check.Summary(errs, warns, fopts), time.Since(start).Round(time.Millisecond), cReset)
+
+	if check.Failing(findings, checkCfg.FailOn) {
+		fmt.Fprintf(os.Stderr, "\n%s%s  ✗ Quality checks failed.%s\n", cBold, cRed, cReset)
+		os.Exit(1)
+	}
+
+	fmt.Printf("\n%s%s  ⚠ Passed with warnings (failOn=%s).%s\n", cBold, cYellow, checkCfg.FailOn, cReset)
+}
+

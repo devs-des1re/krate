@@ -504,6 +504,12 @@ func applyConfigProp(cfg *Config, key string, val interface{}) error {
 			return fmt.Errorf("expected object, got %T", val)
 		}
 		cfg.Content = m
+	case "checks":
+		m, ok := val.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("expected object, got %T", val)
+		}
+		cfg.Checks = m
 	case "output":
 		s, ok := val.(string)
 		if !ok {

@@ -13,6 +13,7 @@ The `krate` CLI is the single entry point for building and serving Krate sites.
 | `krate dev [dir]` | Build + dev server (port 3000) + hot reload |
 | `krate serve [dir]` | Build + static HTTP server (production preview) |
 | `krate types [dir]` | Generate route/content TypeScript declarations only |
+| `krate check [dir]` | Build and run quality gates (a11y/SEO/perf); non-zero on failure |
 | `krate version` | Print the version |
 
 ## `krate build`
@@ -62,13 +63,23 @@ krate serve
 
 Useful for previewing `dist/` exactly as a static host would serve it.
 
+## `krate check`
+
+Builds the site and runs the compiler-enforced quality gates
+(accessibility, SEO, performance) against the emitted HTML. Exits non-zero
+when a finding meets the configured `checks.failOn` severity (default
+`error`) — ideal for CI.
+
+```sh
+krate check
+```
+
+See [Quality Checks](/docs/features/quality-checks/) for configuration and the
+built-in rule list.
+
 ## `krate version`
 
 Prints the compiler version:
-
-```sh
-krate version
-```
 
 ## Build output
 

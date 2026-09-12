@@ -61,3 +61,12 @@ export type {
   PluginDescriptor,
   PluginHooks,
 } from "./plugin.js";
+export { defineCheckRule } from "./check.js";
+export type {
+  CheckAstNode,
+  CheckFinding,
+  CheckRuleContext,
+  CheckRuleFn,
+  CheckRulePage,
+  CheckRuleSeverity,
+} from "./check.js";

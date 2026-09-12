@@ -206,6 +206,26 @@ are disabled. Individual pages can re-enable dynamic params with
 `export const dynamicParams = true`. See
 [Static output & dynamic params](/docs/features/typed-routes/#static-output--dynamic-params).
 
+## Quality checks
+
+```typescript
+checks: {
+  a11y: "error",                  // "error" | "warning" | "off" | boolean
+  seo: "warning",
+  perf: "warning",
+  rules: { "perf/js-budget": "error" },
+  ignore: ["seo/og"],
+  budget: { js: 150 },            // per-route client-JS budget, KB
+  failOn: "error",
+  custom: ["./checks/my-rule.ts"],
+},
+```
+
+When a `checks` object is present, `krate build` runs the quality gates and
+fails on findings at or above `failOn`. `krate check` runs the same rules
+against the emitted output. See
+[Quality Checks](/docs/features/quality-checks/).
+
 ## Validation
 
 ```typescript

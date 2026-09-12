@@ -55,6 +55,11 @@ type PageResult struct {
 	UsedFuncs     map[string]bool
 	LoadingHTML   string // rendered loading.tsx fallback for SPA transitions
 
+	// FinalHTML is the fully assembled document written to disk (head + body,
+	// SEO injection, minification). Populated by writeHTMLPages; consumed by
+	// compiler-enforced quality checks.
+	FinalHTML string
+
 	// SSR/ISR/Streaming metadata
 	Mode             RenderMode
 	Revalidate       int
@@ -63,8 +68,7 @@ type PageResult struct {
 
 	// DynamicParams is false when a dynamic route must 404 for params other
 	// than those returned by generateStaticParams.
-	DynamicParams bool
-	// StaticOnly marks a dynamic route template (e.g. blog/[slug].tsx) whose
+	DynamicParams bool	// StaticOnly marks a dynamic route template (e.g. blog/[slug].tsx) whose
 	// valid params are closed: the build must not emit its `[param]` fallback
 	// HTML. The concrete generateStaticParams pages are emitted normally.
 	StaticOnly bool
@@ -75,6 +79,10 @@ type PageResult struct {
 	// Regions lists this page's dynamic regions (Suspense primaries + runtime
 	// components) discovered from the IR tree. Populated for non-SSG pages.
 	Regions []Region
+
+	// Program is the page's parsed (and plugin-transformed) AST. Consumed by
+	// compiler-enforced quality checks; nil for plugin-generated routes.
+	Program *ast.Program
 }
 
 type Builder struct {
@@ -86,6 +94,11 @@ type Builder struct {
 	depGraph map[string][]string // file path → page source paths that depend on it
 	pageDeps map[string][]string // page source path → files it depends on
 	depMu    sync.Mutex          // protects depGraph/pageDeps
+
+	// SkipQualityChecks suppresses the in-build quality gates so callers that
+	// run their own check pass (e.g. `krate check`, which re-reads dist/) don't
+	// evaluate and report the same findings twice.
+	SkipQualityChecks bool
 
 	workerMu  sync.Mutex
 	workers   map[string]string // worker source path → hashed site URL (/workers/…)
@@ -564,6 +577,16 @@ func (b *Builder) BuildAll() error {
 	// In-memory HTML generation + string swap + single disk write per page
 	b.writeHTMLPages(results, globalCSS, runtimeJS)
 
+	// Compiler-enforced quality gates (opt-in via `checks` in krate.config.ts).
+	// Runs against the final HTML so rules see exactly what ships.
+	if !b.SkipQualityChecks {
+		if err := b.runQualityChecks(results, runtimeJS); err != nil {
+			fmt.Fprintf(os.Stderr, "  %s✗ Checks:%s %v\n", cRed, cReset, err)
+			failureMessages = append(failureMessages, "  checks: "+err.Error())
+			errorCount++
+		}
+	}
+
 	// Compile and emit any registered web workers to /workers/.
 	if err := b.writeWorkerBundles(); err != nil {
 		fmt.Fprintf(os.Stderr, "  %sWorker bundle error:%s %v\n", cYellow, cReset, err)
@@ -857,6 +880,8 @@ func (b *Builder) writeHTMLPages(results []*PageResult, cssFiles []string, runti
 				html = minifyHTML(html)
 			}
 
+			r.FinalHTML = html
+
 			// 4. Single Write to physical media
 			// Error pages (404/500) are written directly at the output root as .html
 			var htmlPath string
@@ -1116,6 +1141,7 @@ func (b *Builder) buildPage(page string) (*PageResult, string, error) {
 			DynamicParams:     allowDynamic,
 			StaticOnly:        true,
 			IsDynamicTemplate: true,
+			Program:           entryModule.Program,
 		}, bundle.CSS, nil
 	}
 
@@ -1194,6 +1220,7 @@ func (b *Builder) buildPage(page string) (*PageResult, string, error) {
 		DynamicParams:     allowDynamic,
 		StaticOnly:        staticOnly,
 		IsDynamicTemplate: isDynRoute,
+		Program:           entryModule.Program,
 	}, bundle.CSS, nil
 }
 

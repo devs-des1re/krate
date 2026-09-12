@@ -196,6 +196,14 @@ export interface KrateConfig {
   output?: "static";
 
   /**
+   * Compiler-enforced quality gates. When configured, `krate build` runs the
+   * rules and fails on findings at or above `failOn`; `krate check` runs the
+   * same rules on an existing build. Categories run by default only when a
+   * `checks` object is present.
+   */
+  checks?: ChecksConfig;
+
+  /**
    * Typed content collections. Either a plain object or `defineContent({...})`:
    *
    * ```ts
@@ -295,4 +303,46 @@ export type ContentConfig = Record<string, ContentCollection>;
  */
 export function defineContent(config: ContentConfig): ContentConfig {
   return config;
+}
+
+// ─── Quality gates (checks) ─────────────────────────────────────────────────
+
+/** Severity for a check rule or category. `false` disables it. */
+export type CheckSeverity = "error" | "warning" | "off" | boolean;
+
+/** Built-in check rule IDs. */
+export type CheckRuleId =
+  | "a11y/img-alt"
+  | "a11y/heading-order"
+  | "a11y/accessible-name"
+  | "seo/title"
+  | "seo/description"
+  | "seo/canonical"
+  | "seo/og"
+  | "seo/lang"
+  | "perf/js-budget"
+  | "perf/image-dims";
+
+export interface ChecksConfig {
+  /** Master switch (default: true when `checks` is present). */
+  enabled?: boolean;
+  /** Accessibility rules. `false` turns the category off. */
+  a11y?: CheckSeverity;
+  /** SEO rules. */
+  seo?: CheckSeverity;
+  /** Performance-budget rules. */
+  perf?: CheckSeverity;
+  /** Per-rule severity overrides, keyed by rule ID. */
+  rules?: Partial<Record<CheckRuleId, CheckSeverity>>;
+  /** Rule IDs to suppress entirely. */
+  ignore?: CheckRuleId[];
+  /** Per-route budgets. `js` is the client-JS budget in kilobytes. */
+  budget?: { js?: number };
+  /** Minimum severity that fails `krate check` / the build (default "error"). */
+  failOn?: "error" | "warning";
+  /**
+   * Paths (relative to the project root) to JS/TS modules that export a custom
+   * `check(page, krate)` rule. Runs in the embedded QuickJS runtime.
+   */
+  custom?: string[];
 }

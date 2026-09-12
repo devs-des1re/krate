@@ -200,6 +200,12 @@ type Config struct {
 	// or a plain object). Each key is a collection name mapping to a `dir` and
 	// a frontmatter `schema`. Krate validates entries and generates types.
 	Content map[string]any `json:"content,omitempty"`
+
+	// Checks configures compiler-enforced quality gates (a11y/SEO/perf). When
+	// present and active, `krate build` runs the rules and fails on findings at
+	// or above the configured `failOn` severity. `krate check` uses the same
+	// rules. See internal/check.
+	Checks map[string]any `json:"checks,omitempty"`
 }
 
 func (c *Config) ShouldMinifyHTML() bool { return c.MinifyHTML || c.Minify }

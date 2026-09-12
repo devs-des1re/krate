@@ -73,4 +73,14 @@ export default defineConfig({
       },
     },
   }),
+  // Compiler-enforced quality gates. `krate check` (and `krate build`) evaluate
+  // these against the rendered HTML; `./plugins/check-no-lorem.ts` shows a
+  // custom QuickJS rule alongside the built-ins.
+  checks: {
+    a11y: 'warning',
+    seo: 'warning',
+    perf: 'warning',
+    budget: { js: 200 },
+    custom: ['./plugins/check-no-lorem.ts'],
+  },
 });
