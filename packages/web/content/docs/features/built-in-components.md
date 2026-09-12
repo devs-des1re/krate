@@ -14,7 +14,7 @@ by name — they work without any import:
 | `<Script>` | `<Script src="/app.js"/>` or `<Script>{inline}</Script>` | External or inline script in `<body>` |
 | `<Style>` | `<Style>{css}</Style>` | Inline `<style>` in `<head>` |
 | `<Link>` | `<Link href="/about">About</Link>` | SPA-enabled `<a>` |
-| `<Icon>` | `<Icon name="lucide:menu"/>` | SVG from Iconify API (compile-time) |
+| `<Icon>` | `<Icon name="lucide:menu"/>` | SVG from Iconify API (compile-time) or icons/ |
 | `<Image>` | `<Image src="/photo.jpg" width={800}/>` | Responsive `<picture>` (compile-time) |
 
 ## `<Head>`
