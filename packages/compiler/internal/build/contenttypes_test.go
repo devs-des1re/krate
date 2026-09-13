@@ -69,6 +69,51 @@ func TestContentConfigEmpty(t *testing.T) {
 	}
 }
 
+func TestContentConfigMergesContributedDocs(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.Default()
+	cfg.Resolve(root)
+	cfg.Content = map[string]any{
+		"blog": map[string]any{"dir": "src/content/blog", "schema": map[string]any{"title": "string"}},
+	}
+	cfg.Plugins = []config.PluginConfig{{Name: "docs", Options: map[string]interface{}{"contentDir": "src/content/docs"}}}
+
+	cc := New(root, cfg).contentConfig()
+	if cc == nil {
+		t.Fatal("expected content config")
+	}
+	if _, ok := cc.Collections["blog"]; !ok {
+		t.Errorf("expected blog collection, got %v", cc.Collections)
+	}
+	docs, ok := cc.Collections["docs"]
+	if !ok {
+		t.Fatalf("expected plugin-contributed docs collection, got %v", cc.Collections)
+	}
+	if docs.Dir != "src/content/docs" {
+		t.Errorf("docs dir = %q, want src/content/docs", docs.Dir)
+	}
+	if docs.Schema["title"].Type != "string" {
+		t.Errorf("docs schema missing title string: %+v", docs.Schema)
+	}
+}
+
+// ContributedCollectionsOverrideOrder verifies the effective config keeps the
+// configured collection when a plugin contributes a colliding name.
+func TestContributedCollectionDoesNotOverrideConfigured(t *testing.T) {
+	root := t.TempDir()
+	cfg := config.Default()
+	cfg.Resolve(root)
+	cfg.Content = map[string]any{
+		"docs": map[string]any{"dir": "content/custom-docs", "schema": map[string]any{"title": "string"}},
+	}
+	cfg.Plugins = []config.PluginConfig{{Name: "docs", Options: map[string]interface{}{"contentDir": "src/content/docs"}}}
+
+	cc := New(root, cfg).contentConfig()
+	if cc.Collections["docs"].Dir != "content/custom-docs" {
+		t.Errorf("configured docs should win, dir = %q", cc.Collections["docs"].Dir)
+	}
+}
+
 func TestWriteContentTypesValidatesAndGenerates(t *testing.T) {
 	root := t.TempDir()
 	cfg := config.Default()

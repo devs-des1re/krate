@@ -11,20 +11,21 @@ import (
 	"sync"
 
 	"github.com/kratejs/krate/packages/compiler/internal/config"
+	"github.com/kratejs/krate/packages/compiler/internal/content"
 	"github.com/kratejs/krate/packages/compiler/internal/docs"
 	"github.com/kratejs/krate/packages/compiler/internal/markdown"
 	"github.com/kratejs/krate/packages/compiler/internal/resolver"
 )
 
 type DocsPluginOptions struct {
-	ContentDir string             `json:"contentDir"`
-	Title      string             `json:"title"`
-	Layout     string             `json:"layout"`
-	Theme      json.RawMessage    `json:"theme"` // string (path or npm specifier) or DocsThemeDescriptor
-	Sidebar    []docs.SidebarItem `json:"sidebar"`
-	Links      []SocialLink       `json:"links"`
-	Search     *DocsSearchOptions `json:"search"`
-	EditLinkBase string           `json:"editLinkBase"`
+	ContentDir   string             `json:"contentDir"`
+	Title        string             `json:"title"`
+	Layout       string             `json:"layout"`
+	Theme        json.RawMessage    `json:"theme"` // string (path or npm specifier) or DocsThemeDescriptor
+	Sidebar      []docs.SidebarItem `json:"sidebar"`
+	Links        []SocialLink       `json:"links"`
+	Search       *DocsSearchOptions `json:"search"`
+	EditLinkBase string             `json:"editLinkBase"`
 }
 
 // DocsThemeDescriptor mirrors the shape a docs theme factory returns
@@ -55,6 +56,40 @@ func (p *DocsPlugin) Order() int   { return 10 }
 func (p *DocsPlugin) Hooks() PluginHooks {
 	return PluginHooks{
 		BeforeBuild: p.beforeBuild,
+		Collections: p.collections,
+	}
+}
+
+// collections contributes the docs content collection so docs become a proper
+// content collection (validation, types via krate/content, MCP content tools)
+// while the docs plugin keeps rendering the pages. Returns nil when the docs
+// plugin is not configured.
+func (p *DocsPlugin) collections(cfg *config.Config) []CollectionContribution {
+	opts := parseDocsOptions(cfg)
+	if opts == nil {
+		return nil
+	}
+	return []CollectionContribution{{
+		Name:   "docs",
+		Dir:    opts.ContentDir,
+		Schema: docsContentSchema(),
+	}}
+}
+
+// docsContentSchema is the validation schema for docs frontmatter. It mirrors
+// the typed fields the docs plugin decodes; complex/nested values (sidebar,
+// toc, hero, badge, head) are intentionally untyped so they pass through.
+func docsContentSchema() map[string]content.Field {
+	return map[string]content.Field{
+		"title":       {Type: content.TypeString},
+		"description": {Type: content.TypeString},
+		"template":    {Type: content.TypeString},
+		"editUrl":     {Type: content.TypeString},
+		"order":       {Type: content.TypeNumber},
+		"draft":       {Type: content.TypeBoolean},
+		"keywords":    {Type: content.TypeStringA},
+		"tags":        {Type: content.TypeStringA},
+		"categories":  {Type: content.TypeStringA},
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"github.com/kratejs/krate/packages/compiler/internal/docs"
 	"github.com/kratejs/krate/packages/compiler/internal/frontmatter"
 	"github.com/kratejs/krate/packages/compiler/internal/markdown"
+	"github.com/kratejs/krate/packages/compiler/internal/plugin"
 )
 
 // routeGenDir is where codegen'd virtual modules live (gitignored under
@@ -23,11 +24,26 @@ type contentTypeResult struct {
 	Validation []error
 }
 
-// contentConfig returns the typed content config from `krate.config.ts`
-// (`content: defineContent({...})` or a plain object), or nil when none is
-// declared.
+// contentConfig returns the effective typed content config: the `content:`
+// declarations from `krate.config.ts` (`defineContent({...})` or a plain
+// object) merged with collections contributed by registered plugins (e.g. the
+// docs plugin adds a "docs" collection behind its contentDir). Configured
+// collections win on name collisions. Returns nil when there are none.
 func (b *Builder) contentConfig() *content.Config {
-	return content.ParseConfig(b.Cfg.Content)
+	cfg := content.ParseConfig(b.Cfg.Content)
+	if cfg == nil {
+		cfg = &content.Config{Collections: map[string]content.Collection{}}
+	}
+	for name, col := range plugin.DefaultContributedCollections(b.Cfg) {
+		if _, exist := cfg.Collections[name]; exist {
+			continue
+		}
+		cfg.Collections[name] = col
+	}
+	if len(cfg.Collections) == 0 {
+		return nil
+	}
+	return cfg
 }
 
 // prepareContent discovers and validates every collection, writes the generated

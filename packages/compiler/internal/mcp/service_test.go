@@ -105,7 +105,7 @@ func TestInitializeAndToolsList(t *testing.T) {
 	for _, tool := range tools {
 		names[tool.(map[string]any)["name"].(string)] = true
 	}
-	for _, want := range []string{"list_routes", "read_page", "read_content", "create_page", "edit_ast", "edit_page", "build", "check", "search_docs"} {
+	for _, want := range []string{"list_routes", "read_page", "read_content", "create_content", "edit_content", "create_page", "edit_ast", "edit_page", "build", "check", "search_docs"} {
 		if !names[want] {
 			t.Errorf("missing tool %q", want)
 		}
@@ -290,6 +290,7 @@ func TestToolAnnotations(t *testing.T) {
 	want := map[string]bool{
 		"list_routes": false, "read_page": false, "read_content": false, "search_docs": false,
 		"create_page": false, "edit_ast": true, "edit_page": true,
+		"create_content": false, "edit_content": true,
 		"build": false, "check": false,
 	}
 	for _, tool := range resp["tools"].([]any) {
@@ -684,5 +685,246 @@ func TestCancellationQueuedRequest(t *testing.T) {
 	}
 	if code, _ := errObj["code"].(float64); code != codeRequestCancelled {
 		t.Errorf("error code = %v, want %d", code, codeRequestCancelled)
+	}
+}
+
+func TestReadContentContributedDocsCollection(t *testing.T) {
+	svc := newTestService(t, map[string]string{
+		"src/pages/index.tsx":       "export default function Page() { return <h1>Hi</h1>; }",
+		"src/content/docs/start.md": "---\ntitle: Start\n---\nDocs body.\n",
+	})
+	svc.cfg.Plugins = []config.PluginConfig{{Name: "docs"}}
+
+	// The docs plugin contributes the "docs" collection even though it is not
+	// declared under content:.
+	listText := toolText(t, serve(t, svc, call("read_content", map[string]any{"collection": "docs"}))[0])
+	var listing map[string]any
+	if err := json.Unmarshal([]byte(listText), &listing); err != nil {
+		t.Fatalf("listing is not JSON: %v\n%s", err, listText)
+	}
+	if listing["collection"] != "docs" {
+		t.Errorf("collection = %v, want docs", listing["collection"])
+	}
+	entries := listing["entries"].([]any)
+	if len(entries) != 1 {
+		t.Fatalf("expected 1 docs entry, got %v", entries)
+	}
+
+	entryText := toolText(t, serve(t, svc, call("read_content", map[string]any{"collection": "docs", "slug": "start"}))[0])
+	var entry map[string]any
+	if err := json.Unmarshal([]byte(entryText), &entry); err != nil {
+		t.Fatalf("entry is not JSON: %v\n%s", err, entryText)
+	}
+	if !strings.Contains(entry["content"].(string), "Docs body") {
+		t.Errorf("expected docs content, got %v", entry["content"])
+	}
+}
+
+func TestCreateContentValidatesSchemaAndWrites(t *testing.T) {
+	svc := newTestService(t, map[string]string{
+		"src/pages/index.tsx": "export default function Page() { return <h1>Hi</h1>; }",
+	})
+	svc.cfg.Content = map[string]any{"blog": map[string]any{
+		"dir": "src/content/blog",
+		"schema": map[string]any{
+			"title": map[string]any{"type": "string", "required": true},
+			"order": "number",
+			"tags":  "string[]",
+		},
+	}}
+
+	// Missing required field is refused.
+	bad := toolText(t, serve(t, svc, call("create_content", map[string]any{
+		"collection": "blog", "slug": "bad", "data": map[string]any{"order": 1},
+	}))[0])
+	if !strings.Contains(bad, "missing required field") {
+		t.Fatalf("expected schema refusal, got %s", bad)
+	}
+
+	// Type mismatch is refused.
+	badType := toolText(t, serve(t, svc, call("create_content", map[string]any{
+		"collection": "blog", "slug": "bad", "data": map[string]any{"title": "T", "order": "nope"},
+	}))[0])
+	if !strings.Contains(badType, "must be number") {
+		t.Fatalf("expected type refusal, got %s", badType)
+	}
+
+	// Dry run produces a diff and writes nothing.
+	dry := toolText(t, serve(t, svc, call("create_content", map[string]any{
+		"collection": "blog", "slug": "hello", "data": map[string]any{"title": "Hello", "order": 2},
+	}))[0])
+	if !strings.Contains(dry, "Dry run") {
+		t.Fatalf("expected dry-run notice, got %s", dry)
+	}
+	if _, err := os.Stat(filepath.Join(svc.root, "src", "content", "blog", "hello.md")); err == nil {
+		t.Fatal("dry run should not write the entry")
+	}
+
+	// apply writes frontmatter + body.
+	ok := toolText(t, serve(t, svc, call("create_content", map[string]any{
+		"collection": "blog", "slug": "hello", "apply": true,
+		"data": map[string]any{"title": "Hello", "order": 2, "tags": []any{"a", "b"}},
+		"body": "# Hi\n",
+	}))[0])
+	if !strings.Contains(ok, "Created") {
+		t.Fatalf("expected Created, got %s", ok)
+	}
+	written, err := os.ReadFile(filepath.Join(svc.root, "src", "content", "blog", "hello.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(written)
+	for _, want := range []string{"title: Hello", "order: 2", "tags: [a, b]", "# Hi"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("entry missing %q:\n%s", want, out)
+		}
+	}
+
+	// Refusing an existing entry.
+	exists := toolText(t, serve(t, svc, call("create_content", map[string]any{
+		"collection": "blog", "slug": "hello", "apply": true, "data": map[string]any{"title": "Again"},
+	}))[0])
+	if !strings.Contains(exists, "already exists") {
+		t.Fatalf("expected already-exists refusal, got %s", exists)
+	}
+
+	// Unknown collection message mentions plugins.
+	unknown := toolText(t, serve(t, svc, call("create_content", map[string]any{
+		"collection": "nope", "slug": "x", "data": map[string]any{"title": "T"},
+	}))[0])
+	if !strings.Contains(unknown, "no collection") {
+		t.Fatalf("expected unknown-collection error, got %s", unknown)
+	}
+}
+
+func TestCreateContentContributedDocs(t *testing.T) {
+	svc := newTestService(t, map[string]string{
+		"src/pages/index.tsx":       "export default function Page() { return <h1>Hi</h1>; }",
+		"src/content/docs/start.md": "---\ntitle: Start\n---\nbody",
+	})
+	svc.cfg.Plugins = []config.PluginConfig{{Name: "docs"}}
+
+	// The docs schema is permissive, so a docs entry can be created.
+	ok := toolText(t, serve(t, svc, call("create_content", map[string]any{
+		"collection": "docs", "slug": "guides/advanced", "apply": true,
+		"data": map[string]any{"title": "Advanced", "tags": []any{"guide"}},
+	}))[0])
+	if !strings.Contains(ok, "Created") {
+		t.Fatalf("expected Created, got %s", ok)
+	}
+	written, err := os.ReadFile(filepath.Join(svc.root, "src", "content", "docs", "guides", "advanced.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(written), "title: Advanced") {
+		t.Errorf("unexpected docs entry: %s", written)
+	}
+}
+
+func TestEditContentModes(t *testing.T) {
+	svc := newTestService(t, map[string]string{
+		"src/pages/index.tsx":             "export default function Page() { return <h1>Hi</h1>; }",
+		"src/content/blog/hello-world.md": "---\ntitle: Hello\n---\nOriginal body.\n",
+	})
+	svc.cfg.Content = map[string]any{"blog": map[string]any{
+		"dir":    "src/content/blog",
+		"schema": map[string]any{"title": "string"},
+	}}
+
+	// Refusing a schema-violating full replace.
+	bad := toolText(t, serve(t, svc, call("edit_content", map[string]any{
+		"collection": "blog", "slug": "hello-world", "content": "---\ntitle: 123\n---\nnew",
+	}))[0])
+	if !strings.Contains(bad, "refusing to edit") {
+		t.Fatalf("expected schema refusal, got %s", bad)
+	}
+	if !strings.Contains(bad, "src/content/blog/hello-world.md") {
+		t.Errorf("expected project-relative path in refusal message, got %s", bad)
+	}
+
+	// Frontmatter rewrite via data keeps the body.
+	dry := toolText(t, serve(t, svc, call("edit_content", map[string]any{
+		"collection": "blog", "slug": "hello-world",
+		"data": map[string]any{"title": "Renamed"},
+	}))[0])
+	if !strings.Contains(dry, "Dry run") {
+		t.Fatalf("expected dry-run, got %s", dry)
+	}
+	if !strings.Contains(dry, "src/content/blog/hello-world.md") {
+		t.Errorf("expected project-relative diff path, got %s", dry)
+	}
+	changed := toolText(t, serve(t, svc, call("edit_content", map[string]any{
+		"collection": "blog", "slug": "hello-world", "apply": true,
+		"data": map[string]any{"title": "Renamed"},
+	}))[0])
+	if !strings.Contains(changed, "Updated") {
+		t.Fatalf("expected Updated, got %s", changed)
+	}
+	written, err := os.ReadFile(filepath.Join(svc.root, "src", "content", "blog", "hello-world.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := string(written)
+	if !strings.Contains(out, "title: Renamed") {
+		t.Errorf("expected renamed title, got %s", out)
+	}
+	if !strings.Contains(out, "Original body") {
+		t.Errorf("data rewrite should keep the body, got %s", out)
+	}
+
+	// Find+replace targeted edit.
+	findText := toolText(t, serve(t, svc, call("edit_content", map[string]any{
+		"collection": "blog", "slug": "hello-world", "apply": true,
+		"find": "Original body", "replace": "Rewritten body",
+	}))[0])
+	if !strings.Contains(findText, "Updated") {
+		t.Fatalf("expected Updated, got %s", findText)
+	}
+	written2, err := os.ReadFile(filepath.Join(svc.root, "src", "content", "blog", "hello-world.md"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(written2), "Rewritten body") {
+		t.Errorf("expected rewritten body, got %s", written2)
+	}
+
+	// Refusing missing mode.
+	incomplete := toolText(t, serve(t, svc, call("edit_content", map[string]any{
+		"collection": "blog", "slug": "hello-world",
+	}))[0])
+	if !strings.Contains(incomplete, "provide content") {
+		t.Fatalf("expected mode error, got %s", incomplete)
+	}
+}
+
+func TestContentCompletionsUseContributedCollections(t *testing.T) {
+	svc := newTestService(t, map[string]string{
+		"src/pages/index.tsx":   "export default function Page() { return <h1>Hi</h1>; }",
+		"src/content/docs/a.md": "---\ntitle: A\n---\nbody",
+	})
+	svc.cfg.Plugins = []config.PluginConfig{{Name: "docs"}}
+
+	resp := mustResp(t, serve(t, svc,
+		`{"jsonrpc":"2.0","id":1,"method":"completions/complete","params":{"ref":{"type":"ref/tool","name":"read_content"},"argument":{"name":"collection","value":""}}}`,
+	)[0])
+	v := resp["completion"].(map[string]any)
+	if !strings.Contains(v["values"].([]any)[0].(string), "docs") {
+		t.Errorf("expected docs collection completion, got %v", v)
+	}
+
+	// With a single effective collection (docs only), slug completion works.
+	resp2 := mustResp(t, serve(t, svc,
+		`{"jsonrpc":"2.0","id":2,"method":"completions/complete","params":{"ref":{"type":"ref/tool","name":"edit_content"},"argument":{"name":"slug","value":""}}}`,
+	)[0])
+	v2 := resp2["completion"].(map[string]any)
+	vals, _ := v2["values"].([]any)
+	found := false
+	for _, s := range vals {
+		if str, ok := s.(string); ok && str == "a" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected docs slug completion, got %v", v2)
 	}
 }

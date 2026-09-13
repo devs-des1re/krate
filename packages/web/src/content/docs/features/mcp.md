@@ -65,6 +65,8 @@ The shape is the same, under the client's own key:
 | `create_page` | Create a page from a template; returns a diff (dry-run by default) |
 | `edit_ast` | Replace a page's AST with an edited document; returns a diff |
 | `edit_page` | Edit any project file's source directly (full replace or find+replace); returns a diff |
+| `create_content` | Create an entry in a content collection, validated against its schema; returns a diff |
+| `edit_content` | Edit a content entry (full replace, frontmatter rewrite, or find+replace); schema-checked |
 
 Every tool advertises [annotations](https://modelcontextprotocol.io/specification/2025-06-18/basic/tools#tool-annotations)
 (read-only, additive, destructive) so clients know what to auto-approve and
@@ -90,9 +92,10 @@ added.
 
 ### Write tools
 
-`create_page`, `edit_ast`, and `edit_page` **default to a dry-run** that
-returns a unified diff. Pass `"apply": true` to write. This gives the agent (and
-you) an approval step before anything changes on disk.
+`create_page`, `edit_ast`, `edit_page`, `create_content`, and `edit_content`
+**default to a dry-run** that returns a unified diff. Pass `"apply": true` to
+write. This gives the agent (and you) an approval step before anything changes
+on disk.
 
 - **`create_page`** scaffolds a page from a template — `static` (default),
   `content-list`, `detail`, and `blank` (raw source override). For
@@ -120,6 +123,18 @@ you) an approval step before anything changes on disk.
   line endings (LF/CRLF) are preserved, and paths are anchored to the project
   root with traversal rejected. A diff is returned in either mode.
 
+- **`create_content`** writes a new entry to a content collection. `data` is
+  validated against the collection schema (required fields, type checks) before
+  any file is created; the entry is refused if it already exists or the slug
+  would escape the collection directory. Plugin-contributed collections (like
+  the docs collection) are supported alongside configured `content:` entries.
+
+- **`edit_content`** edits an existing content entry. Three modes: full-file
+  replace via `content`, frontmatter rewrite via `data` (body preserved unless
+  `body` is given), or a targeted find+replace. The result is re-parsed and
+  validated against the collection schema before any write, so a broken
+  frontmatter change is never written to disk.
+
 ## Resources and resource templates
 
 Resources provide pull-based context an agent can attach automatically.
@@ -128,14 +143,14 @@ Resources provide pull-based context an agent can attach automatically.
 |-----|----------|
 | `krate://routes` | Every route in the project (JSON) |
 | `krate://page/{route}` | A single page by route, e.g. `krate://page/about` |
-| `krate://content` | Configured content collections and their entries |
+| `krate://content` | Effective content collections (configured `content:` plus plugin-contributed, e.g. docs) and their entries, with each collection's schema fields |
 | `krate://manifest` | The built site manifest (empty when unbuilt) |
 | `krate://config` | The resolved Krate config (relative paths, no env values) |
 
 `krate://page/{route}` is a **resource template**, advertised through
 `resources/templates/list`. The server also provides **argument completions**
 (`completions/complete`) for routes, page templates, and content collections
-(and collection slugs for `read_content`), so clients can offer values while
+(and collection slugs for the content tools), so clients can offer values while
 the agent is filling in a tool call or prompt argument.
 
 ## Prompts
@@ -144,8 +159,8 @@ Prompts package recurring workflows so agents reach for the right tools:
 
 - `add-page` — create a page the Krate way: match house style first, then
   `create_page` with the chosen template, and confirm via `build`/`check`.
-- `publish-content` — author a new entry into a typed content collection and
-  wire it into a page.
+- `publish-content` — author a new entry into a typed content collection via
+  `create_content` (schema-validated) and wire it into a page.
 - `fix-checks` — run the quality gates, then fix the worst findings with
   `edit_page`.
 - `explore` — summarize the project from routes, config, and outstanding checks.

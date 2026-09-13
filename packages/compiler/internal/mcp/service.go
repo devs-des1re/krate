@@ -16,9 +16,11 @@ import (
 	"github.com/kratejs/krate/packages/compiler/internal/build"
 	"github.com/kratejs/krate/packages/compiler/internal/check"
 	"github.com/kratejs/krate/packages/compiler/internal/config"
+	"github.com/kratejs/krate/packages/compiler/internal/content"
 	"github.com/kratejs/krate/packages/compiler/internal/docs"
 	"github.com/kratejs/krate/packages/compiler/internal/frontmatter"
 	"github.com/kratejs/krate/packages/compiler/internal/markdown"
+	"github.com/kratejs/krate/packages/compiler/internal/plugin"
 	"github.com/kratejs/krate/packages/compiler/internal/routetypes"
 )
 
@@ -158,11 +160,41 @@ func (s *Service) Register(srv *Server) {
 		Name:        "read_content",
 		Description: "Read content-collection entries. With only a collection, lists its entries (slug + path + frontmatter). With a slug, returns the full entry: raw content, parsed frontmatter, and markdown body.",
 		InputSchema: objSchema(map[string]any{
-			"collection": strSchema("Collection name as configured under content: in krate.config.ts"),
+			"collection": strSchema("Collection name as configured under content: in krate.config.ts or contributed by a plugin (e.g. docs)"),
 			"slug":       strSchema("Entry slug to read, e.g. hello-world or guides/advanced (omit to list)"),
 		}, "collection"),
 		Annotations: readOnlyAnnotations("Read Content"),
 		Handler:     s.toolReadContent,
+	})
+	srv.RegisterTool(Tool{
+		Name:        "create_content",
+		Description: "Create a new entry in a content collection (configured under content: in krate.config.ts or contributed by a plugin, e.g. the docs collection). Validates the frontmatter against the collection schema, refuses existing entries, and returns a unified diff unless apply=true.",
+		InputSchema: objSchema(map[string]any{
+			"collection": strSchema("Collection name (e.g. blog, or docs when the docs plugin contributes it)"),
+			"slug":       strSchema("Entry slug (e.g. hello-world or guides/advanced)"),
+			"data":       objOnlySchema("Frontmatter fields, validated against the collection's schema"),
+			"body":       strSchema("Markdown body of the entry"),
+			"apply":      boolSchema("Write the entry (default false: dry-run)"),
+		}, "collection", "slug"),
+		Annotations: additiveToolAnnotations("Create Content Entry"),
+		Handler:     s.toolCreateContent,
+	})
+	srv.RegisterTool(Tool{
+		Name:        "edit_content",
+		Description: "Edit an existing content entry. Modes: full-file replace via content, frontmatter rewrite via data (body kept unless body is given), or a targeted find+replace. Re-parses the result and refuses edits whose frontmatter violates the collection schema. Returns a unified diff unless apply=true.",
+		InputSchema: objSchema(map[string]any{
+			"collection": strSchema("Collection name (e.g. blog, or docs when the docs plugin contributes it)"),
+			"slug":       strSchema("Entry slug (e.g. hello-world or guides/advanced)"),
+			"content":    strSchema("Full new entry content (frontmatter + body)"),
+			"data":       objOnlySchema("Frontmatter fields to write (merged over existing; body preserved unless body is given)"),
+			"body":       strSchema("New markdown body (only used with data)"),
+			"find":       strSchema("Exact text to replace; must match once unless replaceAll is true"),
+			"replace":    strSchema("Replacement text for find"),
+			"replaceAll": boolSchema("Allow replacing all occurrences of find (default false)"),
+			"apply":      boolSchema("Write the edit (default false: dry-run)"),
+		}, "collection", "slug"),
+		Annotations: destructiveToolAnnotations("Edit Content Entry"),
+		Handler:     s.toolEditContent,
 	})
 
 	// ── resources ─────────────────────────────────────────────────────────
@@ -225,6 +257,10 @@ func (s *Service) Register(srv *Server) {
 	srv.RegisterCompletion("ref/tool", "read_page", "route", s.completeRoutes)
 	srv.RegisterCompletion("ref/tool", "read_content", "collection", s.completeCollections)
 	srv.RegisterCompletion("ref/tool", "read_content", "slug", s.completeContentSlugs)
+	srv.RegisterCompletion("ref/tool", "create_content", "collection", s.completeCollections)
+	srv.RegisterCompletion("ref/tool", "create_content", "slug", s.completeContentSlugs)
+	srv.RegisterCompletion("ref/tool", "edit_content", "collection", s.completeCollections)
+	srv.RegisterCompletion("ref/tool", "edit_content", "slug", s.completeContentSlugs)
 }
 
 // ── read tools ──────────────────────────────────────────────────────────────
@@ -599,36 +635,10 @@ func (s *Service) renderContentEntry(col string, m map[string]any) (rel, content
 	}
 	dir := s.collectionDir(col)
 	if dir == "" {
-		return "", "", fmt.Errorf("unknown collection %q — add it under content: in krate.config.ts", col)
+		return "", "", fmt.Errorf("unknown collection %q — configure it under content: in krate.config.ts or add a plugin that contributes it", col)
 	}
 	rel = filepath.ToSlash(filepath.Join(dir, slug+".md"))
-
-	var b strings.Builder
-	b.WriteString("---\n")
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		if k != "slug" {
-			keys = append(keys, k)
-		}
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		switch v := m[k].(type) {
-		case string:
-			b.WriteString(k + ": " + v + "\n")
-		case []any:
-			strs := make([]string, 0, len(v))
-			for _, item := range v {
-				strs = append(strs, fmt.Sprintf("%v", item))
-			}
-			b.WriteString(k + ": [" + strings.Join(strs, ", ") + "]\n")
-		default:
-			fmt.Fprintf(&b, "%s: %v\n", k, v)
-		}
-	}
-	b.WriteString("---\n\n")
-	fmt.Fprintf(&b, "Content for **%s**.\n", slug)
-	return rel, b.String(), nil
+	return rel, renderMarkdownEntry(m, "Content for **"+slug+"**."), nil
 }
 
 func (s *Service) toolEditAST(ctx context.Context, args map[string]any) (ToolResult, *rpcError) {
@@ -812,7 +822,7 @@ func (s *Service) toolReadContent(ctx context.Context, args map[string]any) (Too
 	}
 	col := s.collectionCanonical(raw)
 	if col == "" {
-		return ErrorResult("no collection named " + strconv.Quote(raw) + " — configure it under content: in krate.config.ts"), nil
+		return ErrorResult("no collection named " + strconv.Quote(raw) + " — configure it under content: in krate.config.ts or add a plugin that contributes it"), nil
 	}
 	dir := s.collectionDir(col)
 	absDir := filepath.Join(s.root, filepath.FromSlash(dir))
@@ -868,6 +878,200 @@ func (s *Service) toolReadContent(ctx context.Context, args map[string]any) (Too
 	return JSONResult(result)
 }
 
+// toolCreateContent creates a new entry in a content collection. Frontmatter is
+// validated against the collection schema; existing entries and unsafe slugs
+// are refused. Defaults to a dry-run unified diff.
+func (s *Service) toolCreateContent(ctx context.Context, args map[string]any) (ToolResult, *rpcError) {
+	raw := argString(args, "collection")
+	if raw == "" {
+		return ErrorResult("provide collection"), nil
+	}
+	col := s.collectionCanonical(raw)
+	if col == "" {
+		return ErrorResult("no collection named " + strconv.Quote(raw) + " — configure it under content: in krate.config.ts or add a plugin that contributes it"), nil
+	}
+	slug := argString(args, "slug")
+	if slug == "" {
+		return ErrorResult("provide slug"), nil
+	}
+	if err := validateContentSlug(slug); err != nil {
+		return ErrorResult(err.Error()), nil
+	}
+	apply := argBool(args, "apply", false)
+
+	dir := s.collectionDir(col)
+	if dir == "" {
+		return ErrorResult("no collection named " + strconv.Quote(col)), nil
+	}
+	clean := strings.TrimSuffix(slug, filepath.Ext(slug))
+	rel := filepath.ToSlash(filepath.Join(dir, clean+".md"))
+	abs := filepath.Join(s.root, filepath.FromSlash(rel))
+	if _, err := os.Stat(abs); err == nil {
+		return ErrorResult("entry already exists: " + rel), nil
+	}
+
+	cfg := s.contentConfig().Collections[col]
+	if errs := content.Validate(cfg.Schema, argStringMap(args, "data")); len(errs) > 0 {
+		msgs := make([]string, 0, len(errs))
+		for _, e := range errs {
+			msgs = append(msgs, e.Error())
+		}
+		return ErrorResult("frontmatter does not satisfy the " + col + " schema:\n" + strings.Join(msgs, "\n")), nil
+	}
+	body := argString(args, "body")
+	out := renderMarkdownEntry(argStringMap(args, "data"), body)
+
+	diff := unifiedDiff(rel, "", out)
+	if !apply {
+		return TextResult("Dry run (apply: true to write). Would create:\n\n" + diff), nil
+	}
+	if err := os.MkdirAll(filepath.Dir(abs), 0755); err != nil {
+		return ErrorResult("creating the directory for " + rel + ": " + err.Error()), nil
+	}
+	if err := os.WriteFile(abs, []byte(out), 0644); err != nil {
+		return ErrorResult("writing " + rel + ": " + err.Error()), nil
+	}
+	return TextResult("Created " + rel + "\n\n" + diff), nil
+}
+
+// toolEditContent edits an existing content entry. Three modes: full-file
+// replace via content, frontmatter rewrite via data (body preserved unless
+// body is given), or a targeted find+replace. The result is re-parsed and
+// validated against the collection schema before any write.
+func (s *Service) toolEditContent(ctx context.Context, args map[string]any) (ToolResult, *rpcError) {
+	raw := argString(args, "collection")
+	if raw == "" {
+		return ErrorResult("provide collection"), nil
+	}
+	col := s.collectionCanonical(raw)
+	if col == "" {
+		return ErrorResult("no collection named " + strconv.Quote(raw) + " — configure it under content: in krate.config.ts or add a plugin that contributes it"), nil
+	}
+	slug := argString(args, "slug")
+	if slug == "" {
+		return ErrorResult("provide slug"), nil
+	}
+	if err := validateContentSlug(slug); err != nil {
+		return ErrorResult(err.Error()), nil
+	}
+	apply := argBool(args, "apply", false)
+
+	dir := s.collectionDir(col)
+	if dir == "" {
+		return ErrorResult("no collection named " + strconv.Quote(col)), nil
+	}
+	clean := strings.TrimSuffix(slug, filepath.Ext(slug))
+	absDir := filepath.Join(s.root, filepath.FromSlash(dir))
+	relFile := clean + ".md"
+	fileData, readErr := os.ReadFile(filepath.Join(absDir, filepath.FromSlash(relFile)))
+	if readErr != nil {
+		relFile = clean + ".mdx"
+		fileData, readErr = os.ReadFile(filepath.Join(absDir, filepath.FromSlash(relFile)))
+	}
+	if readErr != nil {
+		return ErrorResult("no entry " + strconv.Quote(slug) + " in collection " + strconv.Quote(col)), nil
+	}
+	original := string(fileData)
+	projPath := filepath.ToSlash(filepath.Join(dir, relFile))
+
+	full := argString(args, "content")
+	data := argStringMap(args, "data")
+	body := argString(args, "body")
+	find := argString(args, "find")
+	replace := argString(args, "replace")
+	replaceAll := argBool(args, "replaceAll", false)
+
+	modes := 0
+	if full != "" {
+		modes++
+	}
+	if data != nil {
+		modes++
+	}
+	if find != "" {
+		modes++
+	}
+	if modes == 0 {
+		return ErrorResult("provide content (full replace), data (frontmatter rewrite), or find+replace (targeted edit)"), nil
+	}
+	if modes > 1 {
+		return ErrorResult("provide only one of content, data, or find+replace"), nil
+	}
+
+	var out string
+	switch {
+	case full != "":
+		out = full
+	case find != "":
+		matches := strings.Count(original, find)
+		if matches == 0 {
+			return ErrorResult("find text not found in " + projPath), nil
+		}
+		if matches > 1 && !replaceAll {
+			return ErrorResult(fmt.Sprintf("%q matches %d places in %s; narrow the find text or pass replaceAll: true", find, matches, projPath)), nil
+		}
+		out = strings.ReplaceAll(original, find, replace)
+	default:
+		exData, exBody := frontmatter.Parse(original)
+		if exData == nil {
+			exData = map[string]any{}
+		}
+		for k, v := range data {
+			exData[k] = v
+		}
+		if body != "" {
+			exBody = body
+		}
+		out = renderMarkdownEntry(exData, exBody)
+	}
+
+	// Re-parse and validate the resulting frontmatter against the schema.
+	newData, _ := frontmatter.Parse(out)
+	if newData == nil {
+		newData = map[string]any{}
+	}
+	cfg := s.contentConfig().Collections[col]
+	if errs := content.Validate(cfg.Schema, newData); len(errs) > 0 {
+		msgs := make([]string, 0, len(errs))
+		for _, e := range errs {
+			msgs = append(msgs, e.Error())
+		}
+		return ErrorResult("refusing to edit " + projPath + ": frontmatter would not satisfy the " + col + " schema:\n" + strings.Join(msgs, "\n")), nil
+	}
+
+	// Preserve the file's original line ending.
+	if strings.Contains(original, "\r\n") && out != original {
+		out = strings.ReplaceAll(out, "\n", "\r\n")
+	}
+
+	diff := unifiedDiff(projPath, original, out)
+	if !apply {
+		return TextResult("Dry run (apply: true to write).\n\n" + diff), nil
+	}
+	if err := os.WriteFile(filepath.Join(absDir, filepath.FromSlash(relFile)), []byte(out), 0644); err != nil {
+		return ErrorResult("writing " + projPath + ": " + err.Error()), nil
+	}
+	return TextResult("Updated " + projPath + "\n\n" + diff), nil
+}
+
+// validateContentSlug rejects slugs that would escape the collection directory
+// or resolve to the collection root itself.
+func validateContentSlug(slug string) error {
+	clean := filepath.ToSlash(strings.Trim(strings.TrimSpace(slug), "/"))
+	if clean == "" || clean == "." {
+		return fmt.Errorf("invalid slug %q", slug)
+	}
+	if filepath.IsAbs(filepath.FromSlash(clean)) {
+		return fmt.Errorf("invalid slug %q: must be relative", slug)
+	}
+	for _, seg := range strings.Split(clean, "/") {
+		if seg == ".." || seg == "" || strings.ContainsAny(seg, `\`) {
+			return fmt.Errorf("invalid slug %q", slug)
+		}
+	}
+	return nil
+}
+
 // ── resources ───────────────────────────────────────────────────────────────
 
 func (s *Service) readContentResource(ctx context.Context, uri string) (ResourceContents, *rpcError) {
@@ -878,10 +1082,17 @@ func (s *Service) readContentResource(ctx context.Context, uri string) (Resource
 		Count  int            `json:"count"`
 		Files  []string       `json:"files,omitempty"`
 	}
-	cfg := contentConfig(s.cfg.Content)
+	cfg := s.contentConfig()
 	collections := map[string]any{}
-	for name, c := range cfg {
+	for name, c := range cfg.Collections {
 		e := entry{Name: name, Dir: filepath.ToSlash(c.Dir)}
+		if len(c.Schema) > 0 {
+			fields := map[string]any{}
+			for fname, f := range c.Schema {
+				fields[fname] = map[string]any{"type": string(f.Type), "required": f.Required}
+			}
+			e.Fields = fields
+		}
 		if abs := filepath.Join(s.root, c.Dir); abs != "" {
 			if rel, _ := filepath.Rel(s.root, abs); rel == ".." || filepath.IsAbs(rel) {
 				continue
@@ -987,11 +1198,19 @@ func (s *Service) readConfigResource(ctx context.Context, uri string) (ResourceC
 			"options": p.Options,
 		})
 	}
-	ccfg := contentConfig(c.Content)
-	if len(ccfg) > 0 {
+	ccfg := s.contentConfig()
+	if len(ccfg.Collections) > 0 {
 		v.Content = map[string]map[string]any{}
-		for name, cc := range ccfg {
-			v.Content[name] = map[string]any{"dir": filepath.ToSlash(cc.Dir)}
+		for name, cc := range ccfg.Collections {
+			info := map[string]any{"dir": filepath.ToSlash(cc.Dir)}
+			if len(cc.Schema) > 0 {
+				fields := map[string]any{}
+				for fname, f := range cc.Schema {
+					fields[fname] = map[string]any{"type": string(f.Type), "required": f.Required}
+				}
+				info["schema"] = fields
+			}
+			v.Content[name] = info
 		}
 	}
 	for _, a := range c.PathAliases {
@@ -1036,23 +1255,24 @@ func (s *Service) completeTemplates(ctx context.Context, _ string) ([]string, er
 }
 
 func (s *Service) completeCollections(ctx context.Context, _ string) ([]string, error) {
-	out := make([]string, 0, len(s.cfg.Content))
-	for name := range s.cfg.Content {
+	out := make([]string, 0, len(s.contentConfig().Collections))
+	for name := range s.contentConfig().Collections {
 		out = append(out, name)
 	}
 	sort.Strings(out)
 	return out, nil
 }
 
-// completeContentSlugs suggests entry slugs for read_content. Slug completion
-// is only well-defined for a single configured collection; with several,
+// completeContentSlugs suggests entry slugs for content tools. Slug completion
+// is only well-defined for a single effective collection; with several,
 // nothing is suggested (the AI should list the collection to discover slugs).
 func (s *Service) completeContentSlugs(ctx context.Context, _ string) ([]string, error) {
-	if len(s.cfg.Content) != 1 {
+	cfg := s.contentConfig()
+	if len(cfg.Collections) != 1 {
 		return nil, nil
 	}
-	for name := range s.cfg.Content {
-		dir := s.collectionDir(name)
+	for _, col := range cfg.Collections {
+		dir := col.Dir
 		if dir == "" {
 			return nil, nil
 		}
@@ -1096,7 +1316,7 @@ func (s *Service) promptPublishContent() *Prompt {
 		Name:        "publish-content",
 		Description: "Author a new entry into a typed content collection (with frontmatter) and wire it into a page.",
 		Arguments: []PromptArgument{
-			{Name: "collection", Description: "Collection name as configured under content: in krate.config.ts", Required: true},
+			{Name: "collection", Description: "Collection name as configured under content: in krate.config.ts or contributed by a plugin (e.g. docs)", Required: true},
 			{Name: "slug", Description: "Entry slug, e.g. hello-world", Required: true},
 			{Name: "title", Description: "Entry title stored in frontmatter"},
 			{Name: "fields", Description: "Additional frontmatter fields as a JSON object"},
@@ -1104,7 +1324,7 @@ func (s *Service) promptPublishContent() *Prompt {
 		},
 		Messages: []PromptMessage{{
 			Role:    "user",
-			Content: TextContent("Create a new entry in the {{collection}} content collection with slug {{slug}} and title {{title}}. Use create_page with a content-entry argument, or create/update the entry file with edit_page (read_content first to see the schema and house style), so frontmatter matches the collection schema; verify the fields against the schema surfaced by krate://content. Unless {{apply}} is true, present the diff before writing."),
+			Content: TextContent("Create a new entry in the {{collection}} content collection with slug {{slug}} and title {{title}}. Use create_content so the frontmatter is validated against the collection schema (read_content or krate://content first to see the schema and house style; add any complex fields under {{fields}}). Unless {{apply}} is true, present the diff before writing."),
 		}},
 	}
 }
@@ -1274,17 +1494,13 @@ func routeFromRel(rel string) string {
 }
 
 // inferCollectionFromPage guesses the content collection that backs a route by
-// matching the route's directory against configured collection dirs.
+// matching the route's directory against the effective collection dirs
+// (configured collections merged with plugin-contributed ones).
 func (s *Service) inferCollectionFromPage(route string, root string) string {
 	segs := strings.Split(strings.Trim(route, "/"), "/")
-	for _, name := range sortedKeys(s.cfg.Content) {
-		c := s.cfg.Content[name]
-		dir := ""
-		if m, ok := c.(map[string]any); ok {
-			if d, ok := m["dir"].(string); ok {
-				dir = d
-			}
-		}
+	cfg := s.contentConfig()
+	for _, name := range sortedContentNames(cfg) {
+		dir := cfg.Collections[name].Dir
 		for _, seg := range segs {
 			if seg != "" && strings.Contains(dir, seg) {
 				return name
@@ -1294,40 +1510,85 @@ func (s *Service) inferCollectionFromPage(route string, root string) string {
 	return ""
 }
 
-func sortedKeys(m map[string]any) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
+func sortedContentNames(cfg *content.Config) []string {
+	names := make([]string, 0, len(cfg.Collections))
+	for name := range cfg.Collections {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// contentConfig returns the effective content configuration: `content:`
+// collections from krate.config.ts merged with collections contributed by
+// plugins (e.g. the docs plugin). Configured collections win on name
+// collisions.
+func (s *Service) contentConfig() *content.Config {
+	cfg := content.ParseConfig(s.cfg.Content)
+	if cfg == nil {
+		cfg = &content.Config{Collections: map[string]content.Collection{}}
+	}
+	for name, col := range plugin.DefaultContributedCollections(s.cfg) {
+		if _, ok := cfg.Collections[name]; !ok {
+			cfg.Collections[name] = col
+		}
+	}
+	return cfg
+}
+
+// renderMarkdownEntry builds a markdown file from frontmatter fields and a
+// body string. A "slug" key in fields is excluded (it's derived from the
+// filename).
+func renderMarkdownEntry(fields map[string]any, body string) string {
+	var b strings.Builder
+	b.WriteString("---\n")
+	keys := make([]string, 0, len(fields))
+	for k := range fields {
+		if k != "slug" {
+			keys = append(keys, k)
+		}
 	}
 	sort.Strings(keys)
-	return keys
+	for _, k := range keys {
+		switch v := fields[k].(type) {
+		case string:
+			b.WriteString(k + ": " + v + "\n")
+		case []any:
+			strs := make([]string, 0, len(v))
+			for _, item := range v {
+				strs = append(strs, fmt.Sprintf("%v", item))
+			}
+			b.WriteString(k + ": [" + strings.Join(strs, ", ") + "]\n")
+		default:
+			fmt.Fprintf(&b, "%s: %v\n", k, v)
+		}
+	}
+	b.WriteString("---\n\n")
+	if body != "" {
+		b.WriteString(body)
+		if !strings.HasSuffix(body, "\n") {
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
 }
 
 func (s *Service) collectionDir(name string) string {
-	for n, c := range s.cfg.Content {
-		if n != name {
-			continue
-		}
-		if m, ok := c.(map[string]any); ok {
-			if d, ok := m["dir"].(string); ok && d != "" {
-				return d
-			}
-		}
-		return "src/content/" + name
+	col, ok := s.contentConfig().Collections[name]
+	if !ok {
+		return ""
 	}
-	return ""
+	return col.Dir
 }
 
-// collectionCanonical returns the configured collection name for the given
+// collectionCanonical returns the effective collection name for the given
 // label, or "" when no such collection exists.
 func (s *Service) collectionCanonical(name string) string {
 	if name == "" {
 		return ""
 	}
-	for n := range s.cfg.Content {
-		if n == name {
-			return n
-		}
+	if _, ok := s.contentConfig().Collections[name]; ok {
+		return name
 	}
 	return ""
 }
@@ -1425,29 +1686,6 @@ func excerpt(text, query string, n int) string {
 	}
 	if end < len(text) {
 		out += "…"
-	}
-	return out
-}
-
-// contentConfig is a minimal view of the content config for the content
-// resource.
-type contentCollection struct {
-	Dir string
-}
-
-func contentConfig(raw map[string]any) map[string]contentCollection {
-	out := map[string]contentCollection{}
-	for name, v := range raw {
-		cc := contentCollection{}
-		if m, ok := v.(map[string]any); ok {
-			if dir, ok := m["dir"].(string); ok {
-				cc.Dir = dir
-			}
-		}
-		if cc.Dir == "" {
-			cc.Dir = "src/content/" + name
-		}
-		out[name] = cc
 	}
 	return out
 }
