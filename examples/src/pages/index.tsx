@@ -19,9 +19,7 @@ function Counter(props: CounterProps) {
     <div class="counter">
       <span class="count">{count()}</span>
       <button onClick={() => setCount((c: number) => c + 1)}>+</button>
-      {count() > 0 && (
-        <button onClick={() => setCount((c: number) => c - 1)}>-</button>
-      )}
+      <button onClick={() => setCount((c: number) => c - 1)} showIf={count() > 0}>-</button>
     </div>
   );
 }

@@ -633,6 +633,18 @@ func (b *builder) buildCallExprSlots(call *ast.CallExpr, parentID string) []Slot
 // â”€â”€â”€ buildJSXSlot â€” lowercase HTML or uppercase component â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 func (b *builder) buildJSXSlot(el *ast.JSXElement, parentID string) []SlotNode {
+	// `showIf`/`visibleIf` sugar: {test && <el/>}. Strip the attribute and route
+	// the guard through the same static-fold / ConditionalSlot machinery used by
+	// explicit `{test && <el/>}` expressions so reactivity inside either branch
+	// (handlers, bindings, nested guards) keeps working.
+	if test, stripped, ok := ShowIfExpr(el); ok {
+		bin := &ast.BinaryExpr{Left: test, Op: "&&", Right: stripped}
+		if nodes, resolved := b.tryResolveGuard(bin, parentID); resolved {
+			return nodes
+		}
+		return []SlotNode{b.buildGuardSlot(bin, parentID)}
+	}
+
 	name := el.Opening.Name
 
 	// Special components â€” route to metadata output
@@ -2143,6 +2155,71 @@ func (b *builder) tryResolveConditional(cond *ast.ConditionalExpr, parentID stri
 		v := evalConstWithSignals(branch, b.sigMap(), b.localProps)
 		return []SlotNode{&StaticHTML{HTML: v}}
 	}
+}
+
+// ShowIfExpr returns the test for a `showIf`/`visibleIf` attribute along with a
+// shallow copy of the element with all such attributes removed. The third return
+// is false when the element has neither attribute. A missing value
+// (`<X showIf />`) yields the literal `true`. When both `showIf` and
+// `visibleIf` are present, `showIf` wins (the canonical spelling).
+//
+// The original AST is never mutated: JSX elements are shared across dynamic
+// route renders and multiple component instances, so only the attribute slice
+// is rebuilt and the opening/element structs are shallow-copied.
+//
+// Exported so the SSREval path (renderer) can handle signal-less components
+// identically to the slot-builder path.
+func ShowIfExpr(el *ast.JSXElement) (ast.Expr, *ast.JSXElement, bool) {
+	if el == nil || el.Opening == nil {
+		return nil, nil, false
+	}
+	// Collect all occurrences; `showIf` is preferred over `visibleIf`.
+	canonicalIdx, aliasIdx := -1, -1
+	for i, attr := range el.Opening.Attributes {
+		if attr == nil || attr.Spread {
+			continue
+		}
+		switch attr.Name {
+		case "showIf":
+			if canonicalIdx < 0 {
+				canonicalIdx = i
+			}
+		case "visibleIf":
+			if aliasIdx < 0 {
+				aliasIdx = i
+			}
+		}
+	}
+	if canonicalIdx < 0 && aliasIdx < 0 {
+		return nil, nil, false
+	}
+	testIdx := canonicalIdx
+	if testIdx < 0 {
+		testIdx = aliasIdx
+	}
+	test := el.Opening.Attributes[testIdx].Value
+	if test == nil {
+		test = &ast.Literal{Kind: ast.BoolLit, Value: "true"}
+	}
+	attrs := make([]*ast.JSXAttr, 0, len(el.Opening.Attributes))
+	for i, attr := range el.Opening.Attributes {
+		if i == canonicalIdx || i == aliasIdx {
+			continue
+		}
+		attrs = append(attrs, attr)
+	}
+	opening := *el.Opening
+	opening.Attributes = attrs
+	clone := *el
+	clone.Opening = &opening
+	return test, &clone, true
+}
+
+// isShowIfAttr reports whether an attribute is the showIf/visibleIf sugar, which
+// is always compiler-erased and must never reach emitted HTML or a component's
+// props.
+func isShowIfAttr(name string) bool {
+	return name == "showIf" || name == "visibleIf"
 }
 
 // tryResolveGuard folds a boolean short-circuit guard ({cond && <A/>} /
@@ -3900,7 +3977,7 @@ func renderFnAsHandler(fn *ast.FnDecl, signals map[string]ast.Expr) string {
 func extractProps(el *ast.JSXElement) map[string]ast.Expr {
 	props := make(map[string]ast.Expr)
 	for _, attr := range el.Opening.Attributes {
-		if !attr.Spread && attr.Value != nil {
+		if !attr.Spread && attr.Value != nil && !isShowIfAttr(attr.Name) {
 			props[attr.Name] = attr.Value
 		}
 	}
@@ -5361,7 +5438,7 @@ func evalMemberExprWithBindings(expr *ast.MemberExpr, bindings map[string]string
 func extractPropsAST(el *ast.JSXElement) map[string]ast.Expr {
 	props := make(map[string]ast.Expr)
 	for _, attr := range el.Opening.Attributes {
-		if attr.Spread {
+		if attr.Spread || isShowIfAttr(attr.Name) {
 			continue
 		}
 		if attr.Value != nil {

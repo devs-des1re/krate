@@ -99,6 +99,28 @@ refetch()         // trigger a re-fetch
 Resources re-fetch automatically when their source signal changes and abort
 in-flight requests when the source changes mid-flight.
 
+## Conditional rendering (`showIf`)
+
+For conditionally rendering an element, Krate supports a `showIf` prop — sugar
+for the `{expr && <el/>}` guard:
+
+```tsx
+const [count] = createSignal(0);
+
+// These are equivalent:
+{count() > 0 && <p>Positive</p>}
+<p showIf={count() > 0}>Positive</p>
+```
+
+- Works on intrinsic elements (`<div>`) **and** components (`<List>`).
+- `visibleIf` is accepted as an alias.
+- A bare attribute (`<p showIf>`) is always true.
+- The attribute is compiler-erased: it never appears in the emitted HTML and is
+  never passed to a component's props.
+- A statically-known test folds at build time (the losing branch is not
+  emitted); a reactive test becomes part of the hydration bundle and toggles the
+  element's visibility as the signal changes.
+
 ## Compile-time validation
 
 The reactive dependency graph is validated at build time and surfaced as `⚠`

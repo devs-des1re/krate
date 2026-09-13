@@ -779,6 +779,188 @@ export default function App() {
 	}
 }
 
+// ─── showIf / visibleIf sugar ────────────────────────────────────────────────
+
+// TestShowIfStaticTruthyFolds verifies that a `showIf` whose test is statically
+// true renders the element (with the attribute stripped) and does not produce a
+// ConditionalSlot.
+func TestShowIfStaticTruthyFolds(t *testing.T) {
+	tree := annotateAndBuild(t, `export default function App() {
+	return <div><span class="x" showIf={1 > 0}>yes</span></div>;
+}`)
+	if !findStaticHTML(tree.Root.Children, func(html string) bool {
+		return strings.Contains(html, `class="x"`) && strings.Contains(html, ">yes</span>")
+	}) {
+		t.Error("expected showIf truthy element to render")
+	}
+	if findConditional(tree.Root.Children) {
+		t.Error("expected static-truthy showIf to fold, got a ConditionalSlot")
+	}
+	if strings.Contains(renderStaticHTML(tree.Root.Children), "showIf") {
+		t.Error("showIf must not leak into emitted HTML")
+	}
+}
+
+// TestShowIfStaticFalsyRendersNothing verifies that a statically-false showIf
+// elides the element entirely.
+func TestShowIfStaticFalsyRendersNothing(t *testing.T) {
+	tree := annotateAndBuild(t, `export default function App() {
+	return <div><span class="x" showIf={1 > 2}>no</span></div>;
+}`)
+	if findStaticHTML(tree.Root.Children, func(html string) bool {
+		return strings.Contains(html, `class="x"`) || strings.Contains(html, ">no</span>")
+	}) {
+		t.Error("expected showIf falsy element to render nothing")
+	}
+	if findConditional(tree.Root.Children) {
+		t.Error("expected static-falsy showIf to fold, got a ConditionalSlot")
+	}
+}
+
+// TestVisibleIfAliasIsShowIf verifies `visibleIf` behaves exactly like `showIf`.
+func TestVisibleIfAliasIsShowIf(t *testing.T) {
+	tree := annotateAndBuild(t, `export default function App() {
+	return <div><span class="y" visibleIf={1 > 0}>alias</span></div>;
+}`)
+	if !findStaticHTML(tree.Root.Children, func(html string) bool {
+		return strings.Contains(html, `class="y"`) && strings.Contains(html, ">alias</span>")
+	}) {
+		t.Error("expected visibleIf truthy element to render")
+	}
+	if strings.Contains(renderStaticHTML(tree.Root.Children), "visibleIf") {
+		t.Error("visibleIf must not leak into emitted HTML")
+	}
+}
+
+// TestShowIfBareAlwaysRenders verifies `<X showIf />` (no value) is truthy.
+func TestShowIfBareAlwaysRenders(t *testing.T) {
+	tree := annotateAndBuild(t, `export default function App() {
+	return <div><span class="bare" showIf>bare</span></div>;
+}`)
+	if !findStaticHTML(tree.Root.Children, func(html string) bool {
+		return strings.Contains(html, `class="bare"`) && strings.Contains(html, ">bare</span>")
+	}) {
+		t.Error("expected bare showIf to render the element")
+	}
+}
+
+// TestShowIfReactiveBecomesConditionalSlot verifies that a signal-driven showIf
+// produces a ConditionalSlot (hydration toggles visibility) rather than folding.
+func TestShowIfReactiveBecomesConditionalSlot(t *testing.T) {
+	tree := annotateAndBuild(t, `function Toggle() {
+	const [on] = createSignal(true);
+	return <div><span class="maybe" showIf={on()}>hi</span></div>;
+}
+export default function App() { return <Toggle />; }`)
+	if !findConditional(tree.Root.Children) {
+		t.Error("expected reactive showIf to produce a ConditionalSlot")
+	}
+}
+
+// TestShowIfOnComponentElement verifies the sugar works on component elements,
+// not just intrinsic ones.
+func TestShowIfOnComponentElement(t *testing.T) {
+	tree := annotateAndBuild(t, `function Widget() { return <b class="w">w</b>; }
+function Card() {
+	const [n] = createSignal(0);
+	return <div><Widget showIf={n() > 0} /></div>;
+}
+export default function App() { return <Card />; }`)
+	if !findConditional(tree.Root.Children) {
+		t.Error("expected component showIf to produce a ConditionalSlot")
+	}
+}
+
+// TestShowIfEquivalentToExplicitGuard verifies the sugar lowers to the same slot
+// shape as the explicit `{test && <el/>}` form.
+func TestShowIfEquivalentToExplicitGuard(t *testing.T) {
+	sugar := annotateAndBuild(t, `export default function App() {
+	return <div><span class="s" showIf={1 < 2}>x</span></div>;
+}`)
+	explicit := annotateAndBuild(t, `export default function App() {
+	return <div>{1 < 2 && <span class="s">x</span>}</div>;
+}`)
+	if got, want := renderStaticHTML(sugar.Root.Children), renderStaticHTML(explicit.Root.Children); got != want {
+		t.Errorf("showIf sugar output differs from explicit guard:\n got: %s\nwant: %s", got, want)
+	}
+}
+
+// TestShowIfStripsFromComponentProps verifies the attribute never reaches a
+// child component's props map (the builder strips it before extracting props).
+func TestShowIfStripsFromComponentProps(t *testing.T) {
+	tree := annotateAndBuild(t, `function Inner(props) {
+	return <span>{Object.keys(props).length}</span>;
+}
+export default function App() {
+	const [n] = createSignal(0);
+	return <Inner showIf={n() > 0} other="x" />;
+}`)
+	if strings.Contains(renderStaticHTML(tree.Root.Children), "showIf") {
+		t.Error("showIf must not be passed to a component's props")
+	}
+}
+
+// TestShowIfExprGuardsAndStrips exercises the exported helper directly: it must
+// report the test, remove showIf/visibleIf, and never mutate the input element.
+func TestShowIfExprGuardsAndStrips(t *testing.T) {
+	prog := parseProg(t, `export default function App() { return <div showIf={a} visibleIf={b} class="k">x</div>; }`)
+	exp := prog.Body[len(prog.Body)-1].(*ast.ExportStmt)
+	appFn := exp.Declaration.(*ast.FnDecl)
+	el := appFn.Body[0].(*ast.ReturnStmt).Value.(*ast.JSXElement)
+	origLen := len(el.Opening.Attributes)
+
+	test, stripped, ok := irtree.ShowIfExpr(el)
+	if !ok {
+		t.Fatal("expected ShowIfExpr to detect showIf")
+	}
+	if _, ok := test.(*ast.Identifier); !ok {
+		t.Errorf("expected identifier test, got %T", test)
+	}
+	if len(el.Opening.Attributes) != origLen {
+		t.Error("ShowIfExpr must not mutate the original element")
+	}
+	if len(stripped.Opening.Attributes) != origLen-2 {
+		t.Fatalf("expected both showIf and visibleIf stripped, got %d attrs", len(stripped.Opening.Attributes))
+	}
+	for _, attr := range stripped.Opening.Attributes {
+		if attr.Name == "showIf" || attr.Name == "visibleIf" {
+			t.Errorf("attribute %q leaked through stripping", attr.Name)
+		}
+	}
+}
+
+// renderStaticHTML walks slot nodes collecting StaticHTML/initial text.
+func renderStaticHTML(children []irtree.SlotNode) string {
+	var b strings.Builder
+	var walk func(nodes []irtree.SlotNode)
+	walk = func(nodes []irtree.SlotNode) {
+		for _, n := range nodes {
+			switch c := n.(type) {
+			case *irtree.StaticHTML:
+				b.WriteString(c.HTML)
+			case *irtree.TextSlot:
+				b.WriteString(c.Initial)
+			case *irtree.ExprSlot:
+				b.WriteString(c.Initial)
+			case *irtree.ComponentSlot:
+				if c.Component != nil {
+					walk(c.Component.Children)
+					walk(c.Component.ReturnSlots)
+				}
+			case *irtree.ConditionalSlot:
+				walk(c.Consequent)
+				walk(c.Alternate)
+			case *irtree.ListSlot:
+				for _, li := range c.Items {
+					walk(li.Contents)
+				}
+			}
+		}
+	}
+	walk(children)
+	return b.String()
+}
+
 // renderSlotHTML flattens slot nodes into their static HTML for assertions.
 func renderSlotHTML(item *irtree.ListItem) string {
 	var b strings.Builder

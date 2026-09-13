@@ -107,6 +107,13 @@ import { jsx, jsxs, Fragment } from '@krate/runtime/jsx-runtime'
 
 Automatic JSX transform — use `<div>` syntax in TSX files.
 
+Every JSX element accepts a `showIf` prop (alias `visibleIf`) for conditional
+rendering — sugar for `{expr && <el/>}`, compiled away at build time:
+
+```tsx
+<div showIf={count() > 0}>Shown when count is positive</div>
+```
+
 ## SPA router
 
 ```typescript

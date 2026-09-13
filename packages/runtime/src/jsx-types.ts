@@ -27,6 +27,19 @@ declare global {
     interface Element extends Node {}
     interface ElementChildrenAttribute { children: {} }
 
+    /**
+     * Attributes accepted by every JSX element (intrinsic and component).
+     * `showIf` (and its alias `visibleIf`) conditionally render the element:
+     * `<X showIf={expr}>` is sugar for `{expr && <X>}`, compiled at build time.
+     * Both are compiler-erased and never reach emitted HTML or component props.
+     */
+    interface IntrinsicAttributes {
+      /** Conditionally render this element (sugar for `{expr && <el/>}`). */
+      showIf?: unknown;
+      /** Alias of `showIf`. */
+      visibleIf?: unknown;
+    }
+
     type Booleanish = boolean | 'true' | 'false';
     type CSSProperties = Record<string, string | number>;
 
@@ -197,7 +210,7 @@ declare global {
       onWaiting?: EventHandler<Event>;
     }
 
-    interface DOMAttributes {
+    interface DOMAttributes extends IntrinsicAttributes {
       children?: unknown[] | unknown;
       key?: string | number;
       /** Assigns the mounted DOM element. Pass a mutable holder (`ref={myRef}`), a callback (`ref={el => ...}`), or an element. */
@@ -650,7 +663,7 @@ declare global {
       disablePictureInPicture?: boolean;
     }
 
-    interface SVGAttributes extends AriaAttributes {
+    interface SVGAttributes extends AriaAttributes, IntrinsicAttributes {
       children?: unknown[] | unknown;
       key?: string | number;
       ref?: ((el: globalThis.Element) => void) | { current: globalThis.Element | null } | globalThis.Element | null;

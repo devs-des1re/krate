@@ -672,6 +672,18 @@ func (e *SSREval) evalPlainCodeBlock(el *ast.JSXElement) string {
 }
 
 func (e *SSREval) evalJSX(el *ast.JSXElement) string {
+	// `showIf`/`visibleIf` sugar: {test && <el/>}. Signal-less components reach
+	// this path, so the test must be evaluated statically against the bindings
+	// (props/locals); a truthy test renders the stripped element, a falsy test
+	// renders nothing. A signal-referencing test would have promoted the
+	// component to the client tier and never arrive here.
+	if test, stripped, ok := irtree.ShowIfExpr(el); ok {
+		if isSSRTruthy(e.eval(test)) {
+			return e.evalJSX(stripped)
+		}
+		return ""
+	}
+
 	name := el.Opening.Name
 
 	// Special components: capture their content into meta fields so signal-less
