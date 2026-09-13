@@ -3,10 +3,12 @@ package docs
 import (
 	"encoding/json"
 	"fmt"
+	"html"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/kratejs/krate/packages/compiler/internal/docfind"
 	"github.com/kratejs/krate/packages/compiler/internal/frontmatter"
 	"github.com/kratejs/krate/packages/compiler/internal/markdown"
 	"github.com/kratejs/krate/packages/compiler/internal/pluginutil"
@@ -47,11 +49,11 @@ type Page struct {
 	CustomSidebar []SidebarItem `json:"customSidebar"`
 
 	// Phase 1 — content fields
-	Description string     `json:"description,omitempty"`
-	Toc         TocConfig  `json:"-"`
-	Hero        *HeroConfig `json:"-"`
-	Template    string     `json:"template,omitempty"`
-	Head        []HeadTag  `json:"-"`
+	Description string       `json:"description,omitempty"`
+	Toc         TocConfig    `json:"-"`
+	Hero        *HeroConfig  `json:"-"`
+	Template    string       `json:"template,omitempty"`
+	Head        []HeadTag    `json:"-"`
 	Prev        *NavOverride `json:"-"`
 	Next        *NavOverride `json:"-"`
 
@@ -276,6 +278,29 @@ func appendSearchTerms(plainText string, tags, categories []string) string {
 	return strings.Join(append([]string{plainText}, extra...), " ")
 }
 
+// BuildSearchDocuments converts docs pages into docfind index documents.
+// Tags and categories are merged into the WASM index keywords so searches
+// against the tags/categories surface the page; the JSON fallback index gets
+// the same terms appended to content (see BuildSearchIndex).
+func BuildSearchDocuments(pages []Page) []docfind.Document {
+	documents := make([]docfind.Document, 0, len(pages))
+	for _, p := range pages {
+		keywords := dedupeNonEmpty(p.Keywords, p.Tags, p.Categories)
+		body := html.UnescapeString(StripHTMLTags(p.Content))
+		if extra := dedupeNonEmpty(p.Tags, p.Categories); len(extra) > 0 {
+			body = strings.Join(append([]string{body}, extra...), " ")
+		}
+		documents = append(documents, docfind.Document{
+			Title:    p.Title,
+			Category: p.Dir,
+			Href:     PageURL(p.Path),
+			Body:     body,
+			Keywords: keywords,
+		})
+	}
+	return documents
+}
+
 func dedupeNonEmpty(slices ...[]string) []string {
 	seen := make(map[string]struct{})
 	var out []string
@@ -295,24 +320,64 @@ func dedupeNonEmpty(slices ...[]string) []string {
 	return out
 }
 
-// StripHTMLTags removes HTML tags from a string.
+// StripHTMLTags removes HTML tags from a string, keeping the document's line
+// structure: block-level tags (p, li, headings, table cells, …) become line
+// breaks, and intra-line whitespace is collapsed. This keeps extracted text
+// readable (paragraphs stay separate) and prevents adjacent blocks from running
+// together, e.g. "<td>File</td><td>When loaded</td>" → "File\nWhen loaded".
 func StripHTMLTags(s string) string {
 	var out strings.Builder
+	var tag strings.Builder
 	inTag := false
 	for _, r := range s {
 		if r == '<' {
 			inTag = true
+			tag.Reset()
 			continue
 		}
 		if r == '>' {
 			inTag = false
+			if isBlockTag(tag.String()) {
+				out.WriteByte('\n')
+			}
 			continue
 		}
-		if !inTag {
+		if inTag {
+			tag.WriteRune(r)
+		} else {
 			out.WriteRune(r)
 		}
 	}
-	return strings.TrimSpace(out.String())
+	// Collapse intra-line whitespace and drop blank lines, preserving breaks.
+	var b strings.Builder
+	for _, line := range strings.Split(out.String(), "\n") {
+		line = strings.Join(strings.Fields(line), " ")
+		if line == "" {
+			continue
+		}
+		if b.Len() > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(line)
+	}
+	return b.String()
+}
+
+// isBlockTag reports whether an HTML tag name is block-level (so its removal
+// should leave a line break).
+func isBlockTag(tag string) bool {
+	tag = strings.ToLower(strings.TrimSpace(tag))
+	tag = strings.TrimPrefix(tag, "/")
+	if i := strings.IndexAny(tag, " \t\n\r"); i >= 0 {
+		tag = tag[:i]
+	}
+	switch tag {
+	case "p", "br", "div", "li", "ul", "ol", "tr", "td", "th", "table",
+		"h1", "h2", "h3", "h4", "h5", "h6", "pre", "blockquote", "section",
+		"article", "header", "footer", "nav", "aside", "hr", "dt", "dd":
+		return true
+	}
+	return false
 }
 
 // Frontmatter is the fully decoded YAML frontmatter for a documentation page.

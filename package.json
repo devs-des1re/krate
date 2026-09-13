@@ -27,12 +27,14 @@
     "compiler"
   ],
   "scripts": {
-    "build": "pnpm -r build",
+    "build": "pnpm sync:docs && pnpm -r build",
     "build:platforms": "node scripts/build-platform-packages.mjs",
+    "sync:docs": "node scripts/sync-krate-docs.mjs",
+    "check:docs": "node scripts/sync-krate-docs.mjs --check",
     "dev": "cd packages/compiler && go run ./cmd/krate dev ../../examples",
-    "test": "cd packages/compiler && go test ./...",
-    "test:compiler": "cd packages/compiler && go test ./... -v",
-    "vet": "cd packages/compiler && go vet ./..."
+    "test": "pnpm sync:docs && cd packages/compiler && go test ./...",
+    "test:compiler": "pnpm sync:docs && cd packages/compiler && go test ./... -v",
+    "vet": "pnpm sync:docs && cd packages/compiler && go vet ./..."
   },
   "devDependencies": {
     "tsx": "^4.19.0"

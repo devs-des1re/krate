@@ -27,6 +27,11 @@ packages/compiler/third_party/docfind/target/
 # Generated platform packages (created by scripts/build-platform-packages.mjs)
 dist-platform/
 
+# Framework docs synced into the compiler at build time
+# (created by scripts/sync-krate-docs.mjs; edit packages/web/src/content/docs)
+packages/compiler/internal/kratedocs/docs/*
+!packages/compiler/internal/kratedocs/docs/.gitkeep
+
 # npm / pnpm artifacts
 .pnpm-debug.log*
 .npm/

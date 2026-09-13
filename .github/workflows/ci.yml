@@ -42,6 +42,9 @@ jobs:
       - name: Install JS dependencies
         run: pnpm install --no-frozen-lockfile
 
+      - name: Sync framework docs
+        run: node scripts/sync-krate-docs.mjs
+
       - name: Go build
         run: go build ./...
         working-directory: packages/compiler

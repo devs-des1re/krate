@@ -59,7 +59,7 @@ The shape is the same, under the client's own key:
 | `list_routes` | Every route with source file, render mode, and dynamic params |
 | `read_page` | A page's source, kind-tagged AST document, or rendered HTML (`format` selectable) |
 | `read_content` | Content-collection entries: list a collection or read one entry (raw file + frontmatter + body) |
-| `search_docs` | Search documentation content, returning matches with excerpts |
+| `search_docs` | Search Krate's built-in framework docs (ranked, via the docfind engine); returns slugs, excerpts, and optional full text |
 | `build` | Build the site; returns diagnostics and a per-route summary |
 | `check` | Run the quality gates (a11y/SEO/perf); builds first when needed |
 | `create_page` | Create a page from a template; returns a diff (dry-run by default) |
@@ -89,6 +89,22 @@ never write source files.
 when `collection` alone is given, or returns a single entry's raw file, parsed
 frontmatter, and markdown body (plus rendered HTML for `.md`) when `slug` is
 added.
+
+`search_docs` searches **Krate's own framework documentation** — the content
+that powers the docs site — which is embedded into the compiler at build time,
+so it works the same from any project and offline. It is backed by the same
+[docfind](https://github.com/microsoft/docfind) WASM engine the docs site's
+search bar uses: results are ranked, and each hit carries a short `excerpt`,
+a `slug`, and a `resource` (`krate://docs/{slug}`) for reading the whole page.
+
+- `limit` caps the number of hits (default 8).
+- `maxChars` sizes the `excerpt` window (default 240); it only affects the
+  excerpt, never the full text.
+- `full: true` adds a `content` field with the hit's complete cleaned text
+  (plain text with newlines).
+
+It does **not** scan the current project's content; use
+`read_content`/`krate://content` for that.
 
 ### Write tools
 
@@ -143,12 +159,14 @@ Resources provide pull-based context an agent can attach automatically.
 |-----|----------|
 | `krate://routes` | Every route in the project (JSON) |
 | `krate://page/{route}` | A single page by route, e.g. `krate://page/about` |
+| `krate://docs/{slug}` | A Krate framework documentation page as raw markdown, e.g. `krate://docs/features/mcp` |
 | `krate://content` | Effective content collections (configured `content:` plus plugin-contributed, e.g. docs) and their entries, with each collection's schema fields |
 | `krate://manifest` | The built site manifest (empty when unbuilt) |
 | `krate://config` | The resolved Krate config (relative paths, no env values) |
 
-`krate://page/{route}` is a **resource template**, advertised through
-`resources/templates/list`. The server also provides **argument completions**
+`krate://page/{route}` and `krate://docs/{slug}` are **resource templates**,
+advertised through `resources/templates/list`. The server also provides
+**argument completions**
 (`completions/complete`) for routes, page templates, and content collections
 (and collection slugs for the content tools), so clients can offer values while
 the agent is filling in a tool call or prompt argument.

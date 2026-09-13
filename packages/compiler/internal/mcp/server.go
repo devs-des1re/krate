@@ -411,7 +411,8 @@ func (s *Server) initializeResult(raw json.RawMessage) map[string]any {
 		},
 		"instructions": "Krate compiles pages from " + "src/pages (default) into static+SSR output. " +
 			"Read routes with list_routes, a page with read_page (source/ast/html; format defaults to the raw source), " +
-			"read content entries with read_content, search docs with search_docs, and validate with build/check. " +
+			"read content entries with read_content, and validate with build/check. " +
+			"search_docs searches Krate's own framework documentation (embedded in the compiler, not the current project) and returns slugs; read a full page with the krate://docs/{slug} resource, or pass full:true to include full text. " +
 			"Write tools (create_page, edit_ast, edit_page, create_content, edit_content) default to a dry-run unified diff; pass apply:true to write. " +
 			"edit_ast refuses pages the parser cannot round-trip (TypeScript type syntax) — use edit_page to edit the source directly (find+replace or full content). " +
 			"create_content validates frontmatter against a collection's schema and refuses existing entries; edit_content re-parses the result and refuses schema violations. " +

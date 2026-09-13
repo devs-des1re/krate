@@ -226,8 +226,8 @@ func TestBuildSearchIndexMergesTags(t *testing.T) {
 	pages := []Page{
 		{
 			Title: "Search", Path: "features/search",
-			Content:   "<p>Body text.</p>",
-			Tags:      []string{"docfind", "wasm"},
+			Content:    "<p>Body text.</p>",
+			Tags:       []string{"docfind", "wasm"},
 			Categories: []string{"features"},
 		},
 	}
@@ -242,6 +242,22 @@ func TestBuildSearchIndexMergesTags(t *testing.T) {
 	}
 	if !sliceEq(entries[0].Tags, []string{"docfind", "wasm"}) {
 		t.Errorf("tags = %v", entries[0].Tags)
+	}
+}
+
+func TestStripHTMLTagsSeparatesBlocks(t *testing.T) {
+	if got := StripHTMLTags("<p>Hello</p><p>World</p>"); got != "Hello\nWorld" {
+		t.Errorf("StripHTMLTags paragraphs = %q, want %q", got, "Hello\nWorld")
+	}
+	if got := StripHTMLTags("<td>File</td><td>When loaded</td>"); got != "File\nWhen loaded" {
+		t.Errorf("table cells glued: %q", got)
+	}
+	if got := StripHTMLTags("  a   b  "); got != "a b" {
+		t.Errorf("whitespace not collapsed: %q", got)
+	}
+	// Inline tags must not introduce breaks.
+	if got := StripHTMLTags("a <code>b</code> c"); got != "a b c" {
+		t.Errorf("inline tag broke the line: %q", got)
 	}
 }
 

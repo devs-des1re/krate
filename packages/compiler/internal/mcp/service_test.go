@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/kratejs/krate/packages/compiler/internal/config"
+	"github.com/kratejs/krate/packages/compiler/internal/kratedocs"
 )
 
 func writeFile(t *testing.T, root, rel, content string) {
@@ -926,5 +927,140 @@ func TestContentCompletionsUseContributedCollections(t *testing.T) {
 	}
 	if !found {
 		t.Errorf("expected docs slug completion, got %v", v2)
+	}
+}
+
+func TestSearchDocsSearchesFrameworkDocs(t *testing.T) {
+	if kratedocs.Count() == 0 {
+		t.Skip("framework docs not synced (run node scripts/sync-krate-docs.mjs)")
+	}
+	// The project has its own docs content that must NOT be searched.
+	svc := newTestService(t, map[string]string{
+		"src/pages/index.tsx":   "export default function Page() { return <h1>Hi</h1>; }",
+		"src/content/docs/x.md": "---\ntitle: User Secret Page\n---\nzzyzx-only-in-project\n",
+	})
+
+	resp := serve(t, svc, call("search_docs", map[string]any{"query": "content collections"}))[0]
+	text := toolText(t, resp)
+	var hits []map[string]any
+	if err := json.Unmarshal([]byte(text), &hits); err != nil {
+		t.Fatalf("search_docs is not JSON: %v\n%s", err, text)
+	}
+	if len(hits) == 0 {
+		t.Fatal("expected framework docs hits")
+	}
+	foundTyped := false
+	for _, h := range hits {
+		if h["slug"] == "features/typed-routes" {
+			foundTyped = true
+			if h["resource"] != "krate://docs/features/typed-routes" {
+				t.Errorf("resource = %v, want krate://docs/features/typed-routes", h["resource"])
+			}
+			if _, hasContent := h["content"]; hasContent {
+				t.Error("content field must be absent unless full:true")
+			}
+		}
+		if h["slug"] == "x" {
+			t.Errorf("search_docs must not search project docs, got %v", h)
+		}
+	}
+	if !foundTyped {
+		t.Errorf("expected features/typed-routes among hits, got %v", hits)
+	}
+
+	// full:true adds an uncapped content field; maxChars only sizes excerpt.
+	fullResp := serve(t, svc, call("search_docs", map[string]any{
+		"query": "content collections", "full": true, "maxChars": 60, "limit": 1,
+	}))[0]
+	var fullHits []map[string]any
+	if err := json.Unmarshal([]byte(toolText(t, fullResp)), &fullHits); err != nil {
+		t.Fatalf("full search is not JSON: %v", err)
+	}
+	if len(fullHits) == 0 {
+		t.Fatal("expected at least one full hit")
+	}
+	fullBody, _ := fullHits[0]["content"].(string)
+	if fullBody == "" {
+		t.Fatalf("full:true produced no content: %v", fullHits[0])
+	}
+	excerptText, _ := fullHits[0]["excerpt"].(string)
+	if len(fullBody) <= len(excerptText) {
+		t.Errorf("full content (%d) should exceed the %d-char-capped excerpt", len(fullBody), 60)
+	}
+	// The full body is uncapped, so maxChars must not have limited it.
+	if len(fullBody) <= 240 {
+		t.Errorf("full content suspiciously short (%d); maxChars may be truncating it", len(fullBody))
+	}
+
+	// A project-only term yields nothing — proof the search is Krate's docs.
+	none := serve(t, svc, call("search_docs", map[string]any{"query": "zzyzx-only-in-project"}))[0]
+	if got := toolText(t, none); strings.Contains(got, "zzyzx") {
+		t.Errorf("framework search leaked project content: %s", got)
+	}
+}
+
+func TestExcerptBoundaries(t *testing.T) {
+	// Match at the very start: no leading ellipsis, first word preserved.
+	got := excerpt("Plugin System is here and more text follows", "plugin", 20)
+	if strings.HasPrefix(got, "…") {
+		t.Errorf("unexpected leading ellipsis: %q", got)
+	}
+	if !strings.HasPrefix(got, "Plugin") {
+		t.Errorf("first word dropped: %q", got)
+	}
+	// Entire text fits: no ellipses at all.
+	full := excerpt("Short body", "short", 100)
+	if strings.Contains(full, "…") {
+		t.Errorf("full-window excerpt should have no ellipsis: %q", full)
+	}
+	// Match in the middle: ellipses on both sides.
+	mid := excerpt(strings.Repeat("word ", 40)+"needle "+strings.Repeat("word ", 40), "needle", 40)
+	if !strings.HasPrefix(mid, "…") || !strings.HasSuffix(mid, "…") {
+		t.Errorf("expected both ellipses, got %q", mid)
+	}
+}
+
+func TestReadDocsResource(t *testing.T) {
+	if kratedocs.Count() == 0 {
+		t.Skip("framework docs not synced (run node scripts/sync-krate-docs.mjs)")
+	}
+	svc := newTestService(t, map[string]string{
+		"src/pages/index.tsx": "export default function Page() { return <h1>Hi</h1>; }",
+	})
+
+	resp := mustResp(t, serve(t, svc,
+		`{"jsonrpc":"2.0","id":1,"method":"resources/read","params":{"uri":"krate://docs/features/mcp"}}`,
+	)[0])
+	contents := resp["contents"].([]any)
+	first := contents[0].(map[string]any)
+	if first["mimeType"] != "text/markdown" {
+		t.Errorf("mimeType = %v, want text/markdown", first["mimeType"])
+	}
+	body := first["text"].(string)
+	if !strings.Contains(body, "# MCP Server") {
+		t.Errorf("expected MCP doc body, got %s", body)
+	}
+
+	// Unknown slug is an error, not a panic.
+	bad := serve(t, svc,
+		`{"jsonrpc":"2.0","id":2,"method":"resources/read","params":{"uri":"krate://docs/does/not/exist"}}`,
+	)[0]
+	if bad["error"] == nil {
+		t.Fatalf("expected error for unknown doc slug, got %v", bad)
+	}
+
+	// The docs template also offers slug completions.
+	comp := mustResp(t, serve(t, svc,
+		`{"jsonrpc":"2.0","id":3,"method":"completions/complete","params":{"ref":{"type":"ref/resource","uri":"krate://docs/{slug}"},"argument":{"name":"slug","value":""}}}`,
+	)[0])
+	values, _ := comp["completion"].(map[string]any)["values"].([]any)
+	hasMCP := false
+	for _, v := range values {
+		if s, _ := v.(string); s == "features/mcp" {
+			hasMCP = true
+		}
+	}
+	if !hasMCP {
+		t.Errorf("expected features/mcp among doc slug completions, got %v", values)
 	}
 }

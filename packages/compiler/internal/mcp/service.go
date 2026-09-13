@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"html"
 	"os"
 	"path/filepath"
 	"sort"
@@ -17,8 +18,10 @@ import (
 	"github.com/kratejs/krate/packages/compiler/internal/check"
 	"github.com/kratejs/krate/packages/compiler/internal/config"
 	"github.com/kratejs/krate/packages/compiler/internal/content"
+	"github.com/kratejs/krate/packages/compiler/internal/docfind"
 	"github.com/kratejs/krate/packages/compiler/internal/docs"
 	"github.com/kratejs/krate/packages/compiler/internal/frontmatter"
+	"github.com/kratejs/krate/packages/compiler/internal/kratedocs"
 	"github.com/kratejs/krate/packages/compiler/internal/markdown"
 	"github.com/kratejs/krate/packages/compiler/internal/plugin"
 	"github.com/kratejs/krate/packages/compiler/internal/routetypes"
@@ -90,10 +93,12 @@ func (s *Service) Register(srv *Server) {
 	})
 	srv.RegisterTool(Tool{
 		Name:        "search_docs",
-		Description: "Search documentation content for a query string, returning matching pages with excerpts.",
+		Description: "Search Krate's own framework documentation (embedded in the compiler) for a query, returning ranked pages with short excerpts. Searches Krate usage — not the current project's content. Read the full page with the krate://docs/{slug} resource, or pass full:true to include each hit's cleaned full text.",
 		InputSchema: objSchema(map[string]any{
-			"query": strSchema("Search query"),
-			"limit": numSchema("Maximum results (default 8)"),
+			"query":    strSchema("Search query"),
+			"limit":    numSchema("Maximum results (default 8)"),
+			"full":     boolSchema("Include each hit's full cleaned text in a content field (default false)"),
+			"maxChars": numSchema("Excerpt window size in characters (default 240; only affects excerpt, not full)"),
 		}, "query"),
 		Annotations: readOnlyAnnotations("Search Docs"),
 		Handler:     s.toolSearchDocs,
@@ -240,6 +245,14 @@ func (s *Service) Register(srv *Server) {
 		MIMEType:    "application/json",
 		Read:        s.readPageTemplate,
 	})
+	srv.RegisterResourceTemplate(&ResourceTemplate{
+		URITemplate: "krate://docs/{slug}",
+		Name:        "docs",
+		Title:       "Krate documentation page",
+		Description: "A Krate framework documentation page by slug, e.g. krate://docs/features/mcp or krate://docs/cli. Slugs come from search_docs.",
+		MIMEType:    "text/markdown",
+		Read:        s.readDocsTemplate,
+	})
 
 	// ── prompts ───────────────────────────────────────────────────────────
 	srv.RegisterPrompt(s.promptAddPage())
@@ -249,6 +262,7 @@ func (s *Service) Register(srv *Server) {
 
 	// ── completions ───────────────────────────────────────────────────────
 	srv.RegisterCompletion("ref/resource", "krate://page/{route}", "route", s.completeRoutes)
+	srv.RegisterCompletion("ref/resource", "krate://docs/{slug}", "slug", s.completeDocSlugs)
 	srv.RegisterCompletion("ref/prompt", "add-page", "template", s.completeTemplates)
 	srv.RegisterCompletion("ref/prompt", "add-page", "collection", s.completeCollections)
 	srv.RegisterCompletion("ref/prompt", "add-page", "route", s.completeRoutes)
@@ -306,43 +320,67 @@ func (s *Service) toolSearchDocs(ctx context.Context, args map[string]any) (Tool
 	if v, ok := args["limit"].(float64); ok && v > 0 {
 		limit = int(v)
 	}
-
-	pages, err := s.scanDocs()
-	if err != nil {
-		return ErrorResult("scanning docs: " + err.Error()), nil
+	if limit > 50 {
+		limit = 50
 	}
-	entries := docs.BuildSearchIndex(pages)
+	maxChars := 240
+	if v, ok := args["maxChars"].(float64); ok && v > 0 {
+		maxChars = int(v)
+	}
+	if maxChars < 80 {
+		maxChars = 80
+	}
+	if maxChars > 4000 {
+		maxChars = 4000
+	}
+	full := argBool(args, "full", false)
 
-	q := strings.ToLower(query)
+	pages := kratedocs.Pages()
+	if len(pages) == 0 {
+		return JSONResult([]any{})
+	}
+	results, err := docfind.Search(ctx, docs.BuildSearchDocuments(pages), query, limit)
+	if err != nil {
+		return ErrorResult("searching docs: " + err.Error()), nil
+	}
+
+	// Index the framework pages by slug so results can carry a stable slug and
+	// a project-independent docs URL.
+	byHref := map[string]kratedocs.Doc{}
+	for _, d := range kratedocs.Docs() {
+		byHref[docs.PageURL(d.Page.Path)] = d
+	}
+
 	type hit struct {
 		Title      string   `json:"title"`
+		Slug       string   `json:"slug"`
 		Path       string   `json:"path"`
+		Resource   string   `json:"resource"`
 		Excerpt    string   `json:"excerpt"`
-		Score      int      `json:"score"`
+		Content    string   `json:"content,omitempty"`
 		Tags       []string `json:"tags,omitempty"`
 		Categories []string `json:"categories,omitempty"`
 	}
-	var hits []hit
-	for _, e := range entries {
-		score := scoreMatch(q, e)
-		if score == 0 {
-			continue
+	hits := make([]hit, 0, len(results))
+	for _, r := range results {
+		h := hit{Title: r.Title, Path: r.Href}
+		if d, ok := byHref[r.Href]; ok {
+			body := cleanDocBody(d)
+			h.Slug = d.Slug
+			h.Resource = "krate://docs/" + d.Slug
+			h.Excerpt = excerpt(body, query, maxChars)
+			if full {
+				h.Content = body
+			}
+			h.Tags = d.Page.Tags
+			h.Categories = d.Page.Categories
+		} else {
+			h.Excerpt = excerpt(r.Body, query, maxChars)
+			if full {
+				h.Content = html.UnescapeString(r.Body)
+			}
 		}
-		hits = append(hits, hit{
-			Title:      e.Title,
-			Path:       e.Path,
-			Excerpt:    excerpt(e.Content, q, 200),
-			Score:      score,
-			Tags:       e.Tags,
-			Categories: e.Categories,
-		})
-	}
-	sort.SliceStable(hits, func(i, j int) bool { return hits[i].Score > hits[j].Score })
-	if len(hits) > limit {
-		hits = hits[:limit]
-	}
-	if hits == nil {
-		hits = []hit{}
+		hits = append(hits, h)
 	}
 	return JSONResult(hits)
 }
@@ -1236,6 +1274,16 @@ func (s *Service) readPageTemplate(ctx context.Context, uri string, params map[s
 	return jsonResource(uri, detail)
 }
 
+// readDocsTemplate returns an embedded Krate framework doc as raw markdown.
+func (s *Service) readDocsTemplate(ctx context.Context, uri string, params map[string]string) (ResourceContents, *rpcError) {
+	slug := strings.Trim(params["slug"], "/")
+	doc, ok := kratedocs.Lookup(slug)
+	if !ok {
+		return ResourceContents{}, &rpcError{Code: codeInvalidParams, Message: "no framework doc " + strconv.Quote(slug) + "; use search_docs to find a slug"}
+	}
+	return ResourceContents{URI: uri, MIMEType: "text/markdown", Text: doc.Markdown}, nil
+}
+
 // ── completions ─────────────────────────────────────────────────────────────
 
 func (s *Service) completeRoutes(ctx context.Context, _ string) ([]string, error) {
@@ -1252,6 +1300,12 @@ func (s *Service) completeRoutes(ctx context.Context, _ string) ([]string, error
 
 func (s *Service) completeTemplates(ctx context.Context, _ string) ([]string, error) {
 	return []string{"static", "content-list", "detail", "blank"}, nil
+}
+
+// completeDocSlugs suggests krate://docs/{slug} values from the embedded
+// framework docs.
+func (s *Service) completeDocSlugs(ctx context.Context, _ string) ([]string, error) {
+	return kratedocs.Slugs(), nil
 }
 
 func (s *Service) completeCollections(ctx context.Context, _ string) ([]string, error) {
@@ -1358,26 +1412,6 @@ func (s *Service) promptExplore() *Prompt {
 }
 
 // ── helpers ─────────────────────────────────────────────────────────────────
-
-// scanDocs scans the docs plugin's content directory, if configured.
-func (s *Service) scanDocs() ([]docs.Page, error) {
-	contentDir := "src/content/docs"
-	for _, pc := range s.cfg.Plugins {
-		if pc.Name != "docs" {
-			continue
-		}
-		if dir, ok := pc.Options["contentDir"].(string); ok && dir != "" {
-			contentDir = dir
-		}
-		break
-	}
-	scanCfg := docs.Config{
-		ContentDir: contentDir,
-		Root:       s.root,
-		MDConfig:   s.cfg.Markdown,
-	}
-	return docs.Scan(scanCfg)
-}
 
 // runBuild runs a full build with stdout captured so the JSON-RPC stream stays
 // clean. A fresh Builder is used because BuildAll closes plugin subprocesses
@@ -1642,45 +1676,41 @@ func walkContentFiles(dir string) ([]string, error) {
 	return files, err
 }
 
-// scoreMatch scores a search entry against a lowercased query.
-func scoreMatch(query string, e docs.SearchEntry) int {
-	score := 0
-	title := strings.ToLower(e.Title)
-	content := strings.ToLower(e.Content)
-	if strings.Contains(title, query) {
-		score += 10
-	}
-	score += strings.Count(content, query)
-	for _, term := range strings.Fields(query) {
-		if strings.Contains(title, term) {
-			score += 2
-		}
-		if strings.Contains(content, term) {
-			score++
-		}
-	}
-	return score
-}
-
-// excerpt returns a window of text around the first query match.
+// excerpt returns a snippet of text around the earliest query term match. The
+// window is snapped outward to word boundaries and ellipses are only added when
+// text was actually dropped on that side, so a match at the start of the page
+// has no leading "…".
 func excerpt(text, query string, n int) string {
+	if text == "" {
+		return ""
+	}
 	lower := strings.ToLower(text)
-	idx := strings.Index(lower, query)
+	idx := -1
+	// Find the earliest position of any query term (not any document word).
+	for _, term := range strings.Fields(strings.ToLower(query)) {
+		if i := strings.Index(lower, term); i >= 0 && (idx < 0 || i < idx) {
+			idx = i
+		}
+	}
 	if idx < 0 {
 		if len(text) > n {
-			return text[:n] + "…"
+			return strings.TrimSpace(text[:n]) + "…"
 		}
-		return text
+		return strings.TrimSpace(text)
 	}
 	start := idx - n/2
 	if start < 0 {
 		start = 0
 	}
+	// Snap outward to word boundaries: back to the start of the first word,
+	// forward to the end of the last word. Neither may exclude the match.
+	start = snapStart(text, start)
 	end := start + n
 	if end > len(text) {
 		end = len(text)
 	}
-	out := text[start:end]
+	end = snapEnd(text, end)
+	out := strings.TrimSpace(text[start:end])
 	if start > 0 {
 		out = "…" + out
 	}
@@ -1688,4 +1718,50 @@ func excerpt(text, query string, n int) string {
 		out += "…"
 	}
 	return out
+}
+
+// snapStart moves i backward to the beginning of the word containing i.
+func snapStart(s string, i int) int {
+	for i > 0 && !isSpaceByte(s[i-1]) {
+		i--
+	}
+	return i
+}
+
+// snapEnd moves i forward to the end of the word containing position i-1.
+func snapEnd(s string, i int) int {
+	for i < len(s) && !isSpaceByte(s[i]) {
+		i++
+	}
+	return i
+}
+
+func isSpaceByte(b byte) bool {
+	return b == ' ' || b == '\t' || b == '\n' || b == '\r'
+}
+
+// cleanDocBody returns a framework doc's plain text: rendered HTML stripped and
+// unescaped, with a leading H1 that merely repeats the title removed.
+func cleanDocBody(d kratedocs.Doc) string {
+	text := html.UnescapeString(docs.StripHTMLTags(d.Page.Content))
+	return stripLeadingTitle(text, d.Page.Title)
+}
+
+// stripLeadingTitle drops the first line when it equals title (case-insensitive
+// and ignoring surrounding markup/`#`), which the rendered page repeats as its
+// H1.
+func stripLeadingTitle(body, title string) string {
+	title = strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(title), "#"))
+	if title == "" {
+		return body
+	}
+	lines := strings.Split(body, "\n")
+	if len(lines) == 0 {
+		return body
+	}
+	first := strings.TrimSpace(strings.TrimLeft(strings.TrimSpace(lines[0]), "#"))
+	if !strings.EqualFold(first, title) {
+		return body
+	}
+	return strings.TrimLeft(strings.Join(lines[1:], "\n"), "\n")
 }

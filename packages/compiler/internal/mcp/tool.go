@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // Tool is a callable MCP tool. InputSchema is a hand-written JSON Schema
@@ -276,19 +277,38 @@ func expandURITemplate(tmpl, uri string) (map[string]string, bool) {
 	// Split into segments; a segment may be a literal or a single {name}.
 	ts := splitTemplateSegments(tmpl)
 	us := splitURISegments(uri)
-	if len(ts) != len(us) || len(ts) == 0 {
+	if len(ts) == 0 {
 		return nil, false
 	}
 	params := map[string]string{}
 	for i, seg := range ts {
 		if len(seg) >= 2 && seg[0] == '{' && seg[len(seg)-1] == '}' {
 			name := seg[1 : len(seg)-1]
+			// A final {name} segment may match a multi-segment remainder so
+			// nested paths (e.g. krate://docs/features/mcp) resolve.
+			if i == len(ts)-1 {
+				if i >= len(us) {
+					return nil, false
+				}
+				rest := make([]string, len(us)-i)
+				for j := i; j < len(us); j++ {
+					rest[j-i] = us[j]
+				}
+				params[name] = decodeURISegment(strings.Join(rest, "/"))
+				return params, true
+			}
+			if i >= len(us) {
+				return nil, false
+			}
 			params[name] = decodeURISegment(us[i])
 			continue
 		}
-		if seg != us[i] {
+		if i >= len(us) || seg != us[i] {
 			return nil, false
 		}
+	}
+	if len(ts) != len(us) {
+		return nil, false
 	}
 	return params, true
 }
