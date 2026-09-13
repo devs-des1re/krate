@@ -35,7 +35,7 @@ export default defineConfig({
       editLinkBase: "https://github.com/kratejs/krate/blob/main/packages/web",
       search: {
         enabled: true,
-        engine: "docfind",
+        engine: "pagefind",
         maxResults: 8,
       },
       links: [
