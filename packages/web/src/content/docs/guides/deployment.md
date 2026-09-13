@@ -63,10 +63,14 @@ steps:
 
 ## Notes
 
-- **WASM search** — the docs search module (`docs/search/docfind_bg.wasm`) is a
-  static asset; make sure your host serves `.wasm` with
-  `Content-Type: application/wasm`. Most hosts do by default; the search UI
-  falls back to the JSON index if not.
+- **Pagefind (default)** — the recommended `search.engine: "pagefind"` backend
+  writes a `pagefind/` bundle at build time as a set of static assets. Pagefind
+  fetches its index chunks at search time, so it needs no special
+  `Content-Type`, but the files must be deployed as-is.
+- **docfind WASM** — if you use `search.engine: "docfind"` (also what dev builds
+  use), the search module (`docs/search/docfind_bg.wasm`) is a static asset; make
+  sure your host serves `.wasm` with `Content-Type: application/wasm`. Most hosts
+  do by default; the search UI falls back to the JSON index if not.
 - **Trailing slashes** — routes are emitted as directory index files
   (`/docs/foo/index.html`), so both `/docs/foo` and `/docs/foo/` work on hosts
   with clean-URL rewriting.

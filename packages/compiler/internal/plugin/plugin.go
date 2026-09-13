@@ -173,11 +173,12 @@ type PageHookCtx struct {
 
 // BuildResultHookCtx is passed to AfterBuild hook after all pages are built.
 type BuildResultHookCtx struct {
-	Root   string       `json:"root"`
-	OutDir string       `json:"outDir"`
-	Config interface{}  `json:"config,omitempty"` // *config.Config
-	Pages  []PageResult `json:"pages"`
-	CSS    string       `json:"css"`
+	Root    string       `json:"root"`
+	OutDir  string       `json:"outDir"`
+	Config  interface{}  `json:"config,omitempty"` // *config.Config
+	Pages   []PageResult `json:"pages"`
+	CSS     string       `json:"css"`
+	DevMode bool         `json:"devMode"`
 }
 
 // PageResult is a single page's output in the AfterBuild hook.
@@ -282,7 +283,17 @@ func NewHookFunc(name string, order int, hooks PluginHooks) Plugin {
 
 const hookTimeout = 30 * time.Second
 
+// afterBuildHookTimeout bounds the AfterBuild hook. It is larger than the
+// per-page hook budget because AfterBuild runs site-wide post-processing (e.g.
+// the Pagefind indexer over the whole output tree), which can legitimately take
+// minutes on large sites.
+const afterBuildHookTimeout = 5 * time.Minute
+
 func runHook(name, hook string, fn func() error) error {
+	return runHookTimeout(name, hook, hookTimeout, fn)
+}
+
+func runHookTimeout(name, hook string, timeout time.Duration, fn func() error) error {
 	start := time.Now()
 	done := make(chan error, 1)
 	go func() {
@@ -295,8 +306,8 @@ func runHook(name, hook string, fn func() error) error {
 		if err != nil {
 			err = fmt.Errorf("plugin %q hook %s: %w", name, hook, err)
 		}
-	case <-time.After(hookTimeout):
-		err = fmt.Errorf("plugin %q hook %s timed out after %v", name, hook, hookTimeout)
+	case <-time.After(timeout):
+		err = fmt.Errorf("plugin %q hook %s timed out after %v", name, hook, timeout)
 	}
 	traceHook(name, hook, time.Since(start), err)
 	return err
@@ -400,7 +411,7 @@ func RunAfterBuild(ctx *BuildResultHookCtx) error {
 		if h.AfterBuild == nil {
 			continue
 		}
-		if err := runHook(p.Name(), "AfterBuild", func() error { return h.AfterBuild(ctx) }); err != nil {
+		if err := runHookTimeout(p.Name(), "AfterBuild", afterBuildHookTimeout, func() error { return h.AfterBuild(ctx) }); err != nil {
 			return err
 		}
 	}
@@ -479,6 +490,7 @@ func resolveCommunityEnv(hookCtx interface{}, env []CommunityEnv) CommunityEnv {
 			e.Config = cfg
 		}
 	case *BuildResultHookCtx:
+		e.DevMode = c.DevMode
 		if cfg, ok := c.Config.(*config.Config); ok {
 			e.Config = cfg
 		}

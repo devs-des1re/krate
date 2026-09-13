@@ -52,14 +52,36 @@ export interface DocsHeadTag {
   attrs?: Record<string, string | undefined>;
 }
 
+/** Pagefind indexer options (only used when `search.engine` is `"pagefind"`). */
+export interface PagefindOptions {
+  /** Extra CSS selectors Pagefind should not index. */
+  excludeSelectors?: string[];
+  /** Characters Pagefind should keep when indexing (e.g. `"<>"`). */
+  includeCharacters?: string;
+  /** Force a single index for this ISO 639-1 language code. */
+  forceLanguage?: string;
+  /** Bundle directory under the output root (default: `"pagefind"`). */
+  outputSubdir?: string;
+  /** Print extra indexing logs (default: false). */
+  verbose?: boolean;
+}
+
 /** Search configuration forwarded to the theme via the layout props. */
 export interface DocsSearchOptions {
   /** Search bar on/off (default: true). */
   enabled?: boolean;
-  /** Index backend: "docfind" (default) or classic "json". */
-  engine?: "docfind" | "json";
+  /**
+   * Index backend. `"pagefind"` (default, recommended) runs the Pagefind
+   * indexer after production builds, `"docfind"` builds the embedded WASM
+   * index, and `"json"` uses `search-index.json` only. Dev builds always use
+   * docfind (Pagefind's post-build index isn't regenerated on incremental
+   * rebuilds).
+   */
+  engine?: "pagefind" | "docfind" | "json";
   /** Max number of results shown (default: 8). */
   maxResults?: number;
+  /** Pagefind options (only used when `engine` is `"pagefind"`). */
+  pagefind?: PagefindOptions;
 }
 
 /** Every prop a generated docs page passes to the theme's layout component. */

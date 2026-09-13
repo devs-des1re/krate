@@ -20,7 +20,7 @@ export default defineConfig({
       contentDir: "src/content/docs",
       title: "My Docs",
       theme: baseDocsTheme(),
-      search: { enabled: true, engine: "docfind" },
+      search: { enabled: true, engine: "pagefind" }, // recommended; "docfind" | "json"
       links: [{ icon: "lucide:github", url: "https://github.com/me/project" }],
     }),
   ],

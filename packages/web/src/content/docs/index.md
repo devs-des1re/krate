@@ -41,7 +41,7 @@ Tailwind generator — is 100% custom Go, and builds run in milliseconds.
 - **SSG-first shells with SSR, ISR & streaming** — every page is a static shell; ISR revalidates cached page bodies and streaming resolves dynamic regions per request.
 - **SPA router** — client-side navigation with DOM tree reconciliation; state, focus, and scroll survive transitions.
 - **Plugin system** — Go plugin hooks plus community plugins written in JavaScript or TypeScript, executed inside the embedded QuickJS runtime and typed with `@krate/plugin`.
-- **WASM docs search** — the docs plugin ships a search bar powered by Microsoft's docfind, with the index embedded into a WASM module at build time.
+- **Docs search** — the docs plugin ships a search bar that uses [Pagefind](https://pagefind.app) by default for a chunked, streamed index, with the docfind WASM engine used during development builds.
 
 ## How it works
 

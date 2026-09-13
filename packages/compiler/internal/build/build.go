@@ -68,7 +68,7 @@ type PageResult struct {
 
 	// DynamicParams is false when a dynamic route must 404 for params other
 	// than those returned by generateStaticParams.
-	DynamicParams bool	// StaticOnly marks a dynamic route template (e.g. blog/[slug].tsx) whose
+	DynamicParams bool // StaticOnly marks a dynamic route template (e.g. blog/[slug].tsx) whose
 	// valid params are closed: the build must not emit its `[param]` fallback
 	// HTML. The concrete generateStaticParams pages are emitted normally.
 	StaticOnly bool
@@ -695,11 +695,12 @@ func (b *Builder) BuildAll() error {
 		}
 	}
 	afterBuildCtx := &plugin.BuildResultHookCtx{
-		Root:   b.Root,
-		OutDir: b.Cfg.OutDir,
-		Config: b.Cfg,
-		Pages:  pageResults,
-		CSS:    mergedPageCSS.String(),
+		Root:    b.Root,
+		OutDir:  b.Cfg.OutDir,
+		Config:  b.Cfg,
+		Pages:   pageResults,
+		CSS:     mergedPageCSS.String(),
+		DevMode: b.DevMode,
 	}
 	if err := plugin.RunAfterBuild(afterBuildCtx); err != nil {
 		fmt.Fprintf(os.Stderr, "  %sPlugin error (AfterBuild):%s %v\n", cYellow, cReset, err)

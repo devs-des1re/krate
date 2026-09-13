@@ -56,6 +56,7 @@ func (p *DocsPlugin) Order() int   { return 10 }
 func (p *DocsPlugin) Hooks() PluginHooks {
 	return PluginHooks{
 		BeforeBuild: p.beforeBuild,
+		AfterBuild:  p.afterBuild,
 		Collections: p.collections,
 	}
 }
@@ -152,10 +153,11 @@ func (p *DocsPlugin) beforeBuild(ctx *BuildHookCtx) error {
 
 	p.writeAssets(ctx, sections, pages, opts)
 
-	// Search bar + search index (docfind WASM, embedded in-process)
+	// Search bar + search index (docfind WASM, embedded in-process; or the
+	// opt-in Pagefind bundle indexed in AfterBuild)
 	searchEnabled, searchEngine, searchMaxResults := searchConfig(opts)
 	if searchEnabled {
-		if err := p.buildSearchAssets(ctx, pages, searchEngine, searchMaxResults); err != nil {
+		if err := p.buildSearchAssets(ctx, pages, searchEngine, searchMaxResults, pagefindOptions(opts)); err != nil {
 			fmt.Fprintf(os.Stderr, "  Docs search warning: %v (falling back to JSON search)\n", err)
 		}
 	}
@@ -684,7 +686,7 @@ func (p *DocsPlugin) generateTSX(ctx *BuildHookCtx, page docs.Page, layoutRel, s
 
 	sb.WriteString("      <DocsLayout {...docsProps} >")
 	if len(segments) > 0 {
-		sb.WriteString("\n      <div class=\"md-content\">\n")
+		sb.WriteString("\n      <div class=\"md-content\" data-pagefind-body>\n")
 		for _, seg := range segments {
 			if seg.HTML != "" {
 				sb.WriteString("        <div dangerouslySetInnerHTML={{__html: `")
@@ -710,7 +712,7 @@ func (p *DocsPlugin) generateTSX(ctx *BuildHookCtx, page docs.Page, layoutRel, s
 		sb.WriteString("      </div>\n")
 	} else {
 		content := page.Content
-		sb.WriteString("<div class=\"md-content\" dangerouslySetInnerHTML={{__html: `")
+		sb.WriteString("<div class=\"md-content\" data-pagefind-body dangerouslySetInnerHTML={{__html: `")
 		sb.WriteString(escapeTemplateLit(content))
 		sb.WriteString("`}} />")
 	}

@@ -32,7 +32,7 @@ export default defineConfig({
       theme: baseDocsTheme(),
       search: {
         enabled: true,
-        engine: "docfind",
+        engine: "pagefind",
         maxResults: 8,
       },
       links: [

@@ -92,10 +92,11 @@ added.
 
 `search_docs` searches **Krate's own framework documentation** — the content
 that powers the docs site — which is embedded into the compiler at build time,
-so it works the same from any project and offline. It is backed by the same
-[docfind](https://github.com/microsoft/docfind) WASM engine the docs site's
-search bar uses: results are ranked, and each hit carries a short `excerpt`,
-a `slug`, and a `resource` (`krate://docs/{slug}`) for reading the whole page.
+so it works the same from any project and offline. It is backed by the
+[docfind](https://github.com/microsoft/docfind) WASM engine running in-process
+(the same engine Krate uses for docs search during development builds): results
+are ranked, and each hit carries a short `excerpt`, a `slug`, and a `resource`
+(`krate://docs/{slug}`) for reading the whole page.
 
 - `limit` caps the number of hits (default 8).
 - `maxChars` sizes the `excerpt` window (default 240); it only affects the

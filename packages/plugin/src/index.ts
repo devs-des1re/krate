@@ -47,6 +47,7 @@ export type {
   DocsSidebarItem,
   DocsThemeDescriptor,
   DocsThemeOptions,
+  PagefindOptions,
 } from "./docs.js";
 export { defineDocsTheme } from "./docs.js";
 export type { PluginHookFn, PluginOutput } from "./output.js";

@@ -17,28 +17,56 @@ import (
 type DocsSearchOptions struct {
 	// Enabled turns the search bar on/off. Default: true.
 	Enabled bool `json:"enabled"`
-	// Engine selects the index backend. "docfind" (default) embeds a WASM
+	// Engine selects the index backend. "pagefind" (default, recommended) runs
+	// the Pagefind indexer after the production build; "docfind" embeds a WASM
 	// search index built in-process from the docs; "json" uses the classic
-	// search-index.json fallback. The client falls back to JSON automatically
-	// if the WASM index is unavailable.
+	// search-index.json fallback. Dev builds always use docfind, and the client
+	// falls back to docfind/JSON automatically when the selected index is
+	// unavailable.
 	Engine string `json:"engine"`
 	// MaxResults caps the number of results shown. Default: 8.
 	MaxResults int `json:"maxResults"`
+	// Pagefind configures the "pagefind" engine. Ignored for other engines.
+	Pagefind *PagefindOptions `json:"pagefind"`
+}
+
+// PagefindOptions configures the Pagefind indexer used when Engine is
+// "pagefind". Pagefind is opt-in, runs only on production builds (via
+// `npx pagefind`), and indexes the built HTML.
+type PagefindOptions struct {
+	// ExcludeSelectors lists extra CSS selectors Pagefind should not index.
+	// Default: [] (the docs content wrapper already carries
+	// data-pagefind-body, so chrome is excluded).
+	ExcludeSelectors []string `json:"excludeSelectors"`
+	// IncludeCharacters prevents Pagefind from stripping these characters when
+	// indexing (useful for docs that talk about `<head>` etc). Default: "".
+	IncludeCharacters string `json:"includeCharacters"`
+	// ForceLanguage creates a single index as the given ISO 639-1 code,
+	// ignoring per-page detection. Default: "".
+	ForceLanguage string `json:"forceLanguage"`
+	// OutputSubdir is the bundle directory under the output root.
+	// Default: "pagefind".
+	OutputSubdir string `json:"outputSubdir"`
+	// Verbose prints extra indexing logs. Default: false.
+	Verbose bool `json:"verbose"`
 }
 
 // searchDir is the output sub-directory for search assets.
 const searchDir = "docs/search"
 
 // searchConfig returns the effective search options with defaults applied.
+// The default engine is "pagefind" (recommended); dev builds downgrade it to
+// docfind in engineForBuild.
 func searchConfig(opts *DocsPluginOptions) (enabled bool, engine string, maxResults int) {
 	enabled = true
-	engine = "docfind"
+	engine = "pagefind"
 	maxResults = 8
 	if opts.Search != nil {
 		if !opts.Search.Enabled {
 			enabled = false
 		}
-		if opts.Search.Engine != "" {
+		switch opts.Search.Engine {
+		case "docfind", "json", "pagefind":
 			engine = opts.Search.Engine
 		}
 		if opts.Search.MaxResults > 0 {
@@ -48,21 +76,59 @@ func searchConfig(opts *DocsPluginOptions) (enabled bool, engine string, maxResu
 	return
 }
 
-// buildSearchAssets writes the search UI and (when the engine is "docfind")
-// builds the in-process WASM index and writes the searchable module + JS glue.
+// pagefindOptions returns the effective Pagefind options with defaults applied.
+func pagefindOptions(opts *DocsPluginOptions) PagefindOptions {
+	po := PagefindOptions{OutputSubdir: "pagefind"}
+	if opts != nil && opts.Search != nil && opts.Search.Pagefind != nil {
+		po = *opts.Search.Pagefind
+		if po.OutputSubdir == "" {
+			po.OutputSubdir = "pagefind"
+		}
+	}
+	return po
+}
+
+// engineForBuild returns the effective engine for a build, taking dev mode into
+// account. Pagefind indexes built HTML in a post-build pass that dev's
+// incremental rebuilds don't re-run, so dev always uses docfind (falling back to
+// JSON in the client if it can't load).
+func engineForBuild(engine string, dev bool) string {
+	if dev && engine == "pagefind" {
+		return "docfind"
+	}
+	return engine
+}
+
+// buildSearchAssets writes the search UI and, when the effective engine is
+// "docfind", builds the in-process WASM index and writes the searchable module +
+// JS glue. The emitted search.js is told which engine to try first via an
+// injected ENGINE constant; the client degrades to docfind then JSON if it can't
+// load. Pagefind is handled separately in the AfterBuild hook (it indexes built
+// HTML), so when the effective engine is "pagefind" only the JSON fallback is
+// written here.
+//
 // It returns an error only when the WASM index build fails; the caller should
 // treat that as a warning and let the client fall back to the JSON index.
-func (p *DocsPlugin) buildSearchAssets(ctx *BuildHookCtx, pages []docs.Page, engine string, maxResults int) error {
+func (p *DocsPlugin) buildSearchAssets(ctx *BuildHookCtx, pages []docs.Page, engine string, maxResults int, pf PagefindOptions) error {
 	outDir := filepath.Join(ctx.OutDir, searchDir)
 	if err := os.MkdirAll(outDir, 0755); err != nil {
 		return fmt.Errorf("creating search dir: %w", err)
 	}
+
+	// Dev builds always use docfind: Pagefind's post-build index is not
+	// regenerated by dev's incremental rebuilds.
+	engine = engineForBuild(engine, ctx.DevMode)
 
 	searchJS := searchassets.SearchJS
 	if maxResults > 0 {
 		searchJS = bytes.ReplaceAll(searchJS, []byte("var MAX_RESULTS = 8;"),
 			[]byte(fmt.Sprintf("var MAX_RESULTS = %d;", maxResults)))
 	}
+	searchJS = bytes.ReplaceAll(searchJS, []byte(`var ENGINE = "docfind";`),
+		[]byte(fmt.Sprintf("var ENGINE = %q;", engine)))
+	pagefindBase := "/" + filepath.ToSlash(pf.OutputSubdir) + "/"
+	searchJS = bytes.ReplaceAll(searchJS, []byte(`var PAGE_FIND_BASE = "/pagefind/";`),
+		[]byte(fmt.Sprintf("var PAGE_FIND_BASE = %q;", pagefindBase)))
 	if err := os.WriteFile(filepath.Join(outDir, "search.js"), searchJS, 0644); err != nil {
 		return err
 	}

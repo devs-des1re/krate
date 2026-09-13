@@ -75,8 +75,10 @@ krate build
 
 ## Updating the vendored docfind WASM
 
-The docs search index is built by a vendored copy of Microsoft's docfind
-(`packages/compiler/third_party/docfind`) compiled to WASM. If you change it:
+Krate's dev-mode docs search (and the MCP `search_docs` tool) is backed by a
+vendored copy of Microsoft's docfind (`packages/compiler/third_party/docfind`)
+compiled to WASM. Production docs builds use Pagefind by default, but docfind
+remains in use. If you change it:
 
 ```sh
 rustup target add wasm32-unknown-unknown
