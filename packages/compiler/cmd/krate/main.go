@@ -12,6 +12,7 @@ import (
 	"github.com/kratejs/krate/packages/compiler/internal/check"
 	"github.com/kratejs/krate/packages/compiler/internal/config"
 	"github.com/kratejs/krate/packages/compiler/internal/environ"
+	"github.com/kratejs/krate/packages/compiler/internal/mcp"
 	"github.com/kratejs/krate/packages/compiler/internal/plugin"
 	krateversion "github.com/kratejs/krate/packages/compiler/internal/version"
 )
@@ -45,7 +46,7 @@ func main() {
 	plugin.SetVerbose(flags.Verbose)
 
 	if len(args) == 0 {
-		fmt.Fprintf(os.Stderr, "Usage: krate [flags] <build|dev|serve|types|check|version> [dir]\n")
+		fmt.Fprintf(os.Stderr, "Usage: krate [flags] <build|dev|serve|types|check|mcp|version> [dir]\n")
 		fmt.Fprintf(os.Stderr, "Flags:\n")
 		fmt.Fprintf(os.Stderr, "  --config <path>   Path to config file (default: project/krate.config.ts)\n")
 		fmt.Fprintf(os.Stderr, "  --out-dir <path>  Override output directory\n")
@@ -65,6 +66,8 @@ func main() {
 		runTypes(flags, args)
 	case "check":
 		runCheck(flags, args)
+	case "mcp":
+		runMCP(flags, args)
 	case "version":
 		fmt.Println("krate v" + version)
 	default:
@@ -302,3 +305,30 @@ func runCheck(flags cliFlags, args []string) {
 	fmt.Printf("\n%s%s  ⚠ Passed with warnings (failOn=%s).%s\n", cBold, cYellow, checkCfg.FailOn, cReset)
 }
 
+// runMCP starts the agent-native MCP server. It speaks JSON-RPC 2.0 over
+// stdio: the real stdout is reserved for protocol frames, so it is captured
+// before any compiler code can print to it, and os.Stdout is pointed at stderr
+// for the rest of the session. An optional trailing arg selects the project
+// root (defaults to the current directory).
+func runMCP(flags cliFlags, args []string) {
+	// Reserve the real stdout for JSON-RPC, redirect incidental output to stderr.
+	protocolOut := os.Stdout
+	os.Stdout = os.Stderr
+
+	root, cfg := resolveConfig(flags, args)
+	env := loadProjectEnv(root, "production", flags.Verbose)
+
+	svc := mcp.NewService(mcp.Options{
+		Root:    root,
+		Cfg:     cfg,
+		Env:     env,
+		Verbose: flags.Verbose,
+	})
+	srv := mcp.NewServer(protocolOut, "krate", version)
+	svc.Register(srv)
+
+	if err := srv.Serve(os.Stdin); err != nil {
+		fmt.Fprintf(os.Stderr, "%sMCP error:%s %v\n", cRed, cReset, err)
+		os.Exit(1)
+	}
+}

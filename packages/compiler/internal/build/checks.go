@@ -219,13 +219,35 @@ func fileSize(path string) int {
 }
 
 // manifestInfo is the subset of dist/manifest.json needed to map routes to
-// source files and locate the shared runtime chunk.
+// source files and locate the shared runtime chunk. Page mode arrives as a
+// number in manifest.json (RenderMode) but as a string in server-manifest.json,
+// so it is decoded leniently.
 type manifestInfo struct {
-	Pages  []struct {
-		Route  string `json:"route"`
-		Source string `json:"source"`
-	} `json:"pages"`
-	RuntimeJS string `json:"runtimeJS"`
+	Pages            []manifestPageInfo `json:"pages"`
+	RuntimeJS        string             `json:"runtimeJS"`
+	StaticOnlyRoutes []string           `json:"staticOnlyRoutes"`
+}
+
+type manifestPageInfo struct {
+	Route  string          `json:"route"`
+	Source string          `json:"source"`
+	Mode   json.RawMessage `json:"mode"`
+}
+
+// modeString renders a page's stored render mode as its label.
+func (p manifestPageInfo) modeString() string {
+	if len(p.Mode) == 0 {
+		return ""
+	}
+	var s string
+	if err := json.Unmarshal(p.Mode, &s); err == nil {
+		return s
+	}
+	var n int
+	if err := json.Unmarshal(p.Mode, &n); err == nil {
+		return RenderMode(n).String()
+	}
+	return ""
 }
 
 func (m manifestInfo) runtimeJS() string { return m.RuntimeJS }

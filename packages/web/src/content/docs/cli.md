@@ -14,6 +14,7 @@ The `krate` CLI is the single entry point for building and serving Krate sites.
 | `krate serve [dir]` | Build + static HTTP server (production preview) |
 | `krate types [dir]` | Generate route/content TypeScript declarations only |
 | `krate check [dir]` | Build and run quality gates (a11y/SEO/perf); non-zero on failure |
+| `krate mcp [dir]` | Start the MCP (Model Context Protocol) server over stdio |
 | `krate version` | Print the version |
 
 ## `krate build`
@@ -80,6 +81,19 @@ built-in rule list.
 ## `krate version`
 
 Prints the compiler version:
+
+## `krate mcp`
+
+Starts the agent-native MCP server over stdio, exposing the compiler to AI
+agents (tools, resources, and structured diagnostics).
+
+```sh
+krate mcp
+krate mcp ./my-site
+```
+
+See [MCP Server](/docs/features/mcp/) for client setup and the tool/resource
+reference.
 
 ## Build output
 

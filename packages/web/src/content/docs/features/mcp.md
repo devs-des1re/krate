@@ -1,0 +1,189 @@
+---
+title: MCP Server (Agent-Native)
+order: 14
+description: Expose the Krate compiler to AI agents over the Model Context Protocol with `krate mcp`.
+sidebar:
+  label: MCP Server
+  order: 14
+---
+
+# MCP Server (Agent-Native)
+
+`krate mcp` starts an [MCP](https://modelcontextprotocol.io) (Model Context
+Protocol) server that exposes the Krate compiler to AI agents. The agent talks
+to the real compiler — routes, AST, diagnostics, content graph — instead of
+grepping a filesystem.
+
+The server speaks **JSON-RPC 2.0 over stdio** and has **no external
+dependencies**.
+
+## Setup
+
+Register the server once in your agent/editor config. The working directory (or
+a trailing path argument) selects the project root.
+
+### Claude Desktop / Claude Code
+
+`claude_desktop_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "krate": { "command": "krate", "args": ["mcp", "/abs/path/to/site"] }
+  }
+}
+```
+
+Omit the path to use the current working directory: `"args": ["mcp"]`.
+
+### Cursor / VS Code / opencode
+
+The shape is the same, under the client's own key:
+
+- Cursor — `.cursor/mcp.json`
+- VS Code — `.vscode/mcp.json` (under `"servers"`)
+- opencode — `opencode.json`
+
+```json
+{
+  "mcpServers": {
+    "krate": { "command": "krate", "args": ["mcp"] }
+  }
+}
+```
+
+## Tools
+
+| Tool | Description |
+|------|-------------|
+| `list_routes` | Every route with source file, render mode, and dynamic params |
+| `read_page` | A page's source, kind-tagged AST document, or rendered HTML (`format` selectable) |
+| `read_content` | Content-collection entries: list a collection or read one entry (raw file + frontmatter + body) |
+| `search_docs` | Search documentation content, returning matches with excerpts |
+| `build` | Build the site; returns diagnostics and a per-route summary |
+| `check` | Run the quality gates (a11y/SEO/perf); builds first when needed |
+| `create_page` | Create a page from a template; returns a diff (dry-run by default) |
+| `edit_ast` | Replace a page's AST with an edited document; returns a diff |
+| `edit_page` | Edit any project file's source directly (full replace or find+replace); returns a diff |
+
+Every tool advertises [annotations](https://modelcontextprotocol.io/specification/2025-06-18/basic/tools#tool-annotations)
+(read-only, additive, destructive) so clients know what to auto-approve and
+what to flag for confirmation.
+
+### Read tools
+
+`list_routes`, `read_page`, `read_content`, `search_docs`, `build`, and `check`
+never write source files.
+
+`read_page` lets the agent choose what it needs with `format` (default `source`):
+
+- `source` — the raw file text, so the agent can read and edit the actual page.
+- `ast` — the **kind-tagged AST document** (the same format JS plugins
+  receive), with `lossyTypes` reporting TypeScript constructs the parser drops.
+- `html` — the rendered output when the site has been built.
+- `all` — source, AST, and rendered HTML together.
+
+`read_content` lists a collection's entries (slug, project path, frontmatter)
+when `collection` alone is given, or returns a single entry's raw file, parsed
+frontmatter, and markdown body (plus rendered HTML for `.md`) when `slug` is
+added.
+
+### Write tools
+
+`create_page`, `edit_ast`, and `edit_page` **default to a dry-run** that
+returns a unified diff. Pass `"apply": true` to write. This gives the agent (and
+you) an approval step before anything changes on disk.
+
+- **`create_page`** scaffolds a page from a template — `static` (default),
+  `content-list`, `detail`, and `blank` (raw source override). For
+  content-backed templates you can pass `collection` and a `contentEntry`
+  object so the matching markdown entry is authored alongside the page, and
+  `withLayout: true` creates a missing `_layout.tsx`. Applying a page also
+  regenerates the generated route/content types.
+- **`edit_ast`** accepts a kind-tagged AST document — typically one read with
+  `read_page`, modified, and sent back. The compiler validates it by decoding
+  the document and re-parsing the printed source before writing. If the page
+  uses TypeScript constructs the parser drops (interfaces, type aliases,
+  annotations), `edit_ast` **refuses** rather than silently stripping them.
+- **`edit_page`** edits the actual file — before reaching for a patch. It takes
+  a `route` (a page route like `/about`, or a project-relative path like
+  `src/pages/about.tsx`, `src/styles/main.css`, or `src/content/blog/hello.md`)
+  plus one of two modes:
+  - `content` — replace the entire file (creates the file when it does not
+    exist).
+  - `find` + `replace` — a targeted in-place edit. `find` must match exactly
+    once, or pass `replaceAll: true` to replace every occurrence; a missing or
+    ambiguous match returns a helpful error instead of guessing.
+
+  Editable source (`.ts`, `.tsx`, `.js`, `.jsx`) is re-parsed after the edit:
+  anything that would not parse is never written (dry-run or apply). Existing
+  line endings (LF/CRLF) are preserved, and paths are anchored to the project
+  root with traversal rejected. A diff is returned in either mode.
+
+## Resources and resource templates
+
+Resources provide pull-based context an agent can attach automatically.
+
+| URI | Contents |
+|-----|----------|
+| `krate://routes` | Every route in the project (JSON) |
+| `krate://page/{route}` | A single page by route, e.g. `krate://page/about` |
+| `krate://content` | Configured content collections and their entries |
+| `krate://manifest` | The built site manifest (empty when unbuilt) |
+| `krate://config` | The resolved Krate config (relative paths, no env values) |
+
+`krate://page/{route}` is a **resource template**, advertised through
+`resources/templates/list`. The server also provides **argument completions**
+(`completions/complete`) for routes, page templates, and content collections
+(and collection slugs for `read_content`), so clients can offer values while
+the agent is filling in a tool call or prompt argument.
+
+## Prompts
+
+Prompts package recurring workflows so agents reach for the right tools:
+
+- `add-page` — create a page the Krate way: match house style first, then
+  `create_page` with the chosen template, and confirm via `build`/`check`.
+- `publish-content` — author a new entry into a typed content collection and
+  wire it into a page.
+- `fix-checks` — run the quality gates, then fix the worst findings with
+  `edit_page`.
+- `explore` — summarize the project from routes, config, and outstanding checks.
+
+## Protocol
+
+- **Version negotiation**: `initialize` handles `protocolVersion` negotiation,
+  supporting `2024-11-05` through `2025-11-25`.
+- **Cancellation**: `notifications/cancelled` aborts a pending request; the
+  server responds with error code `-32800` (Request Cancelled) when appropriate.
+  Long-running `build`/`check` calls observe the cancellation context.
+- **Instructions**: `initialize` includes agent-facing instructions that
+  describe the tool set, the dry-run convention, and Krate's pages/layout/
+  content conventions.
+- **Notifications** (`notifications/initialized`, `exit`) never produce a
+  response.
+
+## Example session
+
+An agent asked to add a pricing page can:
+
+1. `list_routes` — see existing routes and their source files.
+2. `read_page` on a similar page (`format: "source"`) — learn component and
+   styling conventions.
+3. `create_page { route: "/pricing" }` — receive a diff.
+4. You approve, then the agent calls it again with `"apply": true`.
+5. `build` — surface diagnostics in the same turn.
+6. `check` — fix any accessibility or SEO findings with `edit_page`.
+
+Because the server holds the compiler in-process, each step is fast and the
+agent never has to invoke a shell.
+
+## Implementation notes
+
+- **No MCP SDK dependency.** The protocol surface is implemented directly with
+  `encoding/json`.
+- **Stdout is reserved** for protocol frames; any incidental compiler output is
+  redirected to stderr, and build/check output is captured.
+- **Paths are anchored** to the project root and traversal is rejected.
+- **Environment values never cross the bridge**, matching the compiler's
+  existing discipline for `.env` handling.

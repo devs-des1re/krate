@@ -1,0 +1,1453 @@
+package mcp
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sort"
+	"strconv"
+	"strings"
+	"sync"
+
+	"github.com/kratejs/krate/packages/compiler/internal/astjson"
+	"github.com/kratejs/krate/packages/compiler/internal/astprint"
+	"github.com/kratejs/krate/packages/compiler/internal/build"
+	"github.com/kratejs/krate/packages/compiler/internal/check"
+	"github.com/kratejs/krate/packages/compiler/internal/config"
+	"github.com/kratejs/krate/packages/compiler/internal/docs"
+	"github.com/kratejs/krate/packages/compiler/internal/frontmatter"
+	"github.com/kratejs/krate/packages/compiler/internal/markdown"
+	"github.com/kratejs/krate/packages/compiler/internal/routetypes"
+)
+
+// Options configures a Service.
+type Options struct {
+	Root    string
+	Cfg     *config.Config
+	Env     map[string]string
+	Verbose bool
+}
+
+// Service implements the MCP tools and resources over one in-process Builder.
+type Service struct {
+	root    string
+	cfg     *config.Config
+	env     map[string]string
+	verbose bool
+	builder *build.Builder
+
+	// runMu serializes write operations and build/check (which swap os.Stdout
+	// during stdout capture) so concurrent requests never race.
+	runMu sync.Mutex
+}
+
+// NewService creates a Service and its session Builder.
+func NewService(opts Options) *Service {
+	return &Service{
+		root:    opts.Root,
+		cfg:     opts.Cfg,
+		env:     opts.Env,
+		verbose: opts.Verbose,
+		builder: newBuilder(opts),
+	}
+}
+
+// newBuilder constructs a Builder. Each build-scoped operation gets a fresh
+// one because BuildAll closes plugin subprocesses on completion, so a Builder
+// is not safely reusable across builds.
+func newBuilder(opts Options) *build.Builder {
+	b := build.New(opts.Root, opts.Cfg)
+	b.Verbose = opts.Verbose
+	b.Env = opts.Env
+	return b
+}
+
+// Register installs every tool, resource, template, prompt, and completion on
+// the MCP server.
+func (s *Service) Register(srv *Server) {
+	// ── read tools ────────────────────────────────────────────────────────
+	srv.RegisterTool(Tool{
+		Name:        "list_routes",
+		Description: "List every route in the project with its source file, render mode, and dynamic params.",
+		InputSchema: objSchema(nil),
+		Annotations: readOnlyAnnotations("List Routes"),
+		Handler:     s.toolListRoutes,
+	})
+	srv.RegisterTool(Tool{
+		Name:        "read_page",
+		Description: "Read a page by route (e.g. /about) or source path. Returns the requested format(s): source (raw file text), ast (kind-tagged document), or html (rendered output when built).",
+		InputSchema: objSchema(map[string]any{
+			"route":  strSchema("Route path or page source path"),
+			"source": strSchema("Page source path (alternative to route)"),
+			"format": enumSchema("What to return (default \"source\")", "source", "ast", "html", "all"),
+		}),
+		Annotations: readOnlyAnnotations("Read Page"),
+		Handler:     s.toolReadPage,
+	})
+	srv.RegisterTool(Tool{
+		Name:        "search_docs",
+		Description: "Search documentation content for a query string, returning matching pages with excerpts.",
+		InputSchema: objSchema(map[string]any{
+			"query": strSchema("Search query"),
+			"limit": numSchema("Maximum results (default 8)"),
+		}, "query"),
+		Annotations: readOnlyAnnotations("Search Docs"),
+		Handler:     s.toolSearchDocs,
+	})
+	srv.RegisterTool(Tool{
+		Name:        "build",
+		Description: "Build the site and return diagnostics plus a per-route summary. Read-only with respect to source files.",
+		InputSchema: objSchema(nil),
+		Annotations: rebuildToolAnnotations("Build Site"),
+		Handler:     s.toolBuild,
+	})
+	srv.RegisterTool(Tool{
+		Name:        "check",
+		Description: "Run the compiler-enforced quality gates (a11y/SEO/perf) against the site, building first when needed.",
+		InputSchema: objSchema(nil),
+		Annotations: rebuildToolAnnotations("Run Quality Checks"),
+		Handler:     s.toolCheck,
+	})
+
+	// ── write tools (dry-run by default) ──────────────────────────────────
+	srv.RegisterTool(Tool{
+		Name:        "create_page",
+		Description: "Create a new page from a template (static, content-list, detail) + optional content entry and layout. Returns a unified diff unless apply=true.",
+		InputSchema: objSchema(map[string]any{
+			"route":        strSchema("Route path, e.g. /pricing or /blog/[slug], or a source path under pagesDir"),
+			"template":     enumSchema("Page template (default static)", "static", "content-list", "detail", "blank"),
+			"title":        strSchema("Page title used by the static template"),
+			"collection":   strSchema("Content collection name for content-list/detail templates"),
+			"contentEntry": objOnlySchema("For content-backed templates: a single entry { slug, data or frontmatter fields } to author alongside the page"),
+			"content":      strSchema("Full page source override (when provided, template is ignored)"),
+			"withLayout":   boolSchema("Create _layout.tsx if it does not exist (default false)"),
+			"apply":        boolSchema("Write the files (default false: dry-run)"),
+		}, "route"),
+		Annotations: additiveToolAnnotations("Create Page"),
+		Handler:     s.toolCreatePage,
+	})
+	srv.RegisterTool(Tool{
+		Name:        "edit_ast",
+		Description: "Replace a page's AST with an edited kind-tagged document (from read_page). Returns a unified diff unless apply=true. Refuses files containing TypeScript constructs the parser drops.",
+		InputSchema: objSchema(map[string]any{
+			"route":  strSchema("Route path or source path"),
+			"source": strSchema("Page source path (alternative to route)"),
+			"ast":    strSchema("Kind-tagged AST document (JSON)"),
+			"apply":  boolSchema("Write the file (default false: dry-run)"),
+		}, "ast"),
+		Annotations: destructiveToolAnnotations("Edit Page AST"),
+		Handler:     s.toolEditAST,
+	})
+	srv.RegisterTool(Tool{
+		Name:        "edit_page",
+		Description: "Edit a page or any project file's source directly (no AST required): provide content for a full-file replace, or find+replace for a targeted in-place edit. Returns a unified diff unless apply=true. Editable source (.ts/.tsx/.js/.jsx) is re-parsed and the edit is refused if it would not parse.",
+		InputSchema: objSchema(map[string]any{
+			"route":      strSchema("Route path (e.g. /about) or a project-relative path (e.g. src/pages/about.tsx, src/styles/main.css, src/content/blog/hello.md)"),
+			"content":    strSchema("Full new file content (full replace; creates the file when it does not exist)"),
+			"find":       strSchema("Exact text to replace; must match once unless replaceAll is true"),
+			"replace":    strSchema("Replacement text for find"),
+			"replaceAll": boolSchema("Allow replacing all occurrences of find (default false)"),
+			"apply":      boolSchema("Write the file (default false: dry-run)"),
+		}, "route"),
+		Annotations: destructiveToolAnnotations("Edit Page Source"),
+		Handler:     s.toolEditPage,
+	})
+	srv.RegisterTool(Tool{
+		Name:        "read_content",
+		Description: "Read content-collection entries. With only a collection, lists its entries (slug + path + frontmatter). With a slug, returns the full entry: raw content, parsed frontmatter, and markdown body.",
+		InputSchema: objSchema(map[string]any{
+			"collection": strSchema("Collection name as configured under content: in krate.config.ts"),
+			"slug":       strSchema("Entry slug to read, e.g. hello-world or guides/advanced (omit to list)"),
+		}, "collection"),
+		Annotations: readOnlyAnnotations("Read Content"),
+		Handler:     s.toolReadContent,
+	})
+
+	// ── resources ─────────────────────────────────────────────────────────
+	srv.RegisterResource(Resource{
+		URI:         "krate://routes",
+		Name:        "routes",
+		Description: "Every route in the project (JSON).",
+		MIMEType:    "application/json",
+		Read: func(ctx context.Context, uri string) (ResourceContents, *rpcError) {
+			routes, err := s.builder.RouteList()
+			if err != nil {
+				return ResourceContents{}, Errorf("listing routes: %v", err)
+			}
+			return jsonResource(uri, routes)
+		},
+	})
+	srv.RegisterResource(Resource{
+		URI:         "krate://content",
+		Name:        "content",
+		Description: "Typed content collections and their entries (JSON).",
+		MIMEType:    "application/json",
+		Read:        s.readContentResource,
+	})
+	srv.RegisterResource(Resource{
+		URI:         "krate://manifest",
+		Name:        "manifest",
+		Description: "The built site manifest (JSON); empty when the site is unbuilt.",
+		MIMEType:    "application/json",
+		Read:        s.readManifestResource,
+	})
+	srv.RegisterResource(Resource{
+		URI:         "krate://config",
+		Name:        "config",
+		Description: "The resolved Krate config, curated (relative paths, no env values).",
+		MIMEType:    "application/json",
+		Read:        s.readConfigResource,
+	})
+	srv.RegisterResourceTemplate(&ResourceTemplate{
+		URITemplate: "krate://page/{route}",
+		Name:        "page",
+		Title:       "Page by route",
+		Description: "A single page by route, e.g. krate://page/about.",
+		MIMEType:    "application/json",
+		Read:        s.readPageTemplate,
+	})
+
+	// ── prompts ───────────────────────────────────────────────────────────
+	srv.RegisterPrompt(s.promptAddPage())
+	srv.RegisterPrompt(s.promptPublishContent())
+	srv.RegisterPrompt(s.promptFixChecks())
+	srv.RegisterPrompt(s.promptExplore())
+
+	// ── completions ───────────────────────────────────────────────────────
+	srv.RegisterCompletion("ref/resource", "krate://page/{route}", "route", s.completeRoutes)
+	srv.RegisterCompletion("ref/prompt", "add-page", "template", s.completeTemplates)
+	srv.RegisterCompletion("ref/prompt", "add-page", "collection", s.completeCollections)
+	srv.RegisterCompletion("ref/prompt", "add-page", "route", s.completeRoutes)
+	srv.RegisterCompletion("ref/prompt", "publish-content", "collection", s.completeCollections)
+	srv.RegisterCompletion("ref/tool", "edit_page", "route", s.completeRoutes)
+	srv.RegisterCompletion("ref/tool", "read_page", "route", s.completeRoutes)
+	srv.RegisterCompletion("ref/tool", "read_content", "collection", s.completeCollections)
+	srv.RegisterCompletion("ref/tool", "read_content", "slug", s.completeContentSlugs)
+}
+
+// ── read tools ──────────────────────────────────────────────────────────────
+
+func (s *Service) toolListRoutes(ctx context.Context, _ map[string]any) (ToolResult, *rpcError) {
+	routes, err := s.builder.RouteList()
+	if err != nil {
+		return ErrorResult("listing routes: " + err.Error()), nil
+	}
+	return JSONResult(routes)
+}
+
+func (s *Service) toolReadPage(ctx context.Context, args map[string]any) (ToolResult, *rpcError) {
+	target := argString(args, "route")
+	if target == "" {
+		target = argString(args, "source")
+	}
+	if target == "" {
+		return ErrorResult("provide route or source"), nil
+	}
+	format := build.PageDetailFormat(argString(args, "format"))
+	switch format {
+	case "", build.FormatSource, build.FormatAST, build.FormatHTML, build.FormatAll:
+	default:
+		return ErrorResult("format must be one of: source, ast, html, all"), nil
+	}
+	if format == "" {
+		format = build.FormatSource
+	}
+	detail, err := s.builder.PageDetailFor(target, format)
+	if err != nil {
+		return ErrorResult(err.Error()), nil
+	}
+	return JSONResult(detail)
+}
+
+func (s *Service) toolSearchDocs(ctx context.Context, args map[string]any) (ToolResult, *rpcError) {
+	query, rerr := requireString(args, "query")
+	if rerr != nil {
+		return ToolResult{}, rerr
+	}
+	limit := 8
+	if v, ok := args["limit"].(float64); ok && v > 0 {
+		limit = int(v)
+	}
+
+	pages, err := s.scanDocs()
+	if err != nil {
+		return ErrorResult("scanning docs: " + err.Error()), nil
+	}
+	entries := docs.BuildSearchIndex(pages)
+
+	q := strings.ToLower(query)
+	type hit struct {
+		Title      string   `json:"title"`
+		Path       string   `json:"path"`
+		Excerpt    string   `json:"excerpt"`
+		Score      int      `json:"score"`
+		Tags       []string `json:"tags,omitempty"`
+		Categories []string `json:"categories,omitempty"`
+	}
+	var hits []hit
+	for _, e := range entries {
+		score := scoreMatch(q, e)
+		if score == 0 {
+			continue
+		}
+		hits = append(hits, hit{
+			Title:      e.Title,
+			Path:       e.Path,
+			Excerpt:    excerpt(e.Content, q, 200),
+			Score:      score,
+			Tags:       e.Tags,
+			Categories: e.Categories,
+		})
+	}
+	sort.SliceStable(hits, func(i, j int) bool { return hits[i].Score > hits[j].Score })
+	if len(hits) > limit {
+		hits = hits[:limit]
+	}
+	if hits == nil {
+		hits = []hit{}
+	}
+	return JSONResult(hits)
+}
+
+func (s *Service) toolBuild(ctx context.Context, _ map[string]any) (ToolResult, *rpcError) {
+	out, err := s.runBuild(ctx)
+	if err != nil {
+		return ErrorResult(fmt.Sprintf("build failed: %v\n\n%s", err, out)), nil
+	}
+	routes, _ := s.builder.RouteList()
+	return JSONResult(map[string]any{
+		"ok":     true,
+		"routes": len(routes),
+		"output": strings.TrimSpace(out),
+	})
+}
+
+func (s *Service) toolCheck(ctx context.Context, _ map[string]any) (ToolResult, *rpcError) {
+	// Build if the output directory is not present, then evaluate gates.
+	if _, err := os.Stat(filepath.Join(s.cfg.OutDir, "manifest.json")); err != nil {
+		if out, buildErr := s.runBuild(ctx); buildErr != nil {
+			return ErrorResult(fmt.Sprintf("build failed: %v\n\n%s", buildErr, out)), nil
+		}
+	}
+
+	// CheckSite re-reads dist/; capture its stdout so preflight/build noise
+	// never reaches the JSON-RPC stream.
+	var findings []check.Finding
+	var cfg check.Config
+	chk := newBuilder(Options{Root: s.root, Cfg: s.cfg, Env: s.env, Verbose: s.verbose})
+	_, err := captureStdout(func() error {
+		var e error
+		findings, cfg, e = chk.CheckSite(true)
+		return e
+	})
+	if err != nil {
+		return ErrorResult("running checks: " + err.Error()), nil
+	}
+	errs, warns := check.Counts(findings)
+	if findings == nil {
+		findings = []check.Finding{}
+	}
+	// Render findings with a friendly severity label and portable paths.
+	type view struct {
+		Rule     string `json:"rule"`
+		Category string `json:"category"`
+		Severity string `json:"severity"`
+		Route    string `json:"route,omitempty"`
+		File     string `json:"file,omitempty"`
+		Line     int    `json:"line,omitempty"`
+		Col      int    `json:"col,omitempty"`
+		Message  string `json:"message"`
+		Hint     string `json:"hint,omitempty"`
+	}
+	views := make([]view, 0, len(findings))
+	for _, f := range findings {
+		views = append(views, view{
+			Rule:     f.Rule,
+			Category: f.Category,
+			Severity: f.Severity.String(),
+			Route:    f.Route,
+			File:     filepath.ToSlash(f.File),
+			Line:     f.Line,
+			Col:      f.Col,
+			Message:  f.Message,
+			Hint:     f.Hint,
+		})
+	}
+	return JSONResult(map[string]any{
+		"errors":   errs,
+		"warnings": warns,
+		"failOn":   cfg.FailOn.String(),
+		"failing":  check.Failing(findings, cfg.FailOn),
+		"findings": views,
+	})
+}
+
+// ── write tools ─────────────────────────────────────────────────────────────
+
+// pageTemplate describes how create_page scaffolds a page.
+type pageTemplate string
+
+const (
+	tmplStatic      pageTemplate = "static"
+	tmplContentList pageTemplate = "content-list"
+	tmplDetail      pageTemplate = "detail"
+	tmplBlank       pageTemplate = "blank"
+)
+
+func (s *Service) toolCreatePage(ctx context.Context, args map[string]any) (ToolResult, *rpcError) {
+	routeArg, rerr := requireString(args, "route")
+	if rerr != nil {
+		return ToolResult{}, rerr
+	}
+	apply := argBool(args, "apply", false)
+
+	route := routetypes.Normalize(routeArg)
+	if route == "/" || route == "" {
+		return ErrorResult("a non-root route is required"), nil
+	}
+	clean := strings.TrimPrefix(route, "/")
+	if strings.Contains(clean, "..") || filepath.IsAbs(clean) {
+		return ErrorResult("invalid route"), nil
+	}
+
+	rel, err := routeToPageFile(clean)
+	if err != nil {
+		return ErrorResult(err.Error()), nil
+	}
+	abs := filepath.Join(s.cfg.PagesDir, filepath.FromSlash(rel))
+
+	// Scaffold the source. A raw content override wins.
+	content := argString(args, "content")
+	if content == "" {
+		tmpl := pageTemplate(argString(args, "template"))
+		if tmpl == "" {
+			tmpl = tmplStatic
+		}
+		if tmpl != tmplStatic && tmpl != tmplContentList && tmpl != tmplDetail && tmpl != tmplBlank {
+			return ErrorResult("unknown template: " + string(tmpl) + " (static|content-list|detail|blank)"), nil
+		}
+		content, err = s.renderPageTemplate(tmpl, rel, args)
+		if err != nil {
+			return ErrorResult(err.Error()), nil
+		}
+	}
+
+	// The content entry (content-backed templates) lands next to the page.
+	var entryRel string
+	var entryContent string
+	if !argBool(args, "withEntry", false) {
+		if m := argStringMap(args, "contentEntry"); m != nil {
+			col := argString(args, "collection")
+			if col == "" {
+				col = s.inferCollectionFromPage(route, s.root)
+			}
+			entryRel, entryContent, err = s.renderContentEntry(col, m)
+			if err != nil {
+				return ErrorResult(err.Error()), nil
+			}
+		}
+	}
+
+	// _layout.tsx depends on the layout option.
+	var layoutRel, layoutContent string
+	if argBool(args, "withLayout", false) {
+		if _, statErr := os.Stat(filepath.Join(s.cfg.PagesDir, "_layout.tsx")); statErr != nil {
+			layoutRel = "_layout.tsx"
+			layoutContent = defaultLayoutTemplate()
+		}
+	}
+
+	// Compose the full diff for dry-run; report what would happen.
+	var reports []string
+	reports = append(reports, "diff --git a/"+filepath.ToSlash(rel)+" b/"+filepath.ToSlash(rel))
+	reports = append(reports, unifiedDiff(filepath.ToSlash(rel), "", content))
+	if entryRel != "" {
+		reports = append(reports, "diff --git "+filepath.ToSlash(entryRel))
+		reports = append(reports, unifiedDiff(filepath.ToSlash(entryRel), "", entryContent))
+	}
+	if layoutRel != "" {
+		reports = append(reports, "diff --git "+filepath.ToSlash(layoutRel))
+		reports = append(reports, unifiedDiff(filepath.ToSlash(layoutRel), "", layoutContent))
+	}
+
+	if !apply {
+		body := strings.Join(reports, "\n")
+		return TextResult("Dry run (apply: true to write). Would create:\n\n" + body), nil
+	}
+
+	if _, err := os.Stat(abs); err == nil {
+		return ErrorResult("page already exists: " + rel), nil
+	}
+	if err := os.MkdirAll(filepath.Dir(abs), 0755); err != nil {
+		return ErrorResult("creating directory: " + err.Error()), nil
+	}
+	if err := os.WriteFile(abs, []byte(content), 0644); err != nil {
+		return ErrorResult("writing page: " + err.Error()), nil
+	}
+	created := []string{rel}
+	if entryRel != "" {
+		eabs := filepath.Join(s.root, filepath.FromSlash(entryRel))
+		if _, err := os.Stat(eabs); err == nil {
+			return ErrorResult("content entry already exists: " + entryRel), nil
+		}
+		if err := os.MkdirAll(filepath.Dir(eabs), 0755); err != nil {
+			return ErrorResult("creating entry dir: " + err.Error()), nil
+		}
+		if err := os.WriteFile(eabs, []byte(entryContent), 0644); err != nil {
+			return ErrorResult("writing content entry: " + err.Error()), nil
+		}
+		created = append(created, entryRel)
+	}
+	if layoutRel != "" {
+		labs := filepath.Join(s.cfg.PagesDir, "_layout.tsx")
+		if err := os.WriteFile(labs, []byte(layoutContent), 0644); err != nil {
+			return ErrorResult("writing layout: " + err.Error()), nil
+		}
+		created = append(created, layoutRel)
+	}
+
+	// Regenerate route/content types so the new page is typed immediately.
+	if errs := build.GenerateTypes(s.root, s.cfg); len(errs) > 0 {
+		msgs := make([]string, 0, len(errs))
+		for _, e := range errs {
+			msgs = append(msgs, e.Error())
+		}
+		return ErrorResult("created files but type generation reported:\n" + strings.Join(msgs, "\n")), nil
+	}
+
+	return TextResult("Created " + strings.Join(created, ", ") + "\n\n" + strings.Join(reports, "\n")), nil
+}
+
+// renderPageTemplate produces a page's source for a template.
+func (s *Service) renderPageTemplate(tmpl pageTemplate, rel string, args map[string]any) (string, error) {
+	title := argString(args, "title")
+	if title == "" {
+		title = humanizeRoute(strings.TrimSuffix(strings.TrimPrefix(rel, "/"), ".tsx"))
+		if title == "" {
+			title = "Home"
+		}
+	}
+	component := pageComponentName(rel)
+
+	var b strings.Builder
+	switch tmpl {
+	case tmplBlank:
+		b.WriteString("export default function " + component + "() {\n")
+		b.WriteString("  return (\n    <main>\n      <p>Add your page content here.</p>\n    </main>\n  );\n}\n")
+	case tmplStatic:
+		b.WriteString("export default function " + component + "() {\n")
+		b.WriteString("  return (\n")
+		b.WriteString("    <main>\n")
+		b.WriteString("      <Head>\n")
+		fmt.Fprintf(&b, "        <title>%s</title>\n", title)
+		b.WriteString("      </Head>\n")
+		fmt.Fprintf(&b, "      <h1>%s</h1>\n", title)
+		b.WriteString("      <p>Write about this page.</p>\n")
+		b.WriteString("    </main>\n")
+		b.WriteString("  );\n")
+		b.WriteString("}\n")
+	case tmplContentList, tmplDetail:
+		col := argString(args, "collection")
+		if col == "" {
+			col = s.inferCollectionFromPage("/x", s.root)
+			if col == "" {
+				return "", fmt.Errorf("the %s template needs a collection (use collection: \"name\")", tmpl)
+			}
+		}
+		if tmpl == tmplContentList {
+			b.WriteString("import { getCollection } from 'krate/content';\n\n")
+			fmt.Fprintf(&b, "const posts = getCollection(%q);\n\n", col)
+			b.WriteString("export default function " + component + "() {\n")
+			b.WriteString("  return (\n    <main>\n")
+			fmt.Fprintf(&b, "      <h1>%s</h1>\n", title)
+			b.WriteString("      <ul>\n")
+			b.WriteString("        {posts.map((post) => (\n")
+			b.WriteString("          <li>\n")
+			b.WriteString("            <Link href={")
+			fmt.Fprintf(&b, "`/%s/${post.slug}`", strings.Trim(routeFromRel(rel), "/"))
+			b.WriteString("}>{post.data.title}</Link>\n")
+			b.WriteString("          </li>\n")
+			b.WriteString("        ))}\n")
+			b.WriteString("      </ul>\n")
+			b.WriteString("    </main>\n")
+			b.WriteString("  );\n")
+			b.WriteString("}\n")
+		} else {
+			b.WriteString("import { getCollection } from 'krate/content';\n\n")
+			fmt.Fprintf(&b, "export function generateStaticParams() {\n  return getCollection(%q).map((p) => ({ params: { id: p.slug } }));\n}\n\n", col)
+			b.WriteString("export default function " + component + "(props) {\n")
+			b.WriteString("  const id = props.params?.id;\n")
+			fmt.Fprintf(&b, "  const item = getCollection(%q).find((p) => p.slug === id);\n", col)
+			b.WriteString("\n  if (!item) return <main><h1>Not found</h1></main>;\n\n")
+			b.WriteString("  return (\n    <main>\n      <Head>\n        <title>{item.data.title}</title>\n      </Head>\n      <h1>{item.data.title}</h1>\n      <div class=\"body\" dangerouslySetInnerHTML={{ __html: item.html }}></div>\n    </main>\n  );\n}\n")
+		}
+	}
+	return b.String(), nil
+}
+
+// renderContentEntry renders a markdown entry with YAML-ish frontmatter for a
+// collection. m may contain a "slug" and any other fields as frontmatter.
+func (s *Service) renderContentEntry(col string, m map[string]any) (rel, content string, err error) {
+	if col == "" {
+		return "", "", fmt.Errorf("contentEntry requires a collection")
+	}
+	slug, _ := m["slug"].(string)
+	if slug == "" {
+		return "", "", fmt.Errorf("contentEntry requires a slug")
+	}
+	dir := s.collectionDir(col)
+	if dir == "" {
+		return "", "", fmt.Errorf("unknown collection %q — add it under content: in krate.config.ts", col)
+	}
+	rel = filepath.ToSlash(filepath.Join(dir, slug+".md"))
+
+	var b strings.Builder
+	b.WriteString("---\n")
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		if k != "slug" {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	for _, k := range keys {
+		switch v := m[k].(type) {
+		case string:
+			b.WriteString(k + ": " + v + "\n")
+		case []any:
+			strs := make([]string, 0, len(v))
+			for _, item := range v {
+				strs = append(strs, fmt.Sprintf("%v", item))
+			}
+			b.WriteString(k + ": [" + strings.Join(strs, ", ") + "]\n")
+		default:
+			fmt.Fprintf(&b, "%s: %v\n", k, v)
+		}
+	}
+	b.WriteString("---\n\n")
+	fmt.Fprintf(&b, "Content for **%s**.\n", slug)
+	return rel, b.String(), nil
+}
+
+func (s *Service) toolEditAST(ctx context.Context, args map[string]any) (ToolResult, *rpcError) {
+	rawAST, rerr := requireString(args, "ast")
+	if rerr != nil {
+		return ToolResult{}, rerr
+	}
+	apply := argBool(args, "apply", false)
+
+	target := argString(args, "route")
+	if target == "" {
+		target = argString(args, "source")
+	}
+	if target == "" {
+		return ErrorResult("provide route or source"), nil
+	}
+
+	src, rel, err := s.resolveSource(target)
+	if err != nil {
+		return ErrorResult(err.Error()), nil
+	}
+
+	original, err := os.ReadFile(src)
+	if err != nil {
+		return ErrorResult("reading page: " + err.Error()), nil
+	}
+
+	// The AST printer cannot reproduce TypeScript constructs the parser drops
+	// (interfaces, type aliases, annotations). Refuse rather than silently
+	// stripping them.
+	if _, _, dropped := astprint.Parse(string(original)); dropped > 0 {
+		return ErrorResult("refusing to edit: " + rel + " contains TypeScript type syntax (interfaces, aliases, or annotations) that the AST cannot round-trip. Use edit_page to edit the source directly."), nil
+	}
+
+	prog, err := astjson.DecodeProgram([]byte(rawAST))
+	if err != nil {
+		return ErrorResult("invalid AST document: " + err.Error()), nil
+	}
+	out := astprint.Print(prog)
+
+	// Validate that the printed source reparses cleanly before touching disk.
+	if _, perrs, _ := astprint.Parse(out); len(perrs) > 0 {
+		msgs := make([]string, 0, len(perrs))
+		for _, e := range perrs {
+			msgs = append(msgs, e.Error())
+		}
+		return ErrorResult("edited AST does not produce valid source:\n" + strings.Join(msgs, "\n")), nil
+	}
+	// Preserve the file's original line ending.
+	if strings.Contains(string(original), "\r\n") {
+		out = strings.ReplaceAll(out, "\n", "\r\n")
+	}
+
+	diff := unifiedDiff(rel, string(original), out)
+	if !apply {
+		return TextResult(diff), nil
+	}
+	if err := os.WriteFile(src, []byte(out), 0644); err != nil {
+		return ErrorResult("writing page: " + err.Error()), nil
+	}
+	return TextResult("Updated " + rel + "\n\n" + diff), nil
+}
+
+// toolEditPage edits a page or any project file directly (no AST required).
+// Two modes: a full-file replace via content, or a targeted find+replace. The
+// edited source is re-parsed before writing so broken files are never written.
+func (s *Service) toolEditPage(ctx context.Context, args map[string]any) (ToolResult, *rpcError) {
+	target := argString(args, "route")
+	if target == "" {
+		return ErrorResult("provide route (a page route like /about or a project-relative path like src/pages/about.tsx)"), nil
+	}
+	content := argString(args, "content")
+	find := argString(args, "find")
+	replace := argString(args, "replace")
+	replaceAll := argBool(args, "replaceAll", false)
+	apply := argBool(args, "apply", false)
+
+	if content == "" && find == "" {
+		return ErrorResult("provide content (full replace) or find+replace (targeted edit)"), nil
+	}
+	if content != "" && find != "" {
+		return ErrorResult("provide either content or find, not both"), nil
+	}
+
+	abs, rel, err := s.resolveEditTarget(target)
+	if err != nil {
+		return ErrorResult(err.Error()), nil
+	}
+
+	original, exists := "", true
+	if data, readErr := os.ReadFile(abs); readErr == nil {
+		original = string(data)
+	} else if os.IsNotExist(readErr) {
+		if find != "" {
+			return ErrorResult("cannot find+replace on a file that does not exist: " + rel), nil
+		}
+		exists = false
+	} else {
+		return ErrorResult("reading " + rel + ": " + readErr.Error()), nil
+	}
+
+	var out string
+	if content != "" {
+		out = content
+	} else {
+		matches := strings.Count(original, find)
+		if matches == 0 {
+			return ErrorResult("find text not found in " + rel), nil
+		}
+		if matches > 1 && !replaceAll {
+			return ErrorResult(fmt.Sprintf("%q matches %d places in %s; narrow the find text or pass replaceAll: true", find, matches, rel)), nil
+		}
+		out = strings.ReplaceAll(original, find, replace)
+	}
+
+	// Preserve the file's existing line endings (new files default to LF).
+	if exists && strings.Contains(original, "\r\n") && out != original {
+		out = strings.ReplaceAll(out, "\n", "\r\n")
+	}
+
+	// Parse gate: editable source must still parse after the edit.
+	if isEditablePageExt(rel) {
+		if _, perrs, _ := astprint.Parse(out); len(perrs) > 0 {
+			msgs := make([]string, 0, len(perrs))
+			for _, e := range perrs {
+				msgs = append(msgs, e.Error())
+			}
+			return ErrorResult("refusing to write " + rel + ": it would not parse after the edit:\n" + strings.Join(msgs, "\n")), nil
+		}
+	}
+
+	diff := unifiedDiff(rel, original, out)
+	if !apply {
+		if !exists {
+			return TextResult("Dry run (would create " + rel + "; apply: true to write).\n\n" + diff), nil
+		}
+		return TextResult("Dry run (apply: true to write).\n\n" + diff), nil
+	}
+	if err := os.MkdirAll(filepath.Dir(abs), 0755); err != nil {
+		return ErrorResult("creating the directory for " + rel + ": " + err.Error()), nil
+	}
+	if err := os.WriteFile(abs, []byte(out), 0644); err != nil {
+		return ErrorResult("writing " + rel + ": " + err.Error()), nil
+	}
+	verb := "Updated"
+	if !exists {
+		verb = "Created"
+	}
+	return TextResult(verb + " " + rel + "\n\n" + diff), nil
+}
+
+// resolveEditTarget anchors a tool target: "/route" resolves through the page
+// builder so dynamic and typed routes work; anything else is treated as a
+// project-relative path. Absolute paths and ".." escapes are rejected.
+func (s *Service) resolveEditTarget(target string) (abs, rel string, err error) {
+	if target == "" {
+		return "", "", fmt.Errorf("empty route")
+	}
+	clean := filepath.ToSlash(strings.TrimPrefix(target, "/"))
+	if filepath.IsAbs(clean) || strings.Contains(clean, "..") {
+		return "", "", fmt.Errorf("invalid path: %s", target)
+	}
+	if strings.HasPrefix(target, "/") {
+		return s.resolveSource(target)
+	}
+	abs = filepath.Join(s.root, filepath.FromSlash(clean))
+	pr, relErr := filepath.Rel(s.root, abs)
+	if relErr != nil || pr == ".." || strings.HasPrefix(pr, ".."+string(filepath.Separator)) {
+		return "", "", fmt.Errorf("invalid path (outside the project): %s", target)
+	}
+	return abs, filepath.ToSlash(pr), nil
+}
+
+// toolReadContent reads content-collection entries. Without a slug it lists
+// every entry (slug, project path, frontmatter); with a slug it returns the
+// raw file, parsed frontmatter, markdown body, and rendered HTML for .md.
+func (s *Service) toolReadContent(ctx context.Context, args map[string]any) (ToolResult, *rpcError) {
+	raw := argString(args, "collection")
+	if raw == "" {
+		return ErrorResult("provide collection"), nil
+	}
+	col := s.collectionCanonical(raw)
+	if col == "" {
+		return ErrorResult("no collection named " + strconv.Quote(raw) + " — configure it under content: in krate.config.ts"), nil
+	}
+	dir := s.collectionDir(col)
+	absDir := filepath.Join(s.root, filepath.FromSlash(dir))
+	slug := argString(args, "slug")
+
+	if slug == "" {
+		files, err := walkContentFiles(absDir)
+		if err != nil {
+			return ErrorResult("reading collection " + strconv.Quote(col) + ": " + err.Error()), nil
+		}
+		entries := make([]any, 0, len(files))
+		for _, f := range files {
+			entry := map[string]any{
+				"slug": strings.TrimSuffix(f, filepath.Ext(f)),
+				"path": filepath.ToSlash(filepath.Join(dir, f)),
+			}
+			if raw, e := os.ReadFile(filepath.Join(absDir, f)); e == nil {
+				if d, _ := frontmatter.Parse(string(raw)); len(d) > 0 {
+					entry["data"] = d
+				}
+			}
+			entries = append(entries, entry)
+		}
+		return JSONResult(map[string]any{"collection": col, "entries": entries})
+	}
+
+	candidate := strings.TrimSuffix(slug, filepath.Ext(slug))
+	relFile := candidate + ".md"
+	fileData, readErr := os.ReadFile(filepath.Join(absDir, filepath.FromSlash(relFile)))
+	if readErr != nil {
+		relFile = candidate + ".mdx"
+		fileData, readErr = os.ReadFile(filepath.Join(absDir, filepath.FromSlash(relFile)))
+	}
+	if readErr != nil {
+		return ErrorResult("no entry " + strconv.Quote(slug) + " in collection " + strconv.Quote(col)), nil
+	}
+	text := string(fileData)
+	data, body := frontmatter.Parse(text)
+	if data == nil {
+		data = map[string]any{}
+	}
+	result := map[string]any{
+		"collection": col,
+		"slug":       candidate,
+		"path":       filepath.ToSlash(filepath.Join(dir, relFile)),
+		"content":    text,
+		"data":       data,
+		"body":       body,
+	}
+	if strings.EqualFold(filepath.Ext(relFile), ".md") {
+		result["html"] = markdown.RenderToHTML(body, s.cfg.Markdown)
+	}
+	return JSONResult(result)
+}
+
+// ── resources ───────────────────────────────────────────────────────────────
+
+func (s *Service) readContentResource(ctx context.Context, uri string) (ResourceContents, *rpcError) {
+	type entry struct {
+		Name   string         `json:"name"`
+		Dir    string         `json:"dir,omitempty"`
+		Fields map[string]any `json:"fields,omitempty"`
+		Count  int            `json:"count"`
+		Files  []string       `json:"files,omitempty"`
+	}
+	cfg := contentConfig(s.cfg.Content)
+	collections := map[string]any{}
+	for name, c := range cfg {
+		e := entry{Name: name, Dir: filepath.ToSlash(c.Dir)}
+		if abs := filepath.Join(s.root, c.Dir); abs != "" {
+			if rel, _ := filepath.Rel(s.root, abs); rel == ".." || filepath.IsAbs(rel) {
+				continue
+			}
+			if files, err := listContentFiles(abs); err == nil {
+				e.Count = len(files)
+				e.Files = files
+			}
+		}
+		cols := collections
+		cols[name] = e
+		collections = cols
+	}
+	return jsonResource(uri, collections)
+}
+
+func (s *Service) readManifestResource(ctx context.Context, uri string) (ResourceContents, *rpcError) {
+	data, err := os.ReadFile(filepath.Join(s.cfg.OutDir, "manifest.json"))
+	if err != nil {
+		return jsonResource(uri, map[string]any{"built": false})
+	}
+	var v any
+	if err := json.Unmarshal(data, &v); err != nil {
+		return ResourceContents{}, Errorf("parsing manifest: %v", err)
+	}
+	return jsonResource(uri, v)
+}
+
+// configView is a curated view of the resolved config: relative paths (never
+// absolute machine paths), no env values, and only agent-relevant settings.
+type configView struct {
+	Entry             string                    `json:"entry"`
+	OutDir            string                    `json:"outDir"`
+	PagesDir          string                    `json:"pagesDir"`
+	PublicDir         string                    `json:"publicDir"`
+	Minify            bool                      `json:"minify"`
+	Sourcemap         bool                      `json:"sourcemap"`
+	EmitReact         bool                      `json:"emitReact"`
+	Output            string                    `json:"output,omitempty"`
+	DevServer         map[string]any            `json:"devServer,omitempty"`
+	ServerComponents  []string                  `json:"serverComponents,omitempty"`
+	RuntimeComponents []string                  `json:"runtimeComponents,omitempty"`
+	ServerDirs        []string                  `json:"serverDirs,omitempty"`
+	RuntimeDirs       []string                  `json:"runtimeDirs,omitempty"`
+	Redirects         []config.Redirect         `json:"redirects,omitempty"`
+	Rewrites          []config.Rewrite          `json:"rewrites,omitempty"`
+	SEO               map[string]any            `json:"seo,omitempty"`
+	Robots            map[string]any            `json:"robots,omitempty"`
+	Plugins           []map[string]any          `json:"plugins,omitempty"`
+	Content           map[string]map[string]any `json:"content,omitempty"`
+	Checks            map[string]any            `json:"checks,omitempty"`
+	PathAliases       []map[string]any          `json:"pathAliases,omitempty"`
+}
+
+func (s *Service) readConfigResource(ctx context.Context, uri string) (ResourceContents, *rpcError) {
+	rel := func(p string) string {
+		if r, err := filepath.Rel(s.root, p); err == nil {
+			return filepath.ToSlash(r)
+		}
+		return filepath.ToSlash(p)
+	}
+	c := s.cfg
+	v := configView{
+		Entry:             rel(c.Entry),
+		OutDir:            rel(c.OutDir),
+		PagesDir:          rel(c.PagesDir),
+		PublicDir:         rel(c.PublicDir),
+		Minify:            c.Minify,
+		Sourcemap:         c.Sourcemap,
+		EmitReact:         c.EmitReact,
+		Output:            c.Output,
+		ServerComponents:  c.ServerComponents,
+		RuntimeComponents: c.RuntimeComponents,
+		ServerDirs:        c.ServerDirs,
+		RuntimeDirs:       c.RuntimeDirs,
+		Redirects:         c.Redirects,
+		Rewrites:          c.Rewrites,
+		Checks:            c.Checks,
+	}
+	if c.DevServer.Port != 0 || c.DevServer.Open {
+		v.DevServer = map[string]any{"port": c.DevServer.Port, "open": c.DevServer.Open}
+	}
+	if c.SEO.BaseURL != "" || c.SEO.SiteName != "" || c.SEO.Description != "" || c.SEO.Image != "" {
+		v.SEO = map[string]any{
+			"baseUrl":     c.SEO.BaseURL,
+			"siteName":    c.SEO.SiteName,
+			"description": c.SEO.Description,
+			"image":       c.SEO.Image,
+		}
+	}
+	if c.Robots.Allow != "" || c.Robots.Disallow != "" || c.Robots.Sitemap != "" {
+		v.Robots = map[string]any{
+			"allow":    c.Robots.Allow,
+			"disallow": c.Robots.Disallow,
+			"sitemap":  c.Robots.Sitemap,
+		}
+	}
+	for _, p := range c.Plugins {
+		v.Plugins = append(v.Plugins, map[string]any{
+			"name":    p.Name,
+			"module":  p.Module,
+			"order":   p.Order,
+			"options": p.Options,
+		})
+	}
+	ccfg := contentConfig(c.Content)
+	if len(ccfg) > 0 {
+		v.Content = map[string]map[string]any{}
+		for name, cc := range ccfg {
+			v.Content[name] = map[string]any{"dir": filepath.ToSlash(cc.Dir)}
+		}
+	}
+	for _, a := range c.PathAliases {
+		if len(a.Targets) > 0 {
+			v.PathAliases = append(v.PathAliases, map[string]any{
+				"prefix":  a.Prefix,
+				"targets": a.Targets,
+			})
+		}
+	}
+	return jsonResource(uri, v)
+}
+
+func (s *Service) readPageTemplate(ctx context.Context, uri string, params map[string]string) (ResourceContents, *rpcError) {
+	route := "/" + strings.TrimPrefix(params["route"], "/")
+	if route == "/" {
+		return ResourceContents{}, &rpcError{Code: codeInvalidParams, Message: "krate://page requires a route, e.g. krate://page/about"}
+	}
+	detail, err := s.builder.PageDetail(route)
+	if err != nil {
+		return ResourceContents{}, &rpcError{Code: codeInvalidParams, Message: err.Error()}
+	}
+	return jsonResource(uri, detail)
+}
+
+// ── completions ─────────────────────────────────────────────────────────────
+
+func (s *Service) completeRoutes(ctx context.Context, _ string) ([]string, error) {
+	routes, err := s.builder.RouteList()
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, 0, len(routes))
+	for _, r := range routes {
+		out = append(out, r.Route)
+	}
+	return out, nil
+}
+
+func (s *Service) completeTemplates(ctx context.Context, _ string) ([]string, error) {
+	return []string{"static", "content-list", "detail", "blank"}, nil
+}
+
+func (s *Service) completeCollections(ctx context.Context, _ string) ([]string, error) {
+	out := make([]string, 0, len(s.cfg.Content))
+	for name := range s.cfg.Content {
+		out = append(out, name)
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// completeContentSlugs suggests entry slugs for read_content. Slug completion
+// is only well-defined for a single configured collection; with several,
+// nothing is suggested (the AI should list the collection to discover slugs).
+func (s *Service) completeContentSlugs(ctx context.Context, _ string) ([]string, error) {
+	if len(s.cfg.Content) != 1 {
+		return nil, nil
+	}
+	for name := range s.cfg.Content {
+		dir := s.collectionDir(name)
+		if dir == "" {
+			return nil, nil
+		}
+		files, err := walkContentFiles(filepath.Join(s.root, filepath.FromSlash(dir)))
+		if err != nil {
+			return nil, err
+		}
+		out := make([]string, 0, len(files))
+		for _, f := range files {
+			out = append(out, strings.TrimSuffix(f, filepath.Ext(f)))
+		}
+		sort.Strings(out)
+		return out, nil
+	}
+	return nil, nil
+}
+
+// ── prompts ─────────────────────────────────────────────────────────────────
+
+func (s *Service) promptAddPage() *Prompt {
+	return &Prompt{
+		Name:        "add-page",
+		Description: "Add a new page the Krate way: read an existing page for house style, then create_page with the chosen template and content.",
+		Arguments: []PromptArgument{
+			{Name: "route", Description: "Route to create, e.g. /pricing or /blog/[slug]", Required: true},
+			{Name: "title", Description: "Page title for the heading and <title>"},
+			{Name: "template", Description: "static, content-list, detail, or blank"},
+			{Name: "collection", Description: "Content collection backing a content-list/detail page"},
+			{Name: "withLayout", Description: "Create _layout.tsx if missing"},
+			{Name: "apply", Description: "Write the page now (default false: show a diff first)"},
+		},
+		Messages: []PromptMessage{{
+			Role:    "user",
+			Content: TextContent("Create a new Krate page at {{route}} using the {{template}} template. First read_page an existing, similar page to match the project's conventions (components, Head/title usage, styling). Then call create_page with the prepared arguments. Unless {{apply}} is true, present the returned diff for approval before writing. After the page exists, run build and check to confirm it compiles and passes the site's quality gates."),
+		}},
+	}
+}
+
+func (s *Service) promptPublishContent() *Prompt {
+	return &Prompt{
+		Name:        "publish-content",
+		Description: "Author a new entry into a typed content collection (with frontmatter) and wire it into a page.",
+		Arguments: []PromptArgument{
+			{Name: "collection", Description: "Collection name as configured under content: in krate.config.ts", Required: true},
+			{Name: "slug", Description: "Entry slug, e.g. hello-world", Required: true},
+			{Name: "title", Description: "Entry title stored in frontmatter"},
+			{Name: "fields", Description: "Additional frontmatter fields as a JSON object"},
+			{Name: "apply", Description: "Write the entry now (default false: show a diff first)"},
+		},
+		Messages: []PromptMessage{{
+			Role:    "user",
+			Content: TextContent("Create a new entry in the {{collection}} content collection with slug {{slug}} and title {{title}}. Use create_page with a content-entry argument, or create/update the entry file with edit_page (read_content first to see the schema and house style), so frontmatter matches the collection schema; verify the fields against the schema surfaced by krate://content. Unless {{apply}} is true, present the diff before writing."),
+		}},
+	}
+}
+
+func (s *Service) promptFixChecks() *Prompt {
+	return &Prompt{
+		Name:        "fix-checks",
+		Description: "Run the quality gates, then fix the worst a11y/SEO/perf findings via edit_page.",
+		Arguments: []PromptArgument{
+			{Name: "route", Description: "Scope attention to a single route"},
+		},
+		Messages: []PromptMessage{{
+			Role:    "user",
+			Content: TextContent("Run the quality gates with the check tool. For each finding (see the findings array), read_page the source of the offending route, then fix it with edit_page, keeping the diff minimal and in the project's style. Re-run check after applying to confirm the fix."),
+		}},
+	}
+}
+
+func (s *Service) promptExplore() *Prompt {
+	return &Prompt{
+		Name:        "explore",
+		Description: "Summarize the project: routes, content collections, config, and outstanding checks.",
+		Arguments: []PromptArgument{
+			{Name: "route", Description: "Drill into one route"},
+		},
+		Messages: []PromptMessage{{
+			Role:    "user",
+			Content: TextContent("Explore the Krate project: call list_routes and read the krate://routes and krate://config resources to summarize the site structure, then run check to report quality status. If a route is given, read_page it and summarize its structure and rendering mode."),
+		}},
+	}
+}
+
+// ── helpers ─────────────────────────────────────────────────────────────────
+
+// scanDocs scans the docs plugin's content directory, if configured.
+func (s *Service) scanDocs() ([]docs.Page, error) {
+	contentDir := "src/content/docs"
+	for _, pc := range s.cfg.Plugins {
+		if pc.Name != "docs" {
+			continue
+		}
+		if dir, ok := pc.Options["contentDir"].(string); ok && dir != "" {
+			contentDir = dir
+		}
+		break
+	}
+	scanCfg := docs.Config{
+		ContentDir: contentDir,
+		Root:       s.root,
+		MDConfig:   s.cfg.Markdown,
+	}
+	return docs.Scan(scanCfg)
+}
+
+// runBuild runs a full build with stdout captured so the JSON-RPC stream stays
+// clean. A fresh Builder is used because BuildAll closes plugin subprocesses
+// and is not safe to repeat on one instance. Serialized via runMu so builds and
+// checks never overlap (they swap os.Stdout during capture).
+func (s *Service) runBuild(ctx context.Context) (string, error) {
+	// Respect cancellation before starting the expensive build.
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	s.runMu.Lock()
+	defer s.runMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	b := newBuilder(Options{Root: s.root, Cfg: s.cfg, Env: s.env, Verbose: s.verbose})
+	return captureStdout(func() error {
+		return b.BuildAll()
+	})
+}
+
+// resolveSource maps a route or source path to an absolute file and its
+// project-relative path.
+func (s *Service) resolveSource(target string) (abs, rel string, err error) {
+	detail, derr := s.builder.PageDetail(target)
+	if derr != nil {
+		return "", "", derr
+	}
+	return detail.SourcePath, detail.Source, nil
+}
+
+func jsonResource(uri string, v any) (ResourceContents, *rpcError) {
+	data, err := marshalJSON(v)
+	if err != nil {
+		return ResourceContents{}, Errorf("encoding resource: %v", err)
+	}
+	return ResourceContents{URI: uri, MIMEType: "application/json", Text: string(data)}, nil
+}
+
+// routeToPageFile maps a normalized route to a page filename under pagesDir.
+func routeToPageFile(route string) (string, error) {
+	if route == "" {
+		return "", fmt.Errorf("empty route")
+	}
+	segs := strings.Split(route, "/")
+	for _, seg := range segs {
+		if seg == "" || seg == "." || seg == ".." {
+			return "", fmt.Errorf("invalid route segment %q", seg)
+		}
+	}
+	return route + ".tsx", nil
+}
+
+func defaultPageTemplate(name string) string {
+	component := "Page"
+	return "export default function " + component + "() {\n  return (\n    <main>\n      <h1>" + component + "</h1>\n    </main>\n  );\n}\n"
+}
+
+func defaultLayoutTemplate() string {
+	return "import './global.css';\n\nexport default function Layout(children) {\n" +
+		"  return (\n    <div class=\"layout\">\n" +
+		"      <nav>\n        <Link href=\"/\" prefetch={false}>Home</Link>\n      </nav>\n" +
+		"      <main>{children}</main>\n      <footer>Krate</footer>\n    </div>\n  );\n}\n"
+}
+
+// pageComponentName converts a page file path into a PascalCase component name.
+func pageComponentName(rel string) string {
+	base := strings.TrimSuffix(filepath.Base(strings.TrimSuffix(rel, ".tsx")), ".ts")
+	// Dynamic segments like [slug] become Id.
+	base = strings.ReplaceAll(base, "[", "")
+	base = strings.ReplaceAll(base, "]", "")
+	var b strings.Builder
+	upper := true
+	for _, r := range base {
+		if r == '-' || r == '_' || r == '.' {
+			upper = true
+			continue
+		}
+		if upper {
+			b.WriteString(strings.ToUpper(string(r)))
+			upper = false
+			continue
+		}
+		b.WriteRune(r)
+	}
+	if b.Len() == 0 {
+		return "Page"
+	}
+	return b.String()
+}
+
+// humanizeRoute turns a route path into a display title.
+func humanizeRoute(p string) string {
+	p = strings.Trim(p, "/")
+	var parts []string
+	for _, seg := range strings.Split(p, "/") {
+		if seg == "" {
+			continue
+		}
+		seg = strings.ReplaceAll(seg, "-", " ")
+		parts = append(parts, strings.ToUpper(seg[:1])+seg[1:])
+	}
+	return strings.Join(parts, " ")
+}
+
+// routeFromRel converts a page rel path into its route prefix (e.g. blog/[slug].tsx → /blog).
+func routeFromRel(rel string) string {
+	rel = strings.TrimPrefix(rel, "/")
+	dir := filepath.Dir(filepath.FromSlash(rel))
+	if dir == "." || dir == "" {
+		return ""
+	}
+	return "/" + filepath.ToSlash(dir)
+}
+
+// inferCollectionFromPage guesses the content collection that backs a route by
+// matching the route's directory against configured collection dirs.
+func (s *Service) inferCollectionFromPage(route string, root string) string {
+	segs := strings.Split(strings.Trim(route, "/"), "/")
+	for _, name := range sortedKeys(s.cfg.Content) {
+		c := s.cfg.Content[name]
+		dir := ""
+		if m, ok := c.(map[string]any); ok {
+			if d, ok := m["dir"].(string); ok {
+				dir = d
+			}
+		}
+		for _, seg := range segs {
+			if seg != "" && strings.Contains(dir, seg) {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
+func sortedKeys(m map[string]any) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func (s *Service) collectionDir(name string) string {
+	for n, c := range s.cfg.Content {
+		if n != name {
+			continue
+		}
+		if m, ok := c.(map[string]any); ok {
+			if d, ok := m["dir"].(string); ok && d != "" {
+				return d
+			}
+		}
+		return "src/content/" + name
+	}
+	return ""
+}
+
+// collectionCanonical returns the configured collection name for the given
+// label, or "" when no such collection exists.
+func (s *Service) collectionCanonical(name string) string {
+	if name == "" {
+		return ""
+	}
+	for n := range s.cfg.Content {
+		if n == name {
+			return n
+		}
+	}
+	return ""
+}
+
+// isEditablePageExt reports whether an edit_page target should be re-parsed
+// for validation before writing.
+func isEditablePageExt(rel string) bool {
+	l := strings.ToLower(rel)
+	return strings.HasSuffix(l, ".ts") || strings.HasSuffix(l, ".tsx") ||
+		strings.HasSuffix(l, ".js") || strings.HasSuffix(l, ".jsx")
+}
+
+func listContentFiles(dir string) ([]string, error) {
+	var files []string
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if ext := strings.ToLower(filepath.Ext(path)); ext == ".md" || ext == ".mdx" {
+			files = append(files, filepath.Base(path))
+		}
+		return nil
+	})
+	return files, err
+}
+
+// walkContentFiles returns markdown files under dir as slash-separated paths
+// relative to dir, including subdirectories (so they double as entry slugs).
+func walkContentFiles(dir string) ([]string, error) {
+	var files []string
+	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if d.IsDir() {
+			return nil
+		}
+		ext := strings.ToLower(filepath.Ext(path))
+		if ext != ".md" && ext != ".mdx" {
+			return nil
+		}
+		if relPath, relErr := filepath.Rel(dir, path); relErr == nil {
+			files = append(files, filepath.ToSlash(relPath))
+		}
+		return nil
+	})
+	sort.Strings(files)
+	return files, err
+}
+
+// scoreMatch scores a search entry against a lowercased query.
+func scoreMatch(query string, e docs.SearchEntry) int {
+	score := 0
+	title := strings.ToLower(e.Title)
+	content := strings.ToLower(e.Content)
+	if strings.Contains(title, query) {
+		score += 10
+	}
+	score += strings.Count(content, query)
+	for _, term := range strings.Fields(query) {
+		if strings.Contains(title, term) {
+			score += 2
+		}
+		if strings.Contains(content, term) {
+			score++
+		}
+	}
+	return score
+}
+
+// excerpt returns a window of text around the first query match.
+func excerpt(text, query string, n int) string {
+	lower := strings.ToLower(text)
+	idx := strings.Index(lower, query)
+	if idx < 0 {
+		if len(text) > n {
+			return text[:n] + "…"
+		}
+		return text
+	}
+	start := idx - n/2
+	if start < 0 {
+		start = 0
+	}
+	end := start + n
+	if end > len(text) {
+		end = len(text)
+	}
+	out := text[start:end]
+	if start > 0 {
+		out = "…" + out
+	}
+	if end < len(text) {
+		out += "…"
+	}
+	return out
+}
+
+// contentConfig is a minimal view of the content config for the content
+// resource.
+type contentCollection struct {
+	Dir string
+}
+
+func contentConfig(raw map[string]any) map[string]contentCollection {
+	out := map[string]contentCollection{}
+	for name, v := range raw {
+		cc := contentCollection{}
+		if m, ok := v.(map[string]any); ok {
+			if dir, ok := m["dir"].(string); ok {
+				cc.Dir = dir
+			}
+		}
+		if cc.Dir == "" {
+			cc.Dir = "src/content/" + name
+		}
+		out[name] = cc
+	}
+	return out
+}

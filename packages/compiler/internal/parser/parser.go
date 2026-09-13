@@ -19,11 +19,21 @@ type Parser struct {
 	errs     []error
 	Filename string
 	srcLines []string
+
+	// droppedTypes counts type-only constructs the parser intentionally
+	// discards (interfaces, type aliases, enums, classes, annotations,
+	// generics, `as`/angle-bracket casts). A non-zero count means the AST
+	// cannot reproduce the original source — used by tooling that round-trips
+	// the AST back to source (see internal/astprint and the MCP edit_ast tool).
+	droppedTypes int
 }
 
 func New(tokens []lexer.Token) *Parser {
 	return &Parser{tokens: tokens}
 }
+
+// DroppedTypes reports how many type-only constructs the parse discarded.
+func (p *Parser) DroppedTypes() int { return p.droppedTypes }
 
 func (p *Parser) SetSource(src string) {
 	p.srcLines = strings.Split(src, "\n")
@@ -326,6 +336,7 @@ func (p *Parser) parseStmt() ast.Stmt {
 }
 
 func (p *Parser) parseClassDecl() ast.Stmt {
+	p.droppedTypes++
 	p.next()
 	if isIdentifierToken(p.peek().Kind) {
 		p.next()
@@ -349,6 +360,7 @@ func (p *Parser) parseClassDecl() ast.Stmt {
 }
 
 func (p *Parser) parseInterfaceDecl() ast.Stmt {
+	p.droppedTypes++
 	p.next()
 	if isIdentifierToken(p.peek().Kind) {
 		p.next()
@@ -369,6 +381,7 @@ func (p *Parser) parseInterfaceDecl() ast.Stmt {
 }
 
 func (p *Parser) parseTypeAliasDecl() ast.Stmt {
+	p.droppedTypes++
 	p.next()
 	if isIdentifierToken(p.peek().Kind) {
 		p.next()
@@ -381,6 +394,7 @@ func (p *Parser) parseTypeAliasDecl() ast.Stmt {
 }
 
 func (p *Parser) parseEnumDecl() ast.Stmt {
+	p.droppedTypes++
 	p.next()
 	if isIdentifierToken(p.peek().Kind) {
 		p.next()
@@ -1666,6 +1680,7 @@ func (p *Parser) parseInfix(left ast.Expr) ast.Expr {
 		p.expect(lexer.RBRACKET)
 		return &ast.MemberExpr{Object: left, Property: prop, Computed: true}
 	case lexer.As:
+		p.droppedTypes++
 		p.next()
 		typeRef := p.parseExpr(precAs)
 		// Type unions/intersections in `as` type annotations (e.g. `as HTMLElement | null`)
@@ -1808,6 +1823,7 @@ func (p *Parser) looksLikeTypeArgs() bool {
 }
 
 func (p *Parser) skipTypeArgs() {
+	p.droppedTypes++
 	depth := 1
 	for depth > 0 && p.pos < len(p.tokens) {
 		tok := p.next()
@@ -2129,6 +2145,7 @@ func (p *Parser) skipTypeParams() {
 	if p.peek().Kind != lexer.LT {
 		return
 	}
+	p.droppedTypes++
 	depth := 0
 	for {
 		tok := p.peek()
@@ -2158,6 +2175,7 @@ func (p *Parser) skipTypeAnnotation(beforeBrace bool, stopAtArrow ...bool) {
 	if p.peek().Kind != lexer.COLON {
 		return
 	}
+	p.droppedTypes++
 	p.next()
 	stopArrow := len(stopAtArrow) > 0 && stopAtArrow[0]
 	depth := 0
@@ -2211,6 +2229,7 @@ func isPrimitiveTypeKeyword(k lexer.Kind) bool {
 // the leading `<` is already consumed. The cast itself is compile-time only;
 // the embedded runtime expression is preserved.
 func (p *Parser) parseTypeAssertion() ast.Expr {
+	p.droppedTypes++
 	pos := tokPos(p.peek())
 	p.next() // consume `<`
 	// Consume the type reference up to the closing `>`.
