@@ -65,6 +65,54 @@ export function disposeAll(): void {
   flushScheduled = false;
 }
 
+/**
+ * Zero-JS mutually-exclusive state (tabs, segments). The Krate compiler rewrites
+ * every `createCSSChoice` declaration at build time into hidden radio inputs +
+ * `:has()` CSS, so it is **never** emitted to the client at runtime. These
+ * declarations run on the server/at build time only.
+ *
+ * If a component cannot be compiled to CSS the build does not fall back; it
+ * fails with an error telling you to replace the call with `createSignal`.
+ *
+ * @param initial - The initially-selected option.
+ * @param options - Optional explicit option universe. When omitted, the
+ *   compiler infers options from every literal the setter is called with.
+ */
+export function createCSSChoice<T extends string | number>(
+  initial: T,
+  _options?: readonly T[],
+): [() => T, (next: T) => void] {
+  return createSignal<T>(initial);
+}
+
+/**
+ * Zero-JS boolean state (a single checkbox). Compiler-erased like
+ * `createCSSChoice`; the runtime body only exists so type-checking and any
+ * server-side evaluation succeed.
+ */
+export function createCSSToggle(initial: boolean): [() => boolean, (next: boolean) => void] {
+  return createSignal<boolean>(initial);
+}
+
+/**
+ * Zero-JS independent boolean flags (`createCSSFlags(['a','b'])`). Returns a
+ * getter object keyed by flag name plus a setter. Compiler-erased like
+ * `createCSSChoice`.
+ */
+export function createCSSFlags<K extends string>(
+  flags: readonly K[],
+): [Record<K, () => boolean>, (flag: K, value: boolean) => void] {
+  const getters = {} as Record<K, () => boolean>;
+  for (const flag of flags) {
+    const [get] = createSignal(false);
+    getters[flag] = get;
+  }
+  // No-op: the compiler compiles flags to checkboxes, so this body is only a
+  // type-checking/server-evaluation shim.
+  const set = (_flag: K, _value: boolean): void => {};
+  return [getters, set];
+}
+
 export function createSignal<T>(initial: T): [() => T, (next: T | ((prev: T) => T)) => void] {
   let value = initial;
   const subs = new Set<EffectState>();

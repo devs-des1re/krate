@@ -18,6 +18,22 @@ setValue(next)        // set value (triggers subscribers)
 setValue(prev => ...) // functional update
 ```
 
+### `createCSSChoice` / `createCSSToggle` / `createCSSFlags`
+
+Zero-JS state compiled to hidden inputs + `:has()` CSS. `createCSSChoice` is a
+radio group, `createCSSToggle` a single checkbox, and `createCSSFlags`
+independent checkboxes. None of them ship client JavaScript; a declaration that
+cannot be compiled is a build error (use `createSignal` instead).
+
+```typescript
+const [tab, setTab]   = createCSSChoice('overview')            // options inferred
+const [tab, setTab]   = createCSSChoice('a', ['a', 'b', 'c'])  // explicit options
+const [dark, setDark] = createCSSToggle(false)
+const [flags, setFlag] = createCSSFlags(['bold', 'italic'])     // flags.bold()
+```
+
+See [CSS Signals](/docs/core-concepts/reactivity/#css-signals).
+
 ### `createEffect`
 
 ```typescript

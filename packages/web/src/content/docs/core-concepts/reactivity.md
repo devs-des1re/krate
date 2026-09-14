@@ -121,6 +121,89 @@ const [count] = createSignal(0);
   emitted); a reactive test becomes part of the hydration bundle and toggles the
   element's visibility as the signal changes.
 
+## CSS Signals
+
+Krate provides three **zero-JS** state primitives compiled entirely to hidden
+`<input>` controllers, `<label>` triggers, and `:has()` CSS. They ship no
+JavaScript at all — the state lives in the DOM and the cascade:
+
+| Primitive | Shape | Underlying control |
+|-----------|-------|--------------------|
+| `createCSSChoice(initial, options?)` | one-of-N | radio group |
+| `createCSSToggle(initial)` | on/off | single checkbox |
+| `createCSSFlags([...])` | N independent booleans | checkbox per flag |
+
+### `createCSSChoice` — mutually-exclusive state
+
+```tsx
+import { createCSSChoice } from '@krate/runtime';
+
+function Tabs() {
+  const [tab, setTab] = createCSSChoice('overview');
+
+  return (
+    <div>
+      <button onClick={() => setTab('overview')}>Overview</button>
+      <button onClick={() => setTab('features')}>Features</button>
+
+      <div showIf={tab() === 'overview'}>Overview content</div>
+      <div showIf={tab() === 'features'}>Features content</div>
+    </div>
+  );
+}
+```
+
+The setter may only be called with a **literal** from an `onClick` handler;
+those literals (plus the initial value) define the option universe. Pass an
+explicit array to override: `createCSSChoice('a', ['a', 'b', 'c'])`. Panels use
+the same `showIf` prop with a `tab() === 'x'` test.
+
+### `createCSSToggle` — a single boolean
+
+```tsx
+const [dark, setDark] = createCSSToggle(false);
+<button onClick={() => setDark(!dark())}>Theme</button>
+<div showIf={dark()}>Dark</div>
+<div showIf={!dark()}>Light</div>
+```
+
+### `createCSSFlags` — independent booleans
+
+```tsx
+const [flags, setFlag] = createCSSFlags(['bold', 'italic']);
+<button onClick={() => setFlag('bold', !flags.bold())}>Bold</button>
+<div showIf={flags.bold()}>Bold is on</div>
+<div showIf={!flags.italic()}>Italic is off</div>
+```
+
+Each flag is an independent checkbox, so any combination can be active at once.
+
+### How it compiles
+
+The scope class (e.g. `.krc0`) is merged onto the component's root element;
+when the component returns a fragment or a component root it is wrapped in a
+layout-transparent `<div style="display:contents">` instead, so any valid return
+shape works. Panels are wrapped in a `display:contents` element that the CSS
+toggles, so a panel's own `display` (e.g. `.panel { display:flex }`) is
+preserved when visible.
+
+- Panel bodies are compiled like ordinary JSX — nested components, lists, and
+  nested conditionals all work, and interactive children still hydrate normally.
+- Triggers must be a labelable element (`<button>`, `<a>`, `<label>`, `<span>`,
+  `<li>`, `<div>`) with a static class.
+- These primitives are **not** a fallback for arbitrary reactive state: if a
+  component can't be compiled (the state read as text, used in a dynamic
+  attribute, captured by another function, set to a non-literal, a dynamic
+  trigger class, a non-labelable trigger, …) the build **fails** with an error
+  telling you to use `createSignal` instead. There is no silent fallback.
+- `:has()` requires a 2023+ browser. Controllers are visually hidden but remain
+  focusable, so keyboard navigation and screen readers keep working.
+
+The generated class names are deliberately compact (`krc0`, `krc0-r-overview`)
+and the scope index is base62-encoded. A selected trigger gets a default
+underline via the `--krate-css-active` and `--krate-css-active-fg` custom
+properties; override them to theme the selection.
+
 ## Compile-time validation
 
 The reactive dependency graph is validated at build time and surfaced as `⚠`

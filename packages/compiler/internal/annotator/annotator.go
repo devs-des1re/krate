@@ -489,9 +489,14 @@ func collectFragmentRefs(frag *ast.JSXFragment, functions map[string]*ast.FnDecl
 	}
 }
 
-// collectSignalDecls walks function bodies to find createSignal / createResource calls.
+// collectSignalDecls walks function bodies to find createSignal /
+// createResource calls. Zero-JS CSS primitives (createCSSChoice etc.) are
+// compiler-erased, so they are never registered as signals.
 func collectSignalDecls(body []ast.Stmt, signals map[string]ast.Expr) {
 	for _, d := range sigutil.Find(body, true) {
+		if d.CSSKind != sigutil.CSSKindNone {
+			continue
+		}
 		if d.Initial != nil {
 			signals[d.Name] = d.Initial
 		}

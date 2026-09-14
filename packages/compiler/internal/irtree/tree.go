@@ -349,6 +349,15 @@ type ComponentTree struct {
 	Pages        map[string]*ComponentNode
 	RuntimeStore *RuntimePropStore
 	Functions    map[string]*ast.FnDecl
+
+	// CSSSignalsCSS is the generated stylesheet for every CSS signal scope
+	// compiled into this tree (empty when none). The build appends it to the
+	// page's own CSS so it lands in the hashed external stylesheet.
+	CSSSignalsCSS string
+	// Errors holds hard errors for CSS signals that could not be compiled
+	// (unsupported trigger element, dynamic class, state read as text, …). A
+	// non-empty set must fail the build: there is no fallback.
+	Errors []error
 }
 
 // ─── RuntimePropStore ──────────────────────────────────────────────────────

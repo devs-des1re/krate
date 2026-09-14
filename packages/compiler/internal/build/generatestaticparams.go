@@ -335,6 +335,9 @@ func (b *Builder) buildStaticParamsPage(spp staticParamsPage) (*PageResult, stri
 	annotator.MergeModuleFunctions(ann, extraPrograms)
 	annotator.MergeImportAliases(ann, extraPrograms, annotator.ModuleSource{Program: entryModule.Program, Path: entryModule.Path, RawSource: entryModule.SourceCode})
 	tree := irtree.Build(entryModule.Program, ann)
+	if len(tree.Errors) > 0 {
+		return nil, "", renderErrors(spp.PagePath, tree.Errors)
+	}
 	injectStaticParams(tree, spp.Params)
 	emitter := renderer.NewEmitter()
 	emitter.IconResolver = b.iconResolver

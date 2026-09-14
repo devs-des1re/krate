@@ -1031,6 +1031,15 @@ func (b *Builder) buildPage(page string) (*PageResult, string, error) {
 	// Re-classify tiers for any newly discovered components
 	annotator.ReclassifyTiers(ann, b.Cfg)
 	tree := irtree.Build(entryModule.Program, ann)
+	// CSS primitive declarations that cannot be compiled to CSS are hard errors
+	// (there is no fallback to client signals).
+	if len(tree.Errors) > 0 {
+		return nil, "", renderErrors(page, tree.Errors)
+	}
+	// CSS stylesheets are generated during IR construction (one shared,
+	// instance-agnostic stylesheet per scope). Append them to the page's own CSS
+	// so they land in the hashed external stylesheet.
+	choiceCSS := tree.CSSSignalsCSS
 	// Dynamic-route templates are built once and served for every matching URL,
 	// so bind each [param] to a replaceable sentinel the server substitutes per
 	// request (see serve.go applyDynamicRouteParams). Mirrors injectStaticParams
@@ -1110,6 +1119,11 @@ func (b *Builder) buildPage(page string) (*PageResult, string, error) {
 	}
 
 	bundle.CSS += b.applyLayoutStack(page, emitResult)
+	// Generated CSS signal rules land in the page's own hashed stylesheet, after
+	// layout CSS so author styles can override the defaults.
+	if choiceCSS != "" {
+		bundle.CSS += choiceCSS
+	}
 
 	b.recordDeps(page, deps)
 
@@ -1347,6 +1361,9 @@ func (b *Builder) executeLayoutPipeline(layoutPath string, content string, props
 	annotator.MergeImportAliases(ann, extraLayoutPrograms, annotator.ModuleSource{Program: layoutModule.Program, Path: layoutModule.Path, RawSource: layoutModule.SourceCode})
 	annotator.ReclassifyTiers(ann, b.Cfg)
 	tree := irtree.Build(layoutModule.Program, ann)
+	if len(tree.Errors) > 0 {
+		return nil, "", renderErrors(layoutPath, tree.Errors)
+	}
 	emitter := renderer.NewEmitter()
 	emitter.IconResolver = b.iconResolver
 	emitter.EvalJS = b.jsExprEvaluator()
@@ -1362,6 +1379,11 @@ func (b *Builder) executeLayoutPipeline(layoutPath string, content string, props
 	b.printReactiveDiags(reactive.Build(emitResult.Signatures).Validate())
 
 	css = layoutBundle.CSS
+	// CSS signal rules for the layout and its components are generated during IR
+	// construction and appended to the layout's own module CSS.
+	if tree.CSSSignalsCSS != "" {
+		css += tree.CSSSignalsCSS
+	}
 
 	layoutEmitCache.Store(layoutPath, &layoutEmitCacheEntry{
 		modTime:    modTime,
@@ -1395,6 +1417,9 @@ func (b *Builder) NewRenderPipeline(entryModule *bundler.Module, page string) (*
 	ann := annotator.Annotate(entryModule.Program, b.Cfg, page, entryModule.SourceCode)
 
 	tree := irtree.Build(entryModule.Program, ann)
+	if len(tree.Errors) > 0 {
+		return nil, renderErrors(page, tree.Errors)
+	}
 	emitter := renderer.NewEmitter()
 	result := emitter.Emit(tree)
 
@@ -1484,6 +1509,12 @@ func (b *Builder) renderLoadingComponent(pagePath string) string {
 	annotator.MergeModuleFunctions(ann, extraPrograms)
 	annotator.MergeImportAliases(ann, extraPrograms, annotator.ModuleSource{Program: entryModule.Program, Path: entryModule.Path, RawSource: entryModule.SourceCode})
 	tree := irtree.Build(entryModule.Program, ann)
+	if len(tree.Errors) > 0 {
+		for _, e := range tree.Errors {
+			fmt.Fprintf(os.Stderr, "  %s✗ Error (loading %s):%s %v\n", cRed, loadingPath, cReset, e)
+		}
+		return ""
+	}
 	emitter := renderer.NewEmitter()
 	emitter.EvalJS = b.jsExprEvaluator()
 	emitResult := emitter.Emit(tree)

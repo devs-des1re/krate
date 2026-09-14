@@ -1,4 +1,4 @@
-export { createSignal, createEffect, createMemo, onCleanup, onMount, forwardRef, useRef, disposeAll } from './signal.js';
+export { createSignal, createCSSChoice, createCSSToggle, createCSSFlags, createEffect, createMemo, onCleanup, onMount, forwardRef, useRef, disposeAll } from './signal.js';
 export { h, mount, hydrate, insert, clearNodes, disposeNode } from './dom.js';
 export { Fragment, jsx, jsxs } from './jsx-runtime.js';
 export { initRouter, reinitRouter } from './router.js';
