@@ -63,10 +63,10 @@ func Build(prog *ast.Program, ann *Annotations) *ComponentTree {
 	}
 }
 
-// cssStylesheet returns the generated CSS signal stylesheet for every scope
-// collected during the build (empty when none).
+// cssStylesheet returns the generated CSS signal stylesheet with scopes and
+// compound-show conditions collected during the build (empty when none).
 func (b *builder) cssStylesheet() string {
-	if len(b.cssCollected) == 0 {
+	if len(b.cssCollected) == 0 && len(b.cssConditions) == 0 {
 		return ""
 	}
 	scopes := make([]*csssignals.Scope, 0, len(b.cssCollected))
@@ -74,7 +74,14 @@ func (b *builder) cssStylesheet() string {
 		scopes = append(scopes, s)
 	}
 	sort.Slice(scopes, func(i, j int) bool { return scopes[i].Index < scopes[j].Index })
-	return csssignals.Stylesheet(scopes)
+	conditions := append([]*csssignals.Condition(nil), b.cssConditions...)
+	sort.SliceStable(conditions, func(i, j int) bool {
+		if a, c := conditions[i].OwningScope().Index, conditions[j].OwningScope().Index; a != c {
+			return a < c
+		}
+		return conditions[i].ExprIdx < conditions[j].ExprIdx
+	})
+	return csssignals.Stylesheet(scopes, conditions)
 }
 
 // builder holds state during IR construction.
@@ -118,6 +125,10 @@ type builder struct {
 	// cssCollected holds every scope whose controller inputs were emitted, so
 	// the tree can expose the exact set of stylesheets the page needs.
 	cssCollected map[int]*csssignals.Scope
+	// cssConditions holds deduped matched conditions whose wrappers were
+	// emitted, keyed by wrapper class for cross-instance deduplication.
+	cssConditions []*csssignals.Condition
+	cssCondSeen   map[string]bool
 	// cssErrs collects hard errors for CSS signals that cannot be compiled.
 	// These fail the build: a CSS signal that cannot be expressed in CSS must be
 	// replaced with createSignal by the author — silently hydrating it would
@@ -130,6 +141,20 @@ func (b *builder) collectCSSScope(s *csssignals.Scope) {
 		b.cssCollected = make(map[int]*csssignals.Scope)
 	}
 	b.cssCollected[s.Index] = s
+}
+
+func (b *builder) collectCSSCondition(c *csssignals.Condition) {
+	if c == nil {
+		return
+	}
+	if b.cssCondSeen == nil {
+		b.cssCondSeen = make(map[string]bool)
+	}
+	if b.cssCondSeen[c.Class] {
+		return
+	}
+	b.cssCondSeen[c.Class] = true
+	b.cssConditions = append(b.cssConditions, c)
 }
 
 func (b *builder) collectCSSErr(component string, line int, reason string) {
@@ -462,6 +487,9 @@ func (b *builder) buildComponentNode(fn *ast.FnDecl, parentID string) *Component
 			b.cssToken = csssignals.SanitizeToken(string(id))
 			for _, s := range analyzer.Scopes() {
 				b.collectCSSScope(s)
+			}
+			for _, c := range analyzer.Conditions() {
+				b.collectCSSCondition(c)
 			}
 			// Inject the scope class + controller inputs into the component's
 			// root (or a display:contents wrapper when there is no single

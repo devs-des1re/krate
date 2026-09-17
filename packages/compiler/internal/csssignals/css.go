@@ -1,6 +1,9 @@
 package csssignals
 
-import "strings"
+import (
+	"sort"
+	"strings"
+)
 
 // activeTriggerDecl is the declaration block applied to a selected trigger.
 // Themes override it via the --krate-css-active* custom properties.
@@ -11,9 +14,12 @@ const activeTriggerDecl = "color:var(--krate-css-active-fg,inherit);border-botto
 // keep working.
 const HiddenCSS = "." + HiddenClass + "{position:absolute;width:1px;height:1px;margin:-1px;padding:0;border:0;clip:rect(0 0 0 0);overflow:hidden;white-space:nowrap}"
 
-// Stylesheet returns the generated stylesheet for scopes, in a deterministic
-// order so the page's content hash is stable. Returns "" when empty.
-func Stylesheet(scopes []*Scope) string {
+// Stylesheet returns the generated stylesheet for scopes and their matched
+// conditions, in a deterministic order so the page's content hash is stable.
+// Returns "" when empty. Conditions whose wrapper is hidden/shown by the
+// per-scope rules (single positive choice atom, any single toggle/flag atom)
+// are canonical and are not double-emitted.
+func Stylesheet(scopes []*Scope, conditions []*Condition) string {
 	if len(scopes) == 0 {
 		return ""
 	}
@@ -23,7 +29,75 @@ func Stylesheet(scopes []*Scope) string {
 	for _, s := range scopes {
 		b.WriteString(s.css())
 	}
+	for _, c := range sortedConditions(conditions) {
+		if c.needsExplicitRule() {
+			b.WriteString(c.css())
+		}
+	}
 	return b.String()
+}
+
+// sortedConditions returns a deterministic copy ordered by owning scope index
+// then expression index.
+func sortedConditions(conditions []*Condition) []*Condition {
+	out := append([]*Condition(nil), conditions...)
+	sort.SliceStable(out, func(i, j int) bool {
+		if a, b := out[i].owningScope().Index, out[j].owningScope().Index; a != b {
+			return a < b
+		}
+		return out[i].ExprIdx < out[j].ExprIdx
+	})
+	return out
+}
+
+// needsExplicitRule reports whether the condition needs its own hide+show rule
+// beyond the per-scope choice/toggle/flags rules. A positive choice atom, a
+// toggle, and a flag are canonical (covered by their scope's css); a negated
+// choice atom and every compound condition are not.
+func (c *Condition) needsExplicitRule() bool {
+	if !c.simple() {
+		return true
+	}
+	at := c.Terms[0][0]
+	return at.Scope.Kind == KindChoice && at.Negated
+}
+
+// css emits the hide + show rules for a non-canonical condition. The wrapper is
+// hidden by default, then shown when any DNF term matches: one selector-list
+// entry per AND-term.
+func (c *Condition) css() string {
+	owner := c.owningScope()
+	var b strings.Builder
+	b.WriteString("." + owner.Class + " ." + c.Class + "{display:none}\n")
+	for i, term := range c.Terms {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		b.WriteString("." + owner.Class)
+		for _, at := range term {
+			b.WriteString(at.selector())
+		}
+		b.WriteString(" ." + c.Class)
+	}
+	b.WriteString("{display:contents}\n")
+	return b.String()
+}
+
+// selector is the :has()/:not(:has()) fragment for an atom, relative to the
+// scope anchor element.
+func (at *Atom) selector() string {
+	if at.Negated {
+		return ":not(:has(" + at.controllerSel() + ":checked))"
+	}
+	return ":has(" + at.controllerSel() + ":checked)"
+}
+
+// controllerSel is the class selector of the atom's controller input.
+func (at *Atom) controllerSel() string {
+	if at.Scope.Kind == KindChoice {
+		return "." + at.Scope.RadioClass(at.Option)
+	}
+	return "." + at.Scope.CheckboxClass(at.Option)
 }
 
 // css emits the rules for a single scope.

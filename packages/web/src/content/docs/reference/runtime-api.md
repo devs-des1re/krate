@@ -130,6 +130,18 @@ rendering — sugar for `{expr && <el/>}`, compiled away at build time:
 <div showIf={count() > 0}>Shown when count is positive</div>
 ```
 
+With the zero-JS CSS primitives, `showIf` also accepts compound boolean logic
+over state — `&&`, `||`, `!`, `===` / `==`, `!==` / `!=` — across one or more
+scopes, compiled to `:has()` selector chains:
+
+```tsx
+<div showIf={plat() === 'mac' && licensed()}>Approve</div>
+<div showIf={plat() === 'win' || !licensed()}>Upgrade</div>
+```
+
+Equivalent expressions (commuted operands, De Morgan) dedupe to one wrapper
+class; unclassifiable expressions remain a build error.
+
 ## SPA router
 
 ```typescript

@@ -178,6 +178,31 @@ const [flags, setFlag] = createCSSFlags(['bold', 'italic']);
 
 Each flag is an independent checkbox, so any combination can be active at once.
 
+### Compound conditions
+
+`showIf` accepts arbitrary boolean logic over CSS signal state — `&&`, `||`,
+`!`, `===` / `==`, and `!==` / `!=` — across any combination of scopes:
+
+```tsx
+const [plat, setPlat] = createCSSChoice('mac', ['mac', 'win']);
+const [licensed, setLicensed] = createCSSToggle(false);
+
+// AND across scopes
+<div showIf={plat() === 'mac' && licensed()}>Approve for macOS</div>
+
+// OR
+<div showIf={plat() === 'win' || !licensed()}>Upgrade</div>
+
+// negation
+<div showIf={plat() !== 'mac'}>Non-Mac build</div>
+```
+
+The compiler normalizes the expression to DNF (OR of AND-terms) and compiles
+each atom to a `:has()` / `:not(:has())` fragment on the shared scope anchor,
+so every combination stays zero-JS. Equivalent conditions (e.g. `a && b` and
+`b && a`, or `!(a || b)` and `!a && !b`) are deduplicated to a single wrapper
+class. An expression the compiler cannot classify is still a hard error.
+
 ### How it compiles
 
 The scope class (e.g. `.krc0`) is merged onto the component's root element;

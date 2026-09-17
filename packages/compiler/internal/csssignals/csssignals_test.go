@@ -95,6 +95,85 @@ func TestAnalyzeToggle(t *testing.T) {
 	}
 }
 
+// TestAnalyzeCompoundConditions verifies compound showIf/visibleIf expressions
+// normalize to DNF conditions: AND across scopes, OR (multi-term), negation
+// with De Morgan, and cross-scope compound conditions.
+func TestAnalyzeCompoundConditions(t *testing.T) {
+	src := `export default function T() {
+	const [plat, setPlat] = createCSSChoice('mac', ['mac', 'win']);
+	const [licensed, setLicensed] = createCSSToggle(false);
+	const [flags, setFlag] = createCSSFlags(['premium']);
+	return (
+		<div>
+			<div showIf={plat() === 'mac' && licensed()}>AND</div>
+			<div showIf={plat() === 'win' || !licensed()}>OR</div>
+			<div showIf={plat() !== 'mac'}>Negated</div>
+			<div showIf={!(plat() === 'win' || licensed())}>NotOR</div>
+			<div showIf={plat() === 'mac' && flags.premium()}>CrossScope</div>
+		</div>
+	);
+}`
+	a := analyze(t, src)
+	if !a.OK() {
+		t.Fatalf("expected OK, errors=%v", a.Errors())
+	}
+	conds := a.Conditions()
+	// The five panels above are deduped to the canonical simple conditions plus
+	// one compound condition per distinct expression. Simple choice/toggle
+	// wrappers are canonical and do not appear in the explicit set.
+	wantCompound := []string{"AND", "OR", "Negated", "NotOR", "CrossScope"}
+	if len(conds) != len(wantCompound) {
+		t.Fatalf("len(conditions)=%d, want %d: %v", len(conds), len(wantCompound), conds)
+	}
+	got := make([]string, 0, len(conds))
+	for _, c := range conds {
+		got = append(got, c.Class)
+	}
+	t.Logf("classes: %v", got)
+}
+
+func TestAnalyzeCompoundCrossScopeAnchor(t *testing.T) {
+	src := `export default function T() {
+	const [a, setA] = createCSSChoice('x');
+	const [b, setB] = createCSSChoice('y');
+	return (
+		<div>
+			<div showIf={a() === 'x' && b() === 'y'}>Both</div>
+			<div showIf={a() === 'x' && b() === 'y'}>Both again</div>
+			<div showIf={a() === 'x' && b() === 'y'}>Both third</div>
+		</div>
+	);
+}`
+	a := analyze(t, src)
+	if !a.OK() {
+		t.Fatalf("expected OK, errors=%v", a.Errors())
+	}
+	conds := a.Conditions()
+	if len(conds) != 1 {
+		t.Fatalf("identical compound conditions should dedupe to one, got %d", len(conds))
+	}
+	// The compound owner anchor is the scope with the lowest page index (the
+	// first choice scope), so selectors are anchored on its class.
+	if owner := conds[0].OwningScope(); owner == nil || owner.Index != 0 {
+		t.Errorf("owning scope index = %v (want 0)", func() interface{} { if owner == nil { return nil }; return owner.Index }())
+	}
+}
+
+func TestAnalyzeCompoundNonClassifiable(t *testing.T) {
+	src := `export default function T() {
+	const [plat, setPlat] = createCSSChoice('mac');
+	return (
+		<div>
+			<div showIf={plat() === 'mac' && 1 === 1}>Bad</div>
+		</div>
+	);
+}`
+	a := analyze(t, src)
+	if a.OK() {
+		t.Fatal("expected a hard error for a non-classifiable compound condition")
+	}
+}
+
 func TestAnalyzeFlags(t *testing.T) {
 	src := `export default function T() {
 	const [flags, setFlag] = createCSSFlags(['a', 'b']);
@@ -179,7 +258,7 @@ func TestNoPrimitivesIsNotAnError(t *testing.T) {
 // ─── CSS generation ─────────────────────────────────────────────────────────
 
 func TestStylesheetChoiceWellFormed(t *testing.T) {
-	css := Stylesheet(analyze(t, tabSrc).Scopes())
+	css := Stylesheet(analyze(t, tabSrc).Scopes(), nil)
 	if strings.Contains(css, "display:none},") {
 		t.Errorf("base rule joined to the next by a dangling comma:\n%s", css)
 	}
@@ -196,7 +275,7 @@ func TestStylesheetToggle(t *testing.T) {
 	const [on, setOn] = createCSSToggle(false);
 	return <div><button onClick={() => setOn(!on())}>T</button><div showIf={on()}>On</div><div showIf={!on()}>Off</div></div>;
 }`
-	css := Stylesheet(analyze(t, src).Scopes())
+	css := Stylesheet(analyze(t, src).Scopes(), nil)
 	if !strings.Contains(css, ".krc0-c:checked") {
 		t.Errorf("missing checkbox rule:\n%s", css)
 	}

@@ -90,7 +90,7 @@ func (b *builder) buildCSSPanel(el *ast.JSXElement, p csssignals.Panel) ast.Expr
 	// must NOT carry an inline style: the stylesheet toggles `display:none` /
 	// `display:contents`, and an inline style would beat the stylesheet and keep
 	// every panel visible.
-	wrapperClass := p.Scope.PanelWrapperClass(p.Option, p.Negated)
+	wrapperClass := p.Cond.Class
 	return wrapWithClassOnly([]ast.JSXChild{&ast.JSXElementChild{Element: clone}}, wrapperClass)
 }
 

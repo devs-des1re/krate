@@ -67,7 +67,7 @@ func (a *Analyzer) validateJSX(el *ast.JSXElement, names map[string]bool) string
 	}
 
 	_, isTrigger := a.MatchTrigger(el)
-	_, isPanel := a.MatchPanel(el)
+	_, isPanel := a.ParsePanel(el)
 
 	if isTrigger {
 		if !CanBeLabel(el.Opening.Name) {
@@ -103,7 +103,7 @@ func (a *Analyzer) validateJSX(el *ast.JSXElement, names map[string]bool) string
 				continue
 			}
 			if referencesCSS(attr.Value, names) {
-				return "the state is used in showIf without a supported condition (get() === 'x', get(), or !get())"
+				return "the state is used in showIf without a supported condition (combine get()==='x', get(), or flags.x() with &&, ||, !, ===/!==)"
 			}
 			continue
 		}

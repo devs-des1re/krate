@@ -137,6 +137,47 @@ func TestBuildCSSFlags(t *testing.T) {
 	}
 }
 
+// TestBuildCSSSignalsCompound verifies compound showIf conditions compile to
+// zero-JS :has() selector chains with a compound wrapper class.
+func TestBuildCSSSignalsCompound(t *testing.T) {
+	src := `export default function App() {
+	const [plat, setPlat] = createCSSChoice('mac', ['mac', 'win']);
+	const [licensed, setLicensed] = createCSSToggle(false);
+	return (
+		<div>
+			<button onClick={() => setPlat('mac')}>Mac</button>
+			<button onClick={() => setLicensed(!licensed())}>License</button>
+			<div class="appr" showIf={plat() === 'mac' && licensed()}>Approve</div>
+			<div class="upg" showIf={plat() === 'win' || !licensed()}>Upgrade</div>
+		</div>
+	);
+}`
+	html, outDir, err := buildPageSrc(t, src)
+	if err != nil {
+		t.Fatalf("BuildAll: %v", err)
+	}
+	if strings.Contains(html, "createCSSChoice") || strings.Contains(html, "showIf") ||
+		strings.Contains(html, "&&") || strings.Contains(html, "||") {
+		t.Errorf("compiler sugar leaked:\n%.900s", html)
+	}
+	if hasHydrationScript(html) {
+		t.Errorf("compound panels should be zero-JS:\n%.900s", html)
+	}
+	css := readAllCSS(t, outDir)
+	// AND: both atoms stacked on one anchor chain (cross-scope: krc0 + krc1).
+	if !strings.Contains(css, ".krc0:has(.krc0-r-mac:checked):has(.krc1-c:checked) .krc0-x-0") {
+		t.Errorf("expected AND compound rule:\n%s", css)
+	}
+	// OR: a selector list with one entry per AND-term, sharing the wrapper.
+	if !strings.Contains(css, ".krc0 .krc0-x-1{display:none}") {
+		t.Errorf("expected compound wrapper hide rule:\n%s", css)
+	}
+	if !strings.Contains(css, ".krc0:has(.krc0-r-win:checked) .krc0-x-1,") ||
+		!strings.Contains(css, ".krc0:not(:has(.krc1-c:checked)) .krc0-x-1") {
+		t.Errorf("expected OR selector list:\n%s", css)
+	}
+}
+
 // TestBuildCSSSignalsMultiInstanceUnique verifies two instances get distinct
 // controller groups over one shared stylesheet.
 func TestBuildCSSSignalsMultiInstanceUnique(t *testing.T) {
