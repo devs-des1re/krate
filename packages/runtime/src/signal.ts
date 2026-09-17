@@ -65,22 +65,70 @@ export function disposeAll(): void {
   flushScheduled = false;
 }
 
+/** ARIA role presets and raw overrides accepted by every CSS primitive. */
+export interface CSSARIAOptions {
+  /**
+   * Accessibility semantics to synthesize. Defaults are native (radios,
+   * checkboxes) and ship no JS. Presets that need synthesized state
+   * (`tabs`, `listbox`, `accordion`, `disclosure`, `dialog`, `menu`,
+   * `popover`) inject a tiny ARIA synchroniser automatically.
+   */
+  as?:
+    | 'radiogroup'
+    | 'tabs'
+    | 'tablist'
+    | 'listbox'
+    | 'menu'
+    | 'menubar'
+    | 'accordion'
+    | 'disclosure'
+    | 'dialog'
+    | 'modal'
+    | 'popover'
+    | 'switch'
+    | 'checkbox';
+  /** Accessible label for the scope container. */
+  label?: string;
+  /** Raw ARIA overrides (`{ role, 'aria-controls', panelRole }`); `false` opts out of all ARIA. */
+  aria?: false | Record<string, string>;
+}
+
+/**
+ * CSS custom properties driven by the selected option. Each property maps an
+ * option to a value emitted verbatim (quote strings for `content:`). Every
+ * choice/toggle scope also publishes the built-in `--krate-current`.
+ *
+ * ```ts
+ * createCSSChoice('solo', { vars: { '--price': { solo: '"$9"', pro: '"$29"' } } })
+ * ```
+ */
+export type CSSVars<T extends string | number> = Record<string, Partial<Record<T, string>>>;
+
+/** Options accepted by the CSS state primitives. */
+export interface CSSPrimitiveOptions<T extends string | number> extends CSSARIAOptions {
+  vars?: CSSVars<T>;
+  options?: readonly T[];
+}
+
 /**
  * Zero-JS mutually-exclusive state (tabs, segments). The Krate compiler rewrites
  * every `createCSSChoice` declaration at build time into hidden radio inputs +
- * `:has()` CSS, so it is **never** emitted to the client at runtime. These
- * declarations run on the server/at build time only.
+ * `:has()` CSS, so it is **never** emitted to the client at runtime. Reading the
+ * getter as JSX text (`{tab()}`) compiles to a live value driven by the
+ * inherited `--krate-current` custom property — still zero JS. Custom `vars`
+ * publish more inheritable properties for computed text/themes.
  *
  * If a component cannot be compiled to CSS the build does not fall back; it
  * fails with an error telling you to replace the call with `createSignal`.
  *
  * @param initial - The initially-selected option.
- * @param options - Optional explicit option universe. When omitted, the
- *   compiler infers options from every literal the setter is called with.
+ * @param options - A literal option array, or an options object
+ *   (`{ options, as, aria, vars, label }`). When omitted, the compiler infers
+ *   options from every literal the setter is called with.
  */
 export function createCSSChoice<T extends string | number>(
   initial: T,
-  _options?: readonly T[],
+  _options?: readonly T[] | CSSPrimitiveOptions<T>,
 ): [() => T, (next: T) => void] {
   return createSignal<T>(initial);
 }
@@ -88,9 +136,13 @@ export function createCSSChoice<T extends string | number>(
 /**
  * Zero-JS boolean state (a single checkbox). Compiler-erased like
  * `createCSSChoice`; the runtime body only exists so type-checking and any
- * server-side evaluation succeed.
+ * server-side evaluation succeed. `{on()}` renders live text via the
+ * `--krate-current` property ("on"/"off").
  */
-export function createCSSToggle(initial: boolean): [() => boolean, (next: boolean) => void] {
+export function createCSSToggle(
+  initial: boolean,
+  _options?: CSSARIAOptions & { vars?: { on?: string; off?: string } },
+): [() => boolean, (next: boolean) => void] {
   return createSignal<boolean>(initial);
 }
 
@@ -101,6 +153,7 @@ export function createCSSToggle(initial: boolean): [() => boolean, (next: boolea
  */
 export function createCSSFlags<K extends string>(
   flags: readonly K[],
+  _options?: CSSARIAOptions & { vars?: Record<string, Partial<Record<K, string>>> },
 ): [Record<K, () => boolean>, (flag: K, value: boolean) => void] {
   const getters = {} as Record<K, () => boolean>;
   for (const flag of flags) {
@@ -111,6 +164,54 @@ export function createCSSFlags<K extends string>(
   // type-checking/server-evaluation shim.
   const set = (_flag: K, _value: boolean): void => {};
   return [getters, set];
+}
+
+/**
+ * Zero-JS optional radio group (`createCSSGroup`) — an accordion, disclosure,
+ * dialog, menu, or popover. `null` means "closed". Compiler-erased like the
+ * other CSS primitives; the runtime body is a type-checking shim only.
+ */
+export function createCSSGroup<T extends string | number>(
+  initial: T | null,
+  _options?: readonly T[] | CSSPrimitiveOptions<T>,
+): [() => T | null, (next: T | null) => void] {
+  return createSignal<T | null>(initial);
+}
+
+/**
+ * Zero-JS discrete range (`createCSSRange`) — a stepped slider, stepper, or
+ * progress indicator. Values are integers from `min` to `max` by `step`.
+ * Compiler-erased; the runtime body is a type-checking shim only.
+ */
+export function createCSSRange(
+  initial: number,
+  _options: CSSARIAOptions & { min?: number; max?: number; step?: number },
+): [() => number, (next: number) => void] {
+  return createSignal<number>(initial);
+}
+
+/** Actions destructured from a `createCSSStack` result. */
+export interface CSSStackActions<K extends string> {
+  push: (node: K) => void;
+  pop: () => void;
+  clear: () => void;
+}
+
+/**
+ * Zero-JS navigation stack (`createCSSStack`) — a declared tree of nested
+ * panels for drill-down menus and multi-level drawers. The compiler infers the
+ * tree from where each literal `push('node')` appears; `top()` reads the
+ * deepest open node. Compiler-erased; the runtime body is a shim only.
+ */
+export function createCSSStack<K extends string>(
+  _nodes: readonly K[],
+  _options?: CSSARIAOptions,
+): [{ top: () => K; peek: () => K }, CSSStackActions<K>] {
+  const top = (): K => _nodes[0];
+  return [
+    { top, peek: top },
+    { push: (_node: K): void => {}, pop: (): void => {}, clear: (): void => {} },
+  ];
 }
 
 export function createSignal<T>(initial: T): [() => T, (next: T | ((prev: T) => T)) => void] {

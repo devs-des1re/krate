@@ -47,6 +47,12 @@ func (b *builder) rewriteCSSSignalElement(el *ast.JSXElement) ast.Expr {
 
 // buildCSSTrigger rewrites a trigger element into a `<label>`.
 func (b *builder) buildCSSTrigger(el *ast.JSXElement, t csssignals.Trigger) ast.Expr {
+	return b.buildCSSTriggerAt(el, t, "")
+}
+
+// buildCSSTriggerAt is buildCSSTrigger with an explicit enclosing stack node,
+// used to resolve pop()/push() relative to the panel being built.
+func (b *builder) buildCSSTriggerAt(el *ast.JSXElement, t csssignals.Trigger, node string) ast.Expr {
 	if !csssignals.CanBeLabel(el.Opening.Name) {
 		// Validation rejects this before we get here; keep the element intact
 		// as a defensive no-op.
@@ -69,12 +75,91 @@ func (b *builder) buildCSSTrigger(el *ast.JSXElement, t csssignals.Trigger) ast.
 		kept = append(kept, attr)
 	}
 	clone.Opening.Attributes = kept
+	if t.StackAction == "inc" || t.StackAction == "dec" {
+		return b.buildRangeStepper(clone, t)
+	}
+	if t.StackAction == "pop" {
+		return b.buildStackPopTrigger(clone, t, node)
+	}
 	appendClass(clone, t.Scope.TriggerClass(t.Option))
+	// A null/closed group option has no controller input; clicking it cannot
+	// point at one, so close via the sentinel's hidden radio.
 	clone.Opening.Attributes = append(clone.Opening.Attributes, &ast.JSXAttr{
 		Name:  "for",
 		Value: &ast.Literal{Kind: ast.StringLit, Value: t.Scope.ControlID(b.cssToken, t.Option)},
 	})
+	b.applyTriggerARIA(clone, t)
 	return clone
+}
+
+// buildRangeStepper rewrites a `setR(r() + 1)` / `setR(r() - 1)` trigger into a
+// per-index label chain: one label per index, each pointing at the adjacent
+// radio, hidden except when its own index is checked. This yields a bounded,
+// zero-JS stepper.
+func (b *builder) buildRangeStepper(clone *ast.JSXElement, t csssignals.Trigger) ast.Expr {
+	s := t.Scope
+	n := len(s.Options)
+	delta := 1
+	if t.StackAction == "dec" {
+		delta = -1
+	}
+	var children []ast.JSXChild
+	for i := range s.Options {
+		// Out-of-range ends toggle nothing (point at the current index), so the
+		// stepper is bounded at min/max.
+		j := i + delta
+		if j < 0 || j >= n {
+			j = i
+		}
+		lbl := shallowCloneJSX(clone)
+		appendClass(lbl, s.TriggerClass(s.Options[i]))
+		lbl.Opening.Attributes = append(lbl.Opening.Attributes, &ast.JSXAttr{
+			Name:  "for",
+			Value: &ast.Literal{Kind: ast.StringLit, Value: s.ControlID(b.cssToken, s.Options[j])},
+		})
+		b.applyTriggerARIA(lbl, t)
+		children = append(children, &ast.JSXElementChild{Element: lbl})
+	}
+	return wrapWithClassOnly(children, s.Class+"-st-"+t.StackAction)
+}
+
+// buildStackPopTrigger rewrites pop() into a label pointing at the declared
+// parent of the enclosing node (or the root when the node is the root/unknown).
+func (b *builder) buildStackPopTrigger(clone *ast.JSXElement, t csssignals.Trigger, node string) ast.Expr {
+	s := t.Scope
+	target := s.Root
+	if node != "" {
+		if parent, ok := s.Tree[node]; ok && parent != "" {
+			target = parent
+		}
+	}
+	appendClass(clone, s.TriggerClass(target))
+	clone.Opening.Attributes = append(clone.Opening.Attributes, &ast.JSXAttr{
+		Name:  "for",
+		Value: &ast.Literal{Kind: ast.StringLit, Value: s.ControlID(b.cssToken, target)},
+	})
+	return clone
+}
+
+// applyTriggerARIA adds structural ARIA attributes to a trigger label based on
+// the scope's resolved role. Zero-JS presets only; stateful attributes
+// (aria-selected/aria-expanded) are left to the micro-runtime.
+func (b *builder) applyTriggerARIA(clone *ast.JSXElement, t csssignals.Trigger) {
+	r := t.Scope.Role
+	if r.Trigger == "" {
+		return
+	}
+	// The role goes on the label, but a <label> whose `for` points at a radio
+	// keeps native activation. role=tab/button replaces the label semantics.
+	clone.Opening.Attributes = append(clone.Opening.Attributes, strJSXAttr("role", r.Trigger))
+	if r.Haspopup != "" {
+		clone.Opening.Attributes = append(clone.Opening.Attributes, strJSXAttr("aria-haspopup", r.Haspopup))
+	}
+	if r.SyncExpanded {
+		// Initial state only; the micro-runtime keeps it in sync.
+		clone.Opening.Attributes = append(clone.Opening.Attributes, strJSXAttr("aria-expanded", "false"))
+	}
+	_ = t
 }
 
 // buildCSSPanel rewrites a panel element: strip the showIf condition, add the
@@ -91,7 +176,65 @@ func (b *builder) buildCSSPanel(el *ast.JSXElement, p csssignals.Panel) ast.Expr
 	// `display:contents`, and an inline style would beat the stylesheet and keep
 	// every panel visible.
 	wrapperClass := p.Cond.Class
-	return wrapWithClassOnly([]ast.JSXChild{&ast.JSXElementChild{Element: clone}}, wrapperClass)
+	wrapper := wrapWithClassOnly([]ast.JSXChild{&ast.JSXElementChild{Element: clone}}, wrapperClass)
+	// Panel-level structural ARIA (role=tabpanel/region/dialog/...). The panel
+	// itself is the wrapper's only child, so the role lands on the wrapper.
+	if p.Cond != nil {
+		if r := p.Cond.PanelRole(); r != "" {
+			wrapper.Opening.Attributes = append(wrapper.Opening.Attributes, strJSXAttr("role", r))
+		}
+		// Resolve stack actions (push/pop/clear) nested in this panel against
+		// the panel's stack node now, so the later pipeline only sees plain
+		// `<label>` triggers.
+		if o := p.Cond.OwningScope(); o != nil && o.Kind == csssignals.KindStack {
+			clone = b.rewriteStackTriggers(clone, p.Cond.StackNode())
+			wrapper = wrapWithClassOnly([]ast.JSXChild{&ast.JSXElementChild{Element: clone}}, wrapperClass)
+		}
+	}
+	return wrapper
+}
+
+// rewriteStackTriggers returns a copy of el with every nested stack-action
+// trigger (push/pop/clear/stepper) rewritten to a `<label>` resolved against
+// node (the enclosing panel's stack node).
+func (b *builder) rewriteStackTriggers(el *ast.JSXElement, node string) *ast.JSXElement {
+	if el == nil || el.Opening == nil {
+		return el
+	}
+	clone := shallowCloneJSX(el)
+	clone.Children = b.rewriteStackChildren(el.Children, node)
+	return clone
+}
+
+func (b *builder) rewriteStackChildren(children []ast.JSXChild, node string) []ast.JSXChild {
+	out := make([]ast.JSXChild, 0, len(children))
+	for _, child := range children {
+		switch c := child.(type) {
+		case *ast.JSXElementChild:
+			if c.Element != nil {
+				if t, ok := b.cssSignals.MatchTrigger(c.Element); ok && t.StackAction != "" {
+					if rewritten, ok := b.buildCSSTriggerAt(c.Element, t, node).(*ast.JSXElement); ok {
+						out = append(out, &ast.JSXElementChild{Element: rewritten})
+						continue
+					}
+				}
+				out = append(out, &ast.JSXElementChild{Element: b.rewriteStackTriggers(c.Element, node)})
+				continue
+			}
+			out = append(out, child)
+		case *ast.JSXFragmentChild:
+			if c.Fragment != nil {
+				frag := *c.Fragment
+				frag.Children = b.rewriteStackChildren(c.Fragment.Children, node)
+				out = append(out, &ast.JSXFragmentChild{Fragment: &frag})
+				continue
+			}
+			out = append(out, child)
+		default:
+			out = append(out, child)
+		}
+	}
+	return out
 }
 
 // wrapWithScopeAnchor builds a `<div class="..." style="display:contents">`
@@ -174,7 +317,7 @@ func (b *builder) controllerChildren(scopes []*csssignals.Scope, token string) [
 	var out []ast.JSXChild
 	for _, s := range scopes {
 		switch s.Kind {
-		case csssignals.KindChoice:
+		case csssignals.KindChoice, csssignals.KindGroup, csssignals.KindRange, csssignals.KindStack:
 			for _, opt := range s.Options {
 				out = append(out, controllerInput(s, token, opt, "radio", opt == s.Initial))
 			}
@@ -192,7 +335,7 @@ func (b *builder) controllerChildren(scopes []*csssignals.Scope, token string) [
 // controllerInput builds a hidden `<input>` controller for one option.
 func controllerInput(s *csssignals.Scope, token, opt, inputType string, checked bool) ast.JSXChild {
 	class := csssignals.HiddenClass
-	if s.Kind == csssignals.KindChoice {
+	if s.IsChoiceLike() {
 		class += " " + s.RadioClass(opt)
 	} else {
 		class += " " + s.CheckboxClass(opt)
@@ -203,7 +346,7 @@ func controllerInput(s *csssignals.Scope, token, opt, inputType string, checked 
 		strJSXAttr("name", s.ControlName(token, opt)),
 		strJSXAttr("id", s.ControlID(token, opt)),
 	}
-	if s.Kind == csssignals.KindChoice {
+	if s.IsChoiceLike() {
 		attrs = append(attrs, strJSXAttr("value", opt))
 	}
 	if checked {

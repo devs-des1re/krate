@@ -2,6 +2,7 @@ package csssignals
 
 import (
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -34,6 +35,10 @@ func Stylesheet(scopes []*Scope, conditions []*Condition) string {
 			b.WriteString(c.css())
 		}
 	}
+	if UsesLiveText(scopes) {
+		b.WriteString(LiveTextCSS)
+		b.WriteByte('\n')
+	}
 	return b.String()
 }
 
@@ -59,7 +64,7 @@ func (c *Condition) needsExplicitRule() bool {
 		return true
 	}
 	at := c.Terms[0][0]
-	return at.Scope.Kind == KindChoice && at.Negated
+	return at.Scope.isChoiceLike() && at.Negated
 }
 
 // css emits the hide + show rules for a non-canonical condition. The wrapper is
@@ -94,7 +99,7 @@ func (at *Atom) selector() string {
 
 // controllerSel is the class selector of the atom's controller input.
 func (at *Atom) controllerSel() string {
-	if at.Scope.Kind == KindChoice {
+	if at.Scope.isChoiceLike() {
 		return "." + at.Scope.RadioClass(at.Option)
 	}
 	return "." + at.Scope.CheckboxClass(at.Option)
@@ -103,14 +108,54 @@ func (at *Atom) controllerSel() string {
 // css emits the rules for a single scope.
 func (s *Scope) css() string {
 	switch s.Kind {
-	case KindChoice:
+	case KindChoice, KindGroup:
 		return s.choiceCSS()
+	case KindRange:
+		return s.rangeCSS()
+	case KindStack:
+		return s.stackCSS()
 	case KindToggle:
 		return s.toggleCSS()
 	case KindFlags:
 		return s.flagsCSS()
 	}
 	return ""
+}
+
+// rangeCSS emits the choice rules plus a proportional fill rule for a progress
+// indicator: the fill width is the checked index's percentage of the range.
+// Each stepper group shows only the label for the currently-checked index.
+func (s *Scope) rangeCSS() string {
+	css := s.choiceCSS()
+	n := len(s.Options)
+	if n < 2 {
+		return css
+	}
+	var b strings.Builder
+	b.WriteString(css)
+	for i, opt := range s.Options {
+		pct := round1(float64(i) * 100 / float64(n-1))
+		b.WriteString("." + s.Class + ":has(." + s.RadioClass(opt) + ":checked) ." + ClassPrefix + "-fill{width:" + pct + "%}\n")
+	}
+	// Steppers: one label per index; only the label whose index is checked is
+	// shown (nth-child matches the option order).
+	for _, dir := range []string{"inc", "dec"} {
+		b.WriteString("." + s.Class + " ." + s.Class + "-st-" + dir + ">*{display:none}\n")
+		for i, opt := range s.Options {
+			b.WriteString("." + s.Class + ":has(." + s.RadioClass(opt) + ":checked) ." + s.Class + "-st-" + dir + ">*:nth-child(" + strconv.Itoa(i+1) + "){display:inline-block}\n")
+		}
+	}
+	return b.String()
+}
+
+// stackCSS emits the choice rules; each level's panel visibility is expressed
+// by the ordinary panel conditions, so the base rules cover it.
+func (s *Scope) stackCSS() string { return s.choiceCSS() }
+
+// round1 formats a float with one decimal place, trimming a trailing ".0".
+func round1(f float64) string {
+	v := strconv.FormatFloat(f, 'f', 1, 64)
+	return strings.TrimSuffix(v, ".0")
 }
 
 // PanelWrapperClass is the class on the display:contents wrapper around a panel.
@@ -149,6 +194,36 @@ func (s *Scope) choiceCSS() string {
 		b.WriteString("." + s.Class + ":has(." + s.RadioClass(opt) + ":checked) ." + s.TriggerClass(opt))
 		b.WriteString("{" + activeTriggerDecl + "}\n")
 	}
+	b.WriteString(s.varsCSS())
+	return b.String()
+}
+
+// varsCSS emits the per-option custom-property rules that make the selected
+// state readable by other CSS, with zero JS. Every choice-like scope publishes
+// the stable, author-facing `--krate-current` (the quoted option token); an
+// author's `vars` add more properties. Values are emitted verbatim (authors
+// quote strings for `content:` themselves).
+func (s *Scope) varsCSS() string {
+	if !s.isChoiceLike() {
+		return ""
+	}
+	var b strings.Builder
+	for _, opt := range s.Options {
+		var decl strings.Builder
+		decl.WriteString("--krate-current:\"" + opt + "\";")
+		// Deterministic order for stable output hashes.
+		keys := make([]string, 0, len(s.Vars))
+		for k := range s.Vars {
+			keys = append(keys, k)
+		}
+		sort.Strings(keys)
+		for _, k := range keys {
+			if v, ok := s.Vars[k][opt]; ok {
+				decl.WriteString(k + ":" + v + ";")
+			}
+		}
+		b.WriteString("." + s.Class + ":has(." + s.RadioClass(opt) + ":checked){" + decl.String() + "}\n")
+	}
 	return b.String()
 }
 
@@ -166,7 +241,51 @@ func (s *Scope) toggleCSS() string {
 	b.WriteString("{display:contents}\n")
 	b.WriteString("." + s.Class + ":has(." + cb + ":checked) ." + s.TriggerClass(""))
 	b.WriteString("{" + activeTriggerDecl + "}\n")
+	b.WriteString(s.toggleVarsCSS(cb))
 	return b.String()
+}
+
+// toggleVarsCSS emits the two-state custom properties for a toggle's on/off.
+func (s *Scope) toggleVarsCSS(cb string) string {
+	var b strings.Builder
+	onDecl := "--krate-current:\"on\";"
+	offDecl := "--krate-current:\"off\";"
+	for _, k := range sortedVarKeys(s.Vars) {
+		if v, ok := s.Vars[k]["on"]; ok {
+			onDecl += k + ":" + v + ";"
+		}
+		if v, ok := s.Vars[k]["off"]; ok {
+			offDecl += k + ":" + v + ";"
+		}
+	}
+	b.WriteString("." + s.Class + ":has(." + cb + ":checked){" + onDecl + "}\n")
+	b.WriteString("." + s.Class + ":not(:has(." + cb + ":checked)){" + offDecl + "}\n")
+	return b.String()
+}
+
+// sortedVarKeys returns a map's keys in deterministic order.
+func sortedVarKeys(m map[string]map[string]string) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// LiveTextCSS is the shared rule for a live value element: it renders the
+// inherited `--krate-current` custom property as text. Appended once per page
+// when any scope uses a live text read.
+const LiveTextCSS = ".krc-live::after{content:var(--krate-current,\"\")}"
+
+// UsesLiveText reports whether any scope renders a bare getter as live text.
+func UsesLiveText(scopes []*Scope) bool {
+	for _, s := range scopes {
+		if s.LiveText {
+			return true
+		}
+	}
+	return false
 }
 
 // flagsCSS emits the rules for independent checkboxes.

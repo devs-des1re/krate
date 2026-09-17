@@ -1124,6 +1124,11 @@ func (b *Builder) buildPage(page string) (*PageResult, string, error) {
 	if choiceCSS != "" {
 		bundle.CSS += choiceCSS
 	}
+	// ARIA roles that need synthesized state (tabs/listbox/disclosure) inject a
+	// tiny inline synchroniser. Every other CSS-signal page stays zero-JS.
+	if tree.NeedsCSSARIA {
+		emitResult.ScriptHTML += "<script>" + renderer.CSSARIAJS + "</script>"
+	}
 
 	b.recordDeps(page, deps)
 
@@ -1383,6 +1388,9 @@ func (b *Builder) executeLayoutPipeline(layoutPath string, content string, props
 	// construction and appended to the layout's own module CSS.
 	if tree.CSSSignalsCSS != "" {
 		css += tree.CSSSignalsCSS
+	}
+	if tree.NeedsCSSARIA {
+		emitResult.ScriptHTML += "<script>" + renderer.CSSARIAJS + "</script>"
 	}
 
 	layoutEmitCache.Store(layoutPath, &layoutEmitCacheEntry{

@@ -59,6 +59,7 @@ func Build(prog *ast.Program, ann *Annotations) *ComponentTree {
 		RuntimeStore:  builder.runtimeProps,
 		Functions:     ann.Functions,
 		CSSSignalsCSS: builder.cssStylesheet(),
+		NeedsCSSARIA:  builder.cssNeedsARIA,
 		Errors:        builder.cssErrs,
 	}
 }
@@ -129,6 +130,9 @@ type builder struct {
 	// emitted, keyed by wrapper class for cross-instance deduplication.
 	cssConditions []*csssignals.Condition
 	cssCondSeen   map[string]bool
+	// cssNeedsARIA is set when any scope uses a role that needs the tiny ARIA
+	// micro-runtime (tabs/listbox/disclosure). When false the page is zero-JS.
+	cssNeedsARIA bool
 	// cssErrs collects hard errors for CSS signals that cannot be compiled.
 	// These fail the build: a CSS signal that cannot be expressed in CSS must be
 	// replaced with createSignal by the author — silently hydrating it would
@@ -490,6 +494,9 @@ func (b *builder) buildComponentNode(fn *ast.FnDecl, parentID string) *Component
 			}
 			for _, c := range analyzer.Conditions() {
 				b.collectCSSCondition(c)
+			}
+			if analyzer.NeedsARIA() {
+				b.cssNeedsARIA = true
 			}
 			// Inject the scope class + controller inputs into the component's
 			// root (or a display:contents wrapper when there is no single
@@ -2040,6 +2047,15 @@ func (b *builder) buildExprContainerChildrenMode(ec *ast.JSXExprContainer, paren
 			if pid, ok := mem.Property.(*ast.Identifier); ok && pid.Name == "children" {
 				return []SlotNode{&ChildrenSlot{}}
 			}
+		}
+	}
+
+	// CSS signal live text: a bare `{getter()}` read of a compiled scope renders
+	// the inherited `--krate-current` custom property via `.krc-live::after`,
+	// with zero JS (the value updates through the `:has()` variable rules).
+	if b.cssSignals != nil && b.cssSignals.OK() {
+		if _, ok := b.cssSignals.MatchText(ec.Expression); ok {
+			return []SlotNode{&StaticHTML{HTML: `<span class="krc-live"></span>`}}
 		}
 	}
 

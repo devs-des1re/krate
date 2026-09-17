@@ -32,6 +32,64 @@ const [dark, setDark] = createCSSToggle(false)
 const [flags, setFlag] = createCSSFlags(['bold', 'italic'])     // flags.bold()
 ```
 
+### `createCSSGroup`
+
+An optional radio group with an explicit closed (`null`) state — accordions,
+disclosures, dialogs, popovers, dropdown menus.
+
+```typescript
+const [open, setOpen] = createCSSGroup(null, { as: 'accordion' })
+setOpen('faq'); setOpen(null)
+```
+
+### `createCSSRange`
+
+A discrete integer range — steppers, stepped sliders, progress indicators.
+`set(n() +/- 1)` compiles to bounded stepper labels.
+
+```typescript
+const [step, setStep] = createCSSRange(0, { min: 0, max: 4, step: 1 })
+```
+
+### `createCSSStack`
+
+A drill-down navigation stack over a declared tree; `push` targets are literals.
+
+```typescript
+const [stack, { push, pop, clear }] = createCSSStack(['root'])
+stack.top(); push('settings'); pop(); clear()
+```
+
+### Live text & `vars`
+
+Reading a getter as text (`{tab()}`) compiles to a zero-JS live value backed by
+the inherited `--krate-current` property. `vars` publishes more custom
+properties per option (values verbatim; quote strings for `content:`).
+
+```typescript
+const [plan, setPlan] = createCSSChoice('solo', ['solo', 'pro'])
+<p>Plan: {plan()}</p>
+
+const [tier, setTier] = createCSSChoice('solo', {
+  options: ['solo', 'pro'],
+  vars: { '--price': { solo: '"$9"', pro: '"$29"' } },
+})
+```
+
+### ARIA options (`as`)
+
+Every CSS primitive accepts an options object with an `as` role preset
+(`radio`/`tabs`/`listbox`/`menu`/`accordion`/`disclosure`/`dialog`/`popover`/
+`switch`), plus `label` and raw `aria` overrides. Native presets stay zero-JS;
+`tabs`/`listbox`/disclosure presets inject a tiny ARIA synchroniser (no page
+hydration bundle).
+
+```typescript
+const [tab, setTab] = createCSSChoice('a', { as: 'tabs' })
+const [q, setQ]     = createCSSGroup(null, { as: 'dialog', aria: { label: 'Query' } })
+const [t, setT]     = createCSSChoice('a', { as: 'tabs', aria: false }) // opt out
+```
+
 See [CSS Signals](/docs/core-concepts/reactivity/#css-signals).
 
 ### `createEffect`

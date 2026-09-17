@@ -35,7 +35,25 @@ const (
 	KindToggle
 	// KindFlags is a set of independent checkboxes (`createCSSFlags`).
 	KindFlags
+	// KindGroup is an optional radio group (`createCSSGroup`): a choice with an
+	// explicit closed (null) sentinel option.
+	KindGroup
+	// KindRange is a discrete radio chain over integer values (`createCSSRange`).
+	KindRange
+	// KindStack is a declared navigation tree (`createCSSStack`): a radio group
+	// whose selected segment is the stack top, with push/pop/clear triggers.
+	KindStack
 )
+
+// isChoiceLike reports whether a kind compiles to a radio group (one checked
+// radio per scope) rather than independent checkboxes.
+func (k Kind) isChoiceLike() bool {
+	switch k {
+	case KindChoice, KindGroup, KindRange, KindStack:
+		return true
+	}
+	return false
+}
 
 // ClassPrefix is the shared prefix for every generated class/identifier. Kept
 // short deliberately: these tokens ship to the browser on every page.
@@ -64,7 +82,36 @@ type Scope struct {
 	Index int
 	// Class is the scope's root class, shared by every instance.
 	Class string
+	// Role is the resolved ARIA surface for this scope (zero value = none).
+	Role Role
+	// Label is an optional accessible label for the scope container.
+	Label string
+	// Sentinel is the explicit "closed" option for KindGroup ("" when none).
+	// It is stored as a normal option but rendered without an associated panel.
+	Sentinel string
+	// NumMin/NumMax/NumStep hold the literal numeric bounds for KindRange.
+	NumMin, NumMax, NumStep string
+	// Levels is the number of nested levels for KindStack (1 for flat scopes).
+	Levels int
+	// Tree maps each stack node to its parent node (root maps to ""), inferred
+	// from where each `push('x')` appears. Root is the initial node.
+	Tree map[string]string
+	// Root is the stack's initial/root node.
+	Root string
+	// Vars maps a CSS custom property to per-option values, emitted on the
+	// active-option anchor rule so state drives live text/themes with zero JS.
+	Vars map[string]map[string]string
+	// LiveText is true when a bare `{getter()}` text read of this scope was
+	// found, so the stylesheet emits the `.krc-live` content rule.
+	LiveText bool
 }
+
+// isChoiceLike reports whether the scope compiles to a radio group.
+func (s *Scope) isChoiceLike() bool { return s.Kind.isChoiceLike() }
+
+// IsChoiceLike reports whether the scope compiles to a radio group (one checked
+// radio per scope) rather than independent checkboxes. Exported for the builder.
+func (s *Scope) IsChoiceLike() bool { return s.isChoiceLike() }
 
 // base returns the scope's root class (e.g. "krc0").
 func (s *Scope) base() string { return ClassPrefix + encodeIndex(s.Index) }
@@ -96,23 +143,21 @@ func (s *Scope) TriggerClass(option string) string {
 // ScopeClass is the class the builder adds to the scope anchor.
 func (s *Scope) ScopeClass() string { return s.Class }
 
-// ControlName returns the controller input's `name` for one instance. Choice
-// uses a shared name (radio group); toggle/flags are independent checkboxes and
-// so get a per-option name.
+// ControlName returns the controller input's `name` for one instance. Choice-
+// like scopes (choice/group/range/stack) use a shared name (radio group);
+// toggle/flags are independent checkboxes and so get a per-option name.
 func (s *Scope) ControlName(token, option string) string {
-	switch s.Kind {
-	case KindChoice:
+	if s.isChoiceLike() {
 		return token + "-r" + encodeIndex(s.Index)
-	default:
-		return token + "-c" + encodeIndex(s.Index) + "-" + sanitizeToken(option)
 	}
+	return token + "-c" + encodeIndex(s.Index) + "-" + sanitizeToken(option)
 }
 
 // ControlID returns the controller input's DOM id for one instance/option. Only
 // a radio group needs the option appended (its name is shared); toggle/flag
 // names are already unique.
 func (s *Scope) ControlID(token, option string) string {
-	if s.Kind == KindChoice {
+	if s.isChoiceLike() {
 		return s.ControlName(token, option) + "-" + sanitizeToken(option)
 	}
 	return s.ControlName(token, option)
@@ -122,6 +167,9 @@ func (s *Scope) ControlID(token, option string) string {
 type Trigger struct {
 	Scope  *Scope
 	Option string // choice/flags option; "on" for toggle
+	// StackAction is set for stack/range stepper triggers: "push", "pop",
+	// "clear", "inc", or "dec". Empty for an ordinary setter trigger.
+	StackAction string
 }
 
 // Atom is one state predicate: a choice `get()==='x'` (or `!==`), a toggle
@@ -154,8 +202,12 @@ type Analyzer struct {
 	scopes   []*Scope
 	bySetter map[string]*Scope
 	byVar    map[string]*Scope
-	haveAny  bool
-	errs     []string
+	// byStackMethod maps a stack action name (push/pop/clear) to its scope.
+	byStackMethod map[string]*Scope
+	// stackMethods records the action names declared per stack scope, in order.
+	stackMethods []stackBinding
+	haveAny      bool
+	errs         []string
 
 	// conditions holds every deduped matched panel condition (registration
 	// order), condByKey maps a canonical DNF string to its condition, and
@@ -163,6 +215,49 @@ type Analyzer struct {
 	conditions []*Condition
 	condByKey  map[string]*Condition
 	exprIdx    int
+}
+
+// stackBinding associates a stack scope with the destructured action names.
+type stackBinding struct {
+	scope   *Scope
+	methods []string
+}
+
+// closedOption is the sentinel option a KindGroup uses for "nothing selected".
+const closedOption = ""
+
+// isNullLiteral reports whether an expression is the `null` literal.
+func isNullLiteral(expr ast.Expr) bool {
+	lit, ok := expr.(*ast.Literal)
+	return ok && lit.Kind == ast.NullLit
+}
+
+// moveToFront returns list with v moved to index 0 (no-op when absent).
+func moveToFront(list []string, v string) []string {
+	out := make([]string, 0, len(list))
+	out = append(out, v)
+	for _, x := range list {
+		if x != v {
+			out = append(out, x)
+		}
+	}
+	return out
+}
+
+// rangeOptions enumerates the integer values from min..max stepping by step.
+// It returns ok=false when the bounds are not positive-step integers.
+func rangeOptions(min, max, step string) ([]string, bool) {
+	lo, err1 := strconv.Atoi(min)
+	hi, err2 := strconv.Atoi(max)
+	st, err3 := strconv.Atoi(step)
+	if err1 != nil || err2 != nil || err3 != nil || st <= 0 || hi < lo {
+		return nil, false
+	}
+	var out []string
+	for v := lo; v <= hi; v += st {
+		out = append(out, strconv.Itoa(v))
+	}
+	return out, true
 }
 
 // indexFor resolves a stable page-unique index for a (component, var) pair.
@@ -175,8 +270,9 @@ type indexFor func(component, variable string) int
 // (the build must fail; there is no fallback).
 func Analyze(component string, body []ast.Stmt, index indexFor) *Analyzer {
 	a := &Analyzer{
-		bySetter: make(map[string]*Scope),
-		byVar:    make(map[string]*Scope),
+		bySetter:      make(map[string]*Scope),
+		byVar:         make(map[string]*Scope),
+		byStackMethod: make(map[string]*Scope),
 	}
 	var decls []sigutil.Decl
 	for _, d := range sigutil.Find(body, true) {
@@ -190,8 +286,16 @@ func Analyze(component string, body []ast.Stmt, index indexFor) *Analyzer {
 	a.haveAny = true
 
 	for _, d := range decls {
+		if d.As != "" && !KnownRole(d.As) {
+			a.errs = append(a.errs, "unknown `as` role preset \""+d.As+"\"; see the ARIA role presets in the docs")
+			continue
+		}
 		switch d.CSSKind {
 		case sigutil.CSSKindChoice:
+			if d.VarErr != "" {
+				a.errs = append(a.errs, "createCSSChoice: "+d.VarErr)
+				continue
+			}
 			if d.Initial == nil || d.Setter == "" {
 				a.errs = append(a.errs, "createCSSChoice needs a literal initial value and a setter")
 				continue
@@ -207,8 +311,12 @@ func Analyze(component string, body []ast.Stmt, index indexFor) *Analyzer {
 			} else if !contains(options, initial) {
 				options = append([]string{initial}, options...)
 			}
-			a.addScope(&Scope{Kind: KindChoice, Var: d.Name, Setter: d.Setter, Initial: initial, Options: options})
+			a.addScope(&Scope{Kind: KindChoice, Var: d.Name, Setter: d.Setter, Initial: initial, Options: options, Role: roleFor(KindChoice, d.As, d.Aria, d.AriaAttrs), Label: d.Label, Vars: d.Vars})
 		case sigutil.CSSKindToggle:
+			if d.VarErr != "" {
+				a.errs = append(a.errs, "createCSSToggle: "+d.VarErr)
+				continue
+			}
 			if d.Initial == nil || d.Setter == "" {
 				a.errs = append(a.errs, "createCSSToggle needs a literal initial value and a setter")
 				continue
@@ -222,13 +330,135 @@ func Analyze(component string, body []ast.Stmt, index indexFor) *Analyzer {
 				a.errs = append(a.errs, "createCSSToggle's initial value must be true or false")
 				continue
 			}
-			a.addScope(&Scope{Kind: KindToggle, Var: d.Name, Setter: d.Setter, Initial: initial, Options: []string{"on"}})
+			a.addScope(&Scope{Kind: KindToggle, Var: d.Name, Setter: d.Setter, Initial: initial, Options: []string{"on"}, Role: roleFor(KindToggle, d.As, d.Aria, d.AriaAttrs), Label: d.Label, Vars: d.Vars})
 		case sigutil.CSSKindFlags:
+			if d.VarErr != "" {
+				a.errs = append(a.errs, "createCSSFlags: "+d.VarErr)
+				continue
+			}
 			if d.Setter == "" || len(d.Options) == 0 {
 				a.errs = append(a.errs, "createCSSFlags needs a literal array of flag names and a setter")
 				continue
 			}
-			a.addScope(&Scope{Kind: KindFlags, Var: d.Name, Setter: d.Setter, Options: d.Options})
+			a.addScope(&Scope{Kind: KindFlags, Var: d.Name, Setter: d.Setter, Options: d.Options, Role: roleFor(KindFlags, d.As, d.Aria, d.AriaAttrs), Label: d.Label, Vars: d.Vars})
+		case sigutil.CSSKindGroup:
+			if d.VarErr != "" {
+				a.errs = append(a.errs, "createCSSGroup: "+d.VarErr)
+				continue
+			}
+			if d.Setter == "" {
+				a.errs = append(a.errs, "createCSSGroup needs a setter")
+				continue
+			}
+			initial := closedOption
+			if d.Initial != nil {
+				if isNullLiteral(d.Initial) {
+					initial = closedOption
+				} else if v, ok := literalValue(d.Initial); ok {
+					initial = v
+				} else {
+					a.errs = append(a.errs, "createCSSGroup's initial value must be a string, number, or null literal")
+					continue
+				}
+			}
+			options := append([]string(nil), d.Options...)
+			closed := initial == closedOption
+			for _, o := range inferOptions(body, d.Setter, "") {
+				if o == "" || o == closedOption {
+					continue
+				}
+				if !contains(options, o) {
+					options = append(options, o)
+				}
+			}
+			if !contains(options, closedOption) {
+				options = append(options, closedOption)
+			}
+			if closed {
+				options = moveToFront(options, closedOption)
+			} else if !contains(options, initial) {
+				options = append([]string{initial}, options...)
+			}
+			a.addScope(&Scope{Kind: KindGroup, Var: d.Name, Setter: d.Setter, Initial: initial, Options: options, Sentinel: closedOption, Role: roleFor(KindGroup, d.As, d.Aria, d.AriaAttrs), Label: d.Label, Vars: d.Vars})
+		case sigutil.CSSKindRange:
+			if d.VarErr != "" {
+				a.errs = append(a.errs, "createCSSRange: "+d.VarErr)
+				continue
+			}
+			if d.Initial == nil || d.Setter == "" {
+				a.errs = append(a.errs, "createCSSRange needs a numeric initial value and a setter")
+				continue
+			}
+			initial, ok := literalValue(d.Initial)
+			if !ok {
+				a.errs = append(a.errs, "createCSSRange's initial value must be a number literal")
+				continue
+			}
+			min, max, step := d.Min, d.Max, d.Step
+			if min == "" {
+				min = "0"
+			}
+			if max == "" {
+				max = "10"
+			}
+			if step == "" {
+				step = "1"
+			}
+			options, ok := rangeOptions(min, max, step)
+			if !ok {
+				a.errs = append(a.errs, "createCSSRange needs integer min/max/step literals")
+				continue
+			}
+			if !contains(options, initial) {
+				a.errs = append(a.errs, "createCSSRange's initial value must be within [min, max] on the step grid")
+				continue
+			}
+			a.addScope(&Scope{Kind: KindRange, Var: d.Name, Setter: d.Setter, Initial: initial, Options: options, NumMin: min, NumMax: max, NumStep: step, Role: roleFor(KindRange, d.As, d.Aria, d.AriaAttrs), Label: d.Label, Vars: d.Vars})
+		case sigutil.CSSKindStack:
+			if d.VarErr != "" {
+				a.errs = append(a.errs, "createCSSStack: "+d.VarErr)
+				continue
+			}
+			if len(d.Options) == 0 || d.Setter == "" {
+				a.errs = append(a.errs, "createCSSStack needs a literal array of node names")
+				continue
+			}
+			if len(d.Names) < 2 {
+				a.errs = append(a.errs, "createCSSStack must destructure [stack, { push, pop, clear }]")
+				continue
+			}
+			// Names after the first are the action object's names; each is a
+			// setter-like trigger (push/pop/clear).
+			methods := d.Names[1:]
+			options := append([]string(nil), d.Options...)
+			// The declared array names the root(s); every literal push target is
+			// also a node, in source order.
+			for _, n := range inferStackNodes(body, methods) {
+				if !contains(options, n) {
+					options = append(options, n)
+				}
+			}
+			sc := &Scope{Kind: KindStack, Var: d.Name, Setter: d.Setter, Initial: options[0], Options: options, Levels: len(options), Root: options[0], Role: roleFor(KindStack, d.As, d.Aria, d.AriaAttrs), Label: d.Label, Vars: d.Vars}
+			sc.Tree = map[string]string{options[0]: ""}
+			a.stackMethods = append(a.stackMethods, stackBinding{scope: sc, methods: methods})
+			a.addScope(sc)
+			for _, m := range methods {
+				if m != "" {
+					a.byStackMethod[m] = sc
+				}
+			}
+		}
+	}
+
+	// Infer each stack's tree from where its pushes appear (the enclosing panel
+	// names the parent node), so pop() can be resolved statically.
+	if len(a.errs) == 0 {
+		if ret := findReturnStmt(body); ret != nil {
+			for _, s := range a.scopes {
+				if s.Kind == KindStack {
+					a.inferStackTree(ret.Value, s, s.Root)
+				}
+			}
 		}
 	}
 
@@ -275,12 +505,27 @@ func (a *Analyzer) Errors() []string { return a.errs }
 // OK is true.
 func (a *Analyzer) Scopes() []*Scope { return a.scopes }
 
+// NeedsARIA reports whether any scope uses a role that needs the tiny ARIA
+// micro-runtime to keep synthesized state (aria-selected / aria-expanded) in
+// sync. When false the output is fully zero-JS.
+func (a *Analyzer) NeedsARIA() bool {
+	for _, s := range a.scopes {
+		if s.Role.NeedsRuntime() {
+			return true
+		}
+	}
+	return false
+}
+
 // names returns every getter/setter/var identifier belonging to a scope.
 func (a *Analyzer) names() map[string]bool {
 	set := make(map[string]bool, len(a.scopes)*2)
 	for _, s := range a.scopes {
 		set[s.Var] = true
 		set[s.Setter] = true
+	}
+	for m := range a.byStackMethod {
+		set[m] = true
 	}
 	return set
 }
@@ -325,11 +570,41 @@ func (a *Analyzer) matchHandler(handler ast.Expr) (Trigger, bool) {
 	if !ok {
 		return Trigger{}, false
 	}
+	// Stack actions (push/pop/clear) are destructured from a stack's second
+	// element, not a scope setter.
+	if sc := a.byStackMethod[id.Name]; sc != nil {
+		return a.matchStackAction(sc, id.Name, call)
+	}
 	s := a.bySetter[id.Name]
 	if s == nil {
 		return Trigger{}, false
 	}
 	return a.matchSetterArgs(s, call)
+}
+
+// matchStackAction matches a stack action call: `push('x')`, `pop()`, or
+// `clear()`. Each maps to a target option (the segment to select).
+func (a *Analyzer) matchStackAction(s *Scope, method string, call *ast.CallExpr) (Trigger, bool) {
+	switch method {
+	case "clear":
+		if len(call.Args) != 0 {
+			return Trigger{}, false
+		}
+		return Trigger{Scope: s, Option: s.Options[0], StackAction: "clear"}, true
+	case "pop":
+		if len(call.Args) != 0 {
+			return Trigger{}, false
+		}
+		return Trigger{Scope: s, Option: "", StackAction: "pop"}, true
+	case "push":
+		if len(call.Args) != 1 {
+			return Trigger{}, false
+		}
+		if v, ok := literalValue(call.Args[0]); ok && contains(s.Options, v) {
+			return Trigger{Scope: s, Option: v, StackAction: "push"}, true
+		}
+	}
+	return Trigger{}, false
 }
 
 // matchSetterArgs validates the setter call shape per kind.
@@ -341,6 +616,39 @@ func (a *Analyzer) matchSetterArgs(s *Scope, call *ast.CallExpr) (Trigger, bool)
 		}
 		if v, ok := literalValue(call.Args[0]); ok && contains(s.Options, v) {
 			return Trigger{Scope: s, Option: v}, true
+		}
+	case KindGroup:
+		// `set('x')` selects an option; `set(null)` closes the group.
+		if len(call.Args) != 1 {
+			return Trigger{}, false
+		}
+		if isNullLiteral(call.Args[0]) {
+			return Trigger{Scope: s, Option: closedOption}, true
+		}
+		if v, ok := literalValue(call.Args[0]); ok && contains(s.Options, v) {
+			return Trigger{Scope: s, Option: v}, true
+		}
+	case KindRange:
+		if len(call.Args) != 1 {
+			return Trigger{}, false
+		}
+		// A literal index, or `r() + n` / `r() - n` (a zero-JS stepper). The
+		// stepper target is resolved relative to the checked index at runtime by
+		// emitting a per-index pair of alternate labels; here we record the
+		// direction and let the builder emit the bounded chain.
+		if v, ok := literalValue(call.Args[0]); ok && contains(s.Options, v) {
+			return Trigger{Scope: s, Option: v}, true
+		}
+		if dir, ok := stepperDirection(call.Args[0], s.Var); ok {
+			return Trigger{Scope: s, Option: "", StackAction: dir}, true
+		}
+	case KindStack:
+		// Handled via matchStackAction; a direct setter call selects a node.
+		if len(call.Args) != 1 {
+			return Trigger{}, false
+		}
+		if v, ok := literalValue(call.Args[0]); ok && contains(s.Options, v) {
+			return Trigger{Scope: s, Option: v, StackAction: "push"}, true
 		}
 	case KindToggle:
 		if len(call.Args) != 1 {
@@ -371,6 +679,171 @@ func (a *Analyzer) matchSetterArgs(s *Scope, call *ast.CallExpr) (Trigger, bool)
 		return Trigger{Scope: s, Option: name}, true
 	}
 	return Trigger{}, false
+}
+
+// inferStackTree walks the returned JSX, tracking the current stack node from
+// the enclosing panel conditions, and records each `push('x')` target's parent.
+func (a *Analyzer) inferStackTree(expr ast.Expr, s *Scope, cur string) {
+	switch e := expr.(type) {
+	case *ast.JSXElement:
+		if e == nil {
+			return
+		}
+		node := cur
+		if cond, ok := a.ParsePanel(e); ok && cond.referencesScope(s) {
+			if n := cond.nodeForScope(s); n != "" {
+				node = n
+			}
+		}
+		a.recordStackPushes(e, s, node)
+		for _, child := range e.Children {
+			a.inferStackChild(child, s, node)
+		}
+	case *ast.JSXFragment:
+		for _, child := range e.Children {
+			a.inferStackChild(child, s, cur)
+		}
+	case *ast.TypeAssertion:
+		a.inferStackTree(e.Expr, s, cur)
+	}
+}
+
+func (a *Analyzer) inferStackChild(child ast.JSXChild, s *Scope, cur string) {
+	switch c := child.(type) {
+	case *ast.JSXElementChild:
+		a.inferStackTree(c.Element, s, cur)
+	case *ast.JSXFragmentChild:
+		a.inferStackTree(c.Fragment, s, cur)
+	case *ast.JSXExprContainer:
+		a.inferStackTree(c.Expression, s, cur)
+	}
+}
+
+// referencesScope reports whether a condition reads the given scope.
+func (c *Condition) referencesScope(s *Scope) bool {
+	for _, sc := range c.Scopes {
+		if sc == s {
+			return true
+		}
+	}
+	return false
+}
+
+// nodeForScope returns the option of the first single-atom condition term that
+// selects a non-negated option of s (the panel's stack node).
+func (c *Condition) nodeForScope(s *Scope) string {
+	for _, term := range c.Terms {
+		for _, at := range term {
+			if at.Scope == s && !at.Negated {
+				return at.Option
+			}
+		}
+	}
+	return ""
+}
+
+// recordStackPushes records the parent of every `push('x')` appearing on an
+// element (typically a trigger inside a panel at stack node parent).
+func (a *Analyzer) recordStackPushes(el *ast.JSXElement, s *Scope, parent string) {
+	if el == nil || el.Opening == nil {
+		return
+	}
+	for _, attr := range el.Opening.Attributes {
+		if attr == nil || attr.Value == nil || !isOnEvent(attr.Name) {
+			continue
+		}
+		walkExpr(attr.Value, func(call *ast.CallExpr) {
+			id, ok := call.Callee.(*ast.Identifier)
+			if !ok || id.Name != "push" || len(call.Args) != 1 {
+				return
+			}
+			if a.byStackMethod[id.Name] != s {
+				return
+			}
+			if v, ok := literalValue(call.Args[0]); ok && contains(s.Options, v) {
+				if _, seen := s.Tree[v]; !seen {
+					s.Tree[v] = parent
+				}
+			}
+		})
+	}
+}
+
+// inferStackNodes collects every literal first argument of a `push('x')` call
+// to one of the stack's action names, in source order. These are the declared
+// node names (the array holds the initial/root node).
+func inferStackNodes(body []ast.Stmt, methods []string) []string {
+	names := make(map[string]bool, len(methods))
+	push := ""
+	for _, m := range methods {
+		names[m] = true
+	}
+	// The conventional action name is "push"; any method invoked with a single
+	// string literal and named push is treated as a node source.
+	if names["push"] {
+		push = "push"
+	}
+	if push == "" {
+		return nil
+	}
+	var out []string
+	seen := map[string]bool{}
+	walkStmts(body, func(call *ast.CallExpr) {
+		id, ok := call.Callee.(*ast.Identifier)
+		if !ok || id.Name != push || len(call.Args) != 1 {
+			return
+		}
+		if v, ok := literalValue(call.Args[0]); ok && !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	})
+	return out
+}
+
+// stepperDirection recognises `getter() +/- n` and returns "inc" or "dec".
+func stepperDirection(expr ast.Expr, getter string) (string, bool) {
+	bin, ok := expr.(*ast.BinaryExpr)
+	if !ok {
+		return "", false
+	}
+	if bin.Op != "+" && bin.Op != "-" {
+		return "", false
+	}
+	call, ok := bin.Left.(*ast.CallExpr)
+	if !ok || len(call.Args) != 0 {
+		return "", false
+	}
+	id, ok := call.Callee.(*ast.Identifier)
+	if !ok || id.Name != getter {
+		return "", false
+	}
+	if bin.Op == "+" {
+		return "inc", true
+	}
+	return "dec", true
+}
+
+// MatchText matches a bare getter read `get()` (or `stack.top()`) rendered as
+// JSX text, so it can compile to a CSS-variable-backed live value with zero JS.
+// It returns the scope whose `--krate-current` drives the text.
+func (a *Analyzer) MatchText(expr ast.Expr) (*Scope, bool) {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok || len(call.Args) != 0 {
+		return nil, false
+	}
+	name, ok := getterName(call)
+	if !ok {
+		return nil, false
+	}
+	s := a.byVar[name]
+	if s == nil {
+		return nil, false
+	}
+	if !s.isChoiceLike() && s.Kind != KindToggle {
+		return nil, false
+	}
+	return s, true
 }
 
 // MatchPanel matches an element whose `showIf`/`visibleIf` test selects one of
@@ -462,6 +935,12 @@ func (a *Analyzer) registerPanelChild(child ast.JSXChild) {
 	case *ast.JSXFragmentChild:
 		a.registerPanels(c.Fragment)
 	case *ast.JSXExprContainer:
+		// A bare `{getter()}` text read compiles to a live value driven by the
+		// scope's `--krate-current`; mark the scope so the stylesheet emits the
+		// `.krc-live` content rule.
+		if s, ok := a.MatchText(c.Expression); ok {
+			s.LiveText = true
+		}
 		a.registerPanels(c.Expression)
 	}
 }
@@ -542,12 +1021,12 @@ func (a *Analyzer) matchCompareAtom(getterSide, literalSide ast.Expr, negated bo
 	if !ok || len(call.Args) != 0 {
 		return nil, false
 	}
-	id, ok := call.Callee.(*ast.Identifier)
+	name, ok := getterName(call)
 	if !ok {
 		return nil, false
 	}
-	s := a.byVar[id.Name]
-	if s == nil || s.Kind != KindChoice {
+	s := a.byVar[name]
+	if s == nil || !s.isChoiceLike() {
 		return nil, false
 	}
 	val, ok := literalValue(literalSide)
@@ -555,6 +1034,24 @@ func (a *Analyzer) matchCompareAtom(getterSide, literalSide ast.Expr, negated bo
 		return nil, false
 	}
 	return &Atom{Scope: s, Option: val, Negated: negated}, true
+}
+
+// getterName resolves the scope getter identifier behind a call callee. An
+// ordinary getter is `get()`; a stack reads its top via `stack.top()`.
+func getterName(call *ast.CallExpr) (string, bool) {
+	switch callee := call.Callee.(type) {
+	case *ast.Identifier:
+		return callee.Name, true
+	case *ast.MemberExpr:
+		// `stack.top()` — the property may be "top"/"peek"; the object is the
+		// scope variable.
+		if id, ok := callee.Object.(*ast.Identifier); ok {
+			if prop, ok := callee.Property.(*ast.Identifier); ok && (prop.Name == "top" || prop.Name == "peek") {
+				return id.Name, true
+			}
+		}
+	}
+	return "", false
 }
 
 // matchTruthyAtom matches a bare truthy getter read: `on()` (toggle) or
@@ -760,6 +1257,28 @@ func (c *Condition) owningScope() *Scope {
 // OwningScope returns the anchor scope (the referenced scope with the lowest
 // page index), used by the builder to order deduped conditions deterministically.
 func (c *Condition) OwningScope() *Scope { return c.owningScope() }
+
+// PanelRole returns the ARIA role for the panel wrapper, taken from the owning
+// scope's resolved role (empty when none).
+func (c *Condition) PanelRole() string {
+	if o := c.owningScope(); o != nil {
+		return o.Role.Panel
+	}
+	return ""
+}
+
+// StackNode returns the stack node (option) this condition selects, or "" when
+// it selects none. Used by the builder to resolve nested pop() triggers.
+func (c *Condition) StackNode() string {
+	for _, term := range c.Terms {
+		for _, at := range term {
+			if at.Scope != nil && at.Scope.Kind == KindStack && !at.Negated {
+				return at.Option
+			}
+		}
+	}
+	return ""
+}
 
 // collectScopes returns the distinct scopes referenced by a DNF term list, in
 // first-appearance order.

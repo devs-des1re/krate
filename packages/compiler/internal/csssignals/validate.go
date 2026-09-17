@@ -123,6 +123,9 @@ func (a *Analyzer) validateJSX(el *ast.JSXElement, names map[string]bool) string
 				return reason
 			}
 		case *ast.JSXExprContainer:
+			if _, ok := a.MatchText(c.Expression); ok {
+				continue // live text: driven by --krate-current, zero JS
+			}
 			if referencesCSS(c.Expression, names) {
 				return "the state is rendered as text; only showIf panels and onClick triggers are supported"
 			}
@@ -146,6 +149,9 @@ func (a *Analyzer) validateFragment(frag *ast.JSXFragment, names map[string]bool
 				return reason
 			}
 		case *ast.JSXExprContainer:
+			if _, ok := a.MatchText(c.Expression); ok {
+				continue // live text
+			}
 			if referencesCSS(c.Expression, names) {
 				return "the state is rendered as text; only showIf panels and onClick triggers are supported"
 			}
@@ -274,7 +280,8 @@ func (a *Analyzer) validateStmts(stmts []ast.Stmt, skip *ast.ReturnStmt, names m
 // isCSSFactory reports whether a callee name is one of the CSS signal factories.
 func isCSSFactory(name string) bool {
 	switch name {
-	case "createCSSChoice", "createCSSToggle", "createCSSFlags":
+	case "createCSSChoice", "createCSSToggle", "createCSSFlags",
+		"createCSSGroup", "createCSSRange", "createCSSStack":
 		return true
 	}
 	return false

@@ -132,6 +132,9 @@ JavaScript at all — the state lives in the DOM and the cascade:
 | `createCSSChoice(initial, options?)` | one-of-N | radio group |
 | `createCSSToggle(initial)` | on/off | single checkbox |
 | `createCSSFlags([...])` | N independent booleans | checkbox per flag |
+| `createCSSGroup(initial \| null, opts?)` | optional one-of-N | radio group + closed sentinel |
+| `createCSSRange(initial, { min, max, step })` | discrete number | indexed radio chain |
+| `createCSSStack(['root'], opts?)` | navigation path | nested radio levels |
 
 ### `createCSSChoice` — mutually-exclusive state
 
@@ -202,6 +205,111 @@ each atom to a `:has()` / `:not(:has())` fragment on the shared scope anchor,
 so every combination stays zero-JS. Equivalent conditions (e.g. `a && b` and
 `b && a`, or `!(a || b)` and `!a && !b`) are deduplicated to a single wrapper
 class. An expression the compiler cannot classify is still a hard error.
+
+### `createCSSGroup` — optional one-of-N
+
+An optional radio group: like a choice, but with an explicit **closed** state
+(`null`). This is the shape behind single-open accordions, disclosures, dialogs,
+popovers, and dropdown menus.
+
+```tsx
+const [open, setOpen] = createCSSGroup(null, { as: 'accordion' });
+
+<button onClick={() => setOpen('faq')}>FAQ</button>
+<div showIf={open() === 'faq'}>Answer</div>
+<button onClick={() => setOpen(null)}>Close</button>
+```
+
+### `createCSSRange` — a discrete stepper / slider / progress
+
+A stepped integer range compiled to an indexed radio chain. Set it with a
+literal index or a relative step (`r() + 1` / `r() - 1`), which the compiler
+turns into bounded stepper labels. A `.krcN-fill` element gets a proportional
+width for progress indicators; a track of tick labels gives a stepped slider.
+
+```tsx
+const [step, setStep] = createCSSRange(0, { min: 0, max: 4, step: 1 });
+
+<button onClick={() => setStep(step() - 1)}>Back</button>
+<button onClick={() => setStep(step() + 1)}>Next</button>
+<div class="fill"></div>
+```
+
+Continuous drag is not expressible in pure CSS; use `createSignal` for that.
+
+### `createCSSStack` — drill-down navigation
+
+A navigation stack over a **declared** tree of nodes. The compiler infers the
+tree from where each literal `push('node')` appears, so `top()` reads the
+deepest open node and `pop()` returns to its parent.
+
+```tsx
+const [stack, { push, pop, clear }] = createCSSStack(['root']);
+
+<button onClick={() => push('settings')}>Settings</button>
+<div showIf={stack.top() === 'settings'}>
+  <button onClick={() => pop()}>Back</button>
+  <button onClick={() => push('notifications')}>Notifications</button>
+</div>
+```
+
+Push targets must be literals so the tree is known at build time; a stack
+expresses a reachable path, not arbitrary push/pop history.
+
+### Live text & custom properties
+
+Reading a getter as JSX text (`{tab()}`) compiles to a **live value with zero
+JS**: the compiler emits a `.krc-live` element whose `::after` content is the
+inherited `--krate-current` custom property, updated by the same `:has()` rules
+that toggle panels.
+
+```tsx
+const [plan, setPlan] = createCSSChoice('solo', ['solo', 'pro']);
+<p>Selected plan: {plan()}</p>   // → <span class="krc-live"></span>
+```
+
+Every choice-like scope publishes `--krate-current` (the quoted option token);
+toggles publish `"on"`/`"off"`. Pass `vars` to publish more inheritable
+properties — handy for computed prices or themed variants:
+
+```tsx
+const [tier, setTier] = createCSSChoice('solo', {
+  options: ['solo', 'pro'],
+  vars: { '--price': { solo: '"$9"', pro: '"$29"' } },
+});
+```
+
+```css
+.price::after { content: var(--price); }
+```
+
+Values are emitted verbatim, so quote strings you intend for `content:`. Values
+must be string literals; a non-literal `vars` value is a build error.
+
+### ARIA roles (`as`)
+
+Every primitive accepts an options object with an `as` role preset. Native
+defaults (radio groups, checkboxes) ship **no JavaScript**. Presets that need
+synthesized state — `tabs`, `listbox`, `accordion`, `disclosure`, `dialog`,
+`menu`, `popover` — inject a tiny ARIA synchroniser automatically (still no page
+hydration bundle).
+
+| `as` | Widget | Emits |
+|------|--------|-------|
+| *(default)* | radio group / checkboxes | native semantics, zero JS |
+| `switch` | on/off | `role="switch"` on the checkbox |
+| `tabs` | tabbed panels | `tablist` / `tab` / `tabpanel`, `aria-selected` |
+| `listbox` | options list | `listbox` / `option`, `aria-selected` |
+| `accordion` | single-open disclosure | `button` / `region`, `aria-expanded` |
+| `dialog` / `modal` | modal | `aria-haspopup`, `aria-modal` |
+| `menu` / `popover` | dropdown | `menu` / `menuitemradio` |
+
+```tsx
+const [tab, setTab] = createCSSChoice('a', { as: 'tabs' });
+```
+
+Pass `aria: false` to opt out entirely, or `aria: { role: '…', panelRole: '…' }`
+for raw overrides (`role`, `panelRole`, `container-role` are recognised).
 
 ### How it compiles
 

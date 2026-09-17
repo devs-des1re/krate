@@ -178,6 +178,199 @@ func TestBuildCSSSignalsCompound(t *testing.T) {
 	}
 }
 
+// TestBuildCSSSignalsGroup verifies createCSSGroup compiles to a radio group
+// with a null sentinel and emits accordion ARIA + the tiny runtime.
+func TestBuildCSSSignalsGroup(t *testing.T) {
+	src := `export default function Faq() {
+	const [open, setOpen] = createCSSGroup(null, { as: 'accordion' });
+	return (
+		<div>
+			<button onClick={() => setOpen('q1')}>Question 1</button>
+			<div showIf={open() === 'q1'}>Answer 1</div>
+			<button onClick={() => setOpen(null)}>Close</button>
+		</div>
+	);
+}`
+	html, outDir, err := buildPageSrc(t, src)
+	if err != nil {
+		t.Fatalf("BuildAll: %v", err)
+	}
+	if strings.Contains(html, "createCSSGroup") || strings.Contains(html, "showIf") {
+		t.Errorf("compiler sugar leaked:\n%.900s", html)
+	}
+	if !strings.Contains(html, `role=button`) && !strings.Contains(html, `role="button"`) {
+		t.Errorf("expected accordion trigger role:\n%.900s", html)
+	}
+	if !strings.Contains(html, "aria-expanded") {
+		t.Errorf("expected aria-expanded on trigger:\n%.900s", html)
+	}
+	// Accordion needs synthesized aria-expanded → tiny runtime is injected, but
+	// not the page hydration bundle.
+	if !strings.Contains(html, "addEventListener") {
+		t.Errorf("expected the ARIA synchroniser script:\n%.900s", html)
+	}
+	if hasHydrationScript(html) {
+		t.Errorf("group should not hydrate a page bundle:\n%.900s", html)
+	}
+	_ = outDir
+}
+
+// TestBuildCSSSignalsRange verifies createCSSRange compiles to a radio chain
+// with a proportional fill rule and bounded stepper labels.
+func TestBuildCSSSignalsRange(t *testing.T) {
+	src := `export default function Steps() {
+	const [n, setN] = createCSSRange(0, { min: 0, max: 3, step: 1 });
+	return (
+		<div>
+			<button onClick={() => setN(n() + 1)}>Next</button>
+			<button onClick={() => setN(n() - 1)}>Prev</button>
+			<div showIf={n() === 1}>One</div>
+		</div>
+	);
+}`
+	html, outDir, err := buildPageSrc(t, src)
+	if err != nil {
+		t.Fatalf("BuildAll: %v", err)
+	}
+	if strings.Contains(html, "createCSSRange") || strings.Contains(html, "showIf") {
+		t.Errorf("compiler sugar leaked:\n%.900s", html)
+	}
+	if hasHydrationScript(html) {
+		t.Errorf("range should be zero-JS:\n%.900s", html)
+	}
+	css := readAllCSS(t, outDir)
+	if !strings.Contains(css, "width:100%") && !strings.Contains(css, "width:66.7%") {
+		t.Errorf("expected a proportional fill rule:\n%s", css)
+	}
+	if !strings.Contains(css, "-st-inc") || !strings.Contains(css, "-st-dec") {
+		t.Errorf("expected stepper groups:\n%s", css)
+	}
+}
+
+// TestBuildCSSSignalsStack verifies createCSSStack compiles to nested panels
+// with push/pop labels, zero-JS.
+func TestBuildCSSSignalsStack(t *testing.T) {
+	src := `export default function Nav() {
+	const [stack, { push, pop, clear }] = createCSSStack(['root']);
+	return (
+		<div>
+			<button onClick={() => push('settings')}>Settings</button>
+			<div showIf={stack.top() === 'settings'}>
+				<button onClick={() => pop()}>Back</button>
+			</div>
+		</div>
+	);
+}`
+	html, _, err := buildPageSrc(t, src)
+	if err != nil {
+		t.Fatalf("BuildAll: %v", err)
+	}
+	if strings.Contains(html, "createCSSStack") || strings.Contains(html, "showIf") || strings.Contains(html, ".top()") {
+		t.Errorf("compiler sugar leaked:\n%.900s", html)
+	}
+	if hasHydrationScript(html) {
+		t.Errorf("stack should be zero-JS:\n%.900s", html)
+	}
+	if !strings.Contains(html, "<label") || !strings.Contains(html, "for=") {
+		t.Errorf("expected label triggers:\n%.900s", html)
+	}
+}
+
+// TestBuildCSSSignalsTabsARIA verifies a tabs role emits tablist ARIA and the
+// tiny runtime, but no page hydration bundle.
+func TestBuildCSSSignalsTabsARIA(t *testing.T) {
+	src := `export default function Tabs() {
+	const [tab, setTab] = createCSSChoice('a', { as: 'tabs' });
+	return (
+		<div>
+			<button onClick={() => setTab('a')}>A</button>
+			<button onClick={() => setTab('b')}>B</button>
+			<div showIf={tab() === 'a'}>A panel</div>
+			<div showIf={tab() === 'b'}>B panel</div>
+		</div>
+	);
+}`
+	html, _, err := buildPageSrc(t, src)
+	if err != nil {
+		t.Fatalf("BuildAll: %v", err)
+	}
+	if !strings.Contains(html, `role=tab`) && !strings.Contains(html, `role="tab"`) {
+		t.Errorf("expected tab roles:\n%.900s", html)
+	}
+	if !strings.Contains(html, "aria-selected") {
+		t.Errorf("expected aria-selected on tabs:\n%.900s", html)
+	}
+	if !strings.Contains(html, "addEventListener") {
+		t.Errorf("expected the ARIA synchroniser script:\n%.900s", html)
+	}
+	if hasHydrationScript(html) {
+		t.Errorf("tabs should not hydrate a page bundle:\n%.900s", html)
+	}
+}
+
+// TestBuildCSSSignalsLiveText verifies a bare `{getter()}` read compiles to a
+// `.krc-live` element backed by `--krate-current`, still zero-JS, and that
+// literal `vars` become custom properties.
+func TestBuildCSSSignalsLiveText(t *testing.T) {
+	src := `export default function T() {
+	const [tier, setTier] = createCSSChoice('solo', {
+		options: ['solo', 'pro'],
+		vars: { '--price': { solo: '"$9"', pro: '"$29"' } },
+	});
+	return (
+		<div>
+			<button onClick={() => setTier('pro')}>Pro</button>
+			<p>Plan: {tier()}</p>
+			<div showIf={tier() === 'pro'}>Pro features</div>
+		</div>
+	);
+}`
+	html, outDir, err := buildPageSrc(t, src)
+	if err != nil {
+		t.Fatalf("BuildAll: %v", err)
+	}
+	if strings.Contains(html, "createCSSChoice") || strings.Contains(html, "showIf") {
+		t.Errorf("compiler sugar leaked:\n%.900s", html)
+	}
+	if !strings.Contains(html, "krc-live") {
+		t.Errorf("expected a live-text element:\n%.900s", html)
+	}
+	if hasHydrationScript(html) {
+		t.Errorf("live text should be zero-JS:\n%.900s", html)
+	}
+	css := readAllCSS(t, outDir)
+	if !strings.Contains(css, `.krc-live::after{content:var(--krate-current,"")}`) {
+		t.Errorf("missing live-text rule:\n%s", css)
+	}
+	if !strings.Contains(css, `.krc0:has(.krc0-r-pro:checked){--krate-current:"pro";--price:"$29"}`) {
+		t.Errorf("missing vars rule:\n%s", css)
+	}
+}
+
+// TestBuildCSSSignalsToggleLiveText verifies a toggle publishes on/off values.
+func TestBuildCSSSignalsToggleLiveText(t *testing.T) {
+	src := `export default function T() {
+	const [on, setOn] = createCSSToggle(false);
+	return (
+		<div>
+			<button onClick={() => setOn(!on())}>Toggle</button>
+			<p>{on()}</p>
+		</div>
+	);
+}`
+	_, outDir, err := buildPageSrc(t, src)
+	if err != nil {
+		t.Fatalf("BuildAll: %v", err)
+	}
+	css := readAllCSS(t, outDir)
+	if !strings.Contains(css, `.krc0:has(.krc0-c:checked){--krate-current:"on"}`) {
+		t.Errorf("missing toggle on rule:\n%s", css)
+	}
+	if !strings.Contains(css, `.krc0:not(:has(.krc0-c:checked)){--krate-current:"off"}`) {
+		t.Errorf("missing toggle off rule:\n%s", css)
+	}
+}
+
 // TestBuildCSSSignalsMultiInstanceUnique verifies two instances get distinct
 // controller groups over one shared stylesheet.
 func TestBuildCSSSignalsMultiInstanceUnique(t *testing.T) {
@@ -274,7 +467,7 @@ func TestBuildCSSSignalsErrorsAreFatal(t *testing.T) {
 	cases := map[string]string{
 		"stray text read": `export default function T() {
 	const [tab, setTab] = createCSSChoice('a');
-	return <div><p>{tab()}</p><div showIf={tab() === 'a'}>A</div></div>;
+	return <div><p>{tab() + '!'}</p><div showIf={tab() === 'a'}>A</div></div>;
 }`,
 		"non-labelable trigger": `export default function T() {
 	const [tab, setTab] = createCSSChoice('a');

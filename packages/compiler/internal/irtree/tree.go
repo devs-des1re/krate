@@ -354,6 +354,10 @@ type ComponentTree struct {
 	// compiled into this tree (empty when none). The build appends it to the
 	// page's own CSS so it lands in the hashed external stylesheet.
 	CSSSignalsCSS string
+	// NeedsCSSARIA is true when a CSS signal scope uses a role that requires the
+	// tiny ARIA micro-runtime (tabs/listbox/disclosure) to keep synthesized
+	// aria-selected/aria-expanded in sync. False means the page stays zero-JS.
+	NeedsCSSARIA bool
 	// Errors holds hard errors for CSS signals that could not be compiled
 	// (unsupported trigger element, dynamic class, state read as text, …). A
 	// non-empty set must fail the build: there is no fallback.
