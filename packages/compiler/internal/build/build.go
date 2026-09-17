@@ -297,15 +297,9 @@ func (b *Builder) BuildPages(pages []string) error {
 
 	// Optional site-global stylesheet (Tailwind) linked on every page.
 	var globalCSS []string
-	if b.Cfg.Tailwind.Enabled {
-		twCfg := css.LoadTailwindConfig(b.Root)
-		twCSS, err := css.GenerateTailwind(b.Root, twCfg)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "  %sTailwind error:%s %v\n", cYellow, cReset, err)
-		} else if twCSS != "" {
-			if f := b.writeGlobalCSS(twCSS); f != "" {
-				globalCSS = append(globalCSS, f)
-			}
+	if twCSS := b.tailwindCSS(); twCSS != "" {
+		if f := b.writeGlobalCSS(twCSS); f != "" {
+			globalCSS = append(globalCSS, f)
 		}
 	}
 
@@ -564,13 +558,9 @@ func (b *Builder) BuildAll() error {
 
 	// Optional site-global stylesheet (Tailwind) linked on every page.
 	var globalCSS []string
-	if b.Cfg.Tailwind.Enabled {
-		twCfg := css.LoadTailwindConfig(b.Root)
-		twCSS, err := css.GenerateTailwind(b.Root, twCfg)
-		if err == nil && twCSS != "" {
-			if f := b.writeGlobalCSS(twCSS); f != "" {
-				globalCSS = append(globalCSS, f)
-			}
+	if twCSS := b.tailwindCSS(); twCSS != "" {
+		if f := b.writeGlobalCSS(twCSS); f != "" {
+			globalCSS = append(globalCSS, f)
 		}
 	}
 
@@ -757,6 +747,30 @@ func (b *Builder) affectedPages(changedFiles []string) []string {
 		}
 	}
 	return pages
+}
+
+// tailwindCSS generates the site-global Tailwind stylesheet honoring the
+// tailwind config (scanDirs/content, darkMode, preflight, strict). Returns ""
+// when Tailwind is disabled or no classes were found.
+func (b *Builder) tailwindCSS() string {
+	if !b.Cfg.Tailwind.Enabled {
+		return ""
+	}
+	opts := css.TailwindOptions{
+		ScanDirs:         b.Cfg.Tailwind.ScanDirs,
+		ContentOverrides: b.Cfg.Tailwind.Content,
+		Preflight:        b.Cfg.Tailwind.Preflight,
+		Strict:           b.Cfg.Tailwind.Strict,
+		DarkMode:         b.Cfg.Tailwind.DarkMode,
+		ExecuteConfig:    b.Cfg.Tailwind.ExecuteConfig,
+	}
+	twCfg := css.LoadTailwindConfigWithOptions(b.Root, opts)
+	twCSS, err := css.GenerateTailwindWithOptions(b.Root, twCfg, opts)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "  %sTailwind error:%s %v\n", cYellow, cReset, err)
+		return ""
+	}
+	return twCSS
 }
 
 func (b *Builder) writeGlobalCSS(mergedCSS string) string {

@@ -33,6 +33,17 @@ type PluginConfig struct {
 type TailwindCfg struct {
 	Enabled  bool     `json:"enabled,omitempty"`
 	ScanDirs []string `json:"scanDirs,omitempty"`
+	// Content is the Tailwind-style content glob list; when set it takes
+	// precedence over ScanDirs.
+	Content []string `json:"content,omitempty"`
+	// Preflight enables the Tailwind base reset (opt-in; changes page styling).
+	Preflight bool `json:"preflight,omitempty"`
+	// Strict reports classes that produced no rule as build warnings.
+	Strict bool `json:"strict,omitempty"`
+	// DarkMode is "media" (default), "class", or "selector".
+	DarkMode string `json:"darkMode,omitempty"`
+	// ExecuteConfig runs tailwind.config via `npx tsx` instead of static parse.
+	ExecuteConfig bool `json:"executeConfig,omitempty"`
 }
 
 type CSPConfig struct {

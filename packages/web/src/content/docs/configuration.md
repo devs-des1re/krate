@@ -63,15 +63,27 @@ devServer: {
 ```typescript
 tailwind: {
   enabled: false,
-  scanDirs: ["src"],
+  scanDirs: ["src"],       // or content: ["./src/**/*.{tsx,mdx}"]
+  preflight: false,        // opt-in base reset
+  strict: false,           // warn on classes that produce no rule
+  darkMode: "media",       // "media" | "class" | "selector"
+  executeConfig: false,    // run tailwind.config via npx tsx instead of static parse
 }
 ```
 
-Krate's Tailwind is **Go-native** (no PostCSS). The class scanner extracts class
-names from source files and maps them to rules from a built-in rule set. It
-supports variants (`hover:`, `focus:`, responsive breakpoints, `dark:`) and
-arbitrary values (`w-[100px]`, `bg-[#ff0000]`). Configuration lives in
-`tailwind.config.ts` (executed via `npx tsx`).
+Krate's Tailwind is **Go-native** (no PostCSS, no Node at build time). A
+candidate scanner extracts Tailwind tokens from source files and maps them to
+rules from a built-in rule set. It supports variants (`hover:`, `focus:`,
+`group-*`, responsive breakpoints, `dark:`, arbitrary variants), arbitrary
+values (`w-[100px]`, `bg-[#ff0000]`), negatives, and color opacity modifiers
+(`bg-blue-500/50`). Output is deterministic. Configuration lives in
+`tailwind.config.ts` and is **statically parsed** by default; set
+`executeConfig: true` to execute it via `npx tsx`. `theme.extend` merges onto
+the defaults; top-level `theme` keys replace them.
+
+This is a documented subset of Tailwind: JS plugins and `@apply` are not
+supported, and unknown classes produce no rule (enable `strict` to surface
+them).
 
 ## Markdown
 

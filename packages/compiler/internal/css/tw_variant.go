@@ -1,0 +1,259 @@
+package css
+
+import "strings"
+
+// variant is one parsed modifier applied to a utility. Exactly one of the
+// selector or at-rule fields is set, per kind.
+type variant struct {
+	// kind is "pseudo" (suffix the utility selector), "ancestor" (wrap it with
+	// a PLACEHOLDER), "media", or "supports".
+	kind string
+	// sel is the selector fragment for pseudo/ancestor kinds.
+	sel string
+	// at is the condition for media/supports kinds, e.g. "(min-width: 640px)".
+	at string
+}
+
+// parseVariants splits a full class name into its stacked variant tokens (left
+// to right) and the base utility. It respects `[...]` brackets (which may
+// contain `:`) and leaves `/` opacity modifiers untouched, so
+// `sm:hover:bg-red-500/50` yields (["sm","hover"], "bg-red-500/50").
+func parseVariants(cls string) ([]string, string) {
+	var variants []string
+	depth := 0
+	start := 0
+	for i := 0; i < len(cls); i++ {
+		switch cls[i] {
+		case '[':
+			depth++
+		case ']':
+			if depth > 0 {
+				depth--
+			}
+		case ':':
+			if depth == 0 {
+				variants = append(variants, cls[start:i])
+				start = i + 1
+			}
+		}
+	}
+	base := cls[start:]
+	base = strings.TrimPrefix(base, "!")
+	return variants, base
+}
+
+// resolveVariant maps a variant token to its CSS form using the theme (for
+// breakpoints and dark-mode strategy). ok=false means "unknown variant" so the
+// caller can skip the class rather than emit it unconditionally.
+func resolveVariant(v string, theme TailwindTheme) (variant, bool) {
+	// Arbitrary variant: [&:nth-child(3)], [@media(min-width:900px)], [dir=rtl].
+	if strings.HasPrefix(v, "[") && strings.HasSuffix(v, "]") {
+		inner := strings.ReplaceAll(v[1:len(v)-1], "_", " ")
+		if strings.HasPrefix(inner, "@") {
+			if i := strings.IndexByte(inner, '('); i > 0 {
+				kw := inner[1:i]
+				kind := "@media"
+				if kw == "supports" {
+					kind = "@supports"
+				}
+				return variant{kind: strings.TrimPrefix(kind, "@"), at: inner[i:]}, true
+			}
+			return variant{}, false
+		}
+		if inner == "&" {
+			return variant{kind: "pseudo"}, true
+		}
+		if strings.Contains(inner, "&") {
+			return variant{kind: "ancestor", sel: strings.ReplaceAll(inner, "&", "PLACEHOLDER")}, true
+		}
+		// Bare selector fragment, e.g. [dir=rtl] → ancestor.
+		return variant{kind: "ancestor", sel: inner + " PLACEHOLDER"}, true
+	}
+
+	// Responsive breakpoints from the theme (mobile-first min-width).
+	if bp, ok := theme.Screens[v]; ok {
+		return variant{kind: "media", at: "(min-width: " + bp + ")"}, true
+	}
+	if rest, ok := strings.CutPrefix(v, "max-"); ok {
+		if bp, ok := theme.Screens[rest]; ok {
+			return variant{kind: "media", at: "(max-width: calc(" + bp + " - 0.02px))"}, true
+		}
+	}
+
+	// Dark mode: strategy from config (default media).
+	if v == "dark" {
+		switch theme.DarkMode {
+		case "class", "selector":
+			return variant{kind: "ancestor", sel: ".dark PLACEHOLDER"}, true
+		default:
+			return variant{kind: "media", at: "(prefers-color-scheme: dark)"}, true
+		}
+	}
+
+	// Direction.
+	if v == "rtl" {
+		return variant{kind: "ancestor", sel: "[dir='rtl'] PLACEHOLDER"}, true
+	}
+	if v == "ltr" {
+		return variant{kind: "ancestor", sel: "[dir='ltr'] PLACEHOLDER"}, true
+	}
+
+	// Group / peer (optionally named: group/item-hover).
+	if kind, name, state, ok := parseGroupPeer(v); ok {
+		cls := "." + EscapeClass(kind)
+		if name != "" {
+			cls += "\\/" + EscapeClass(name)
+		}
+		return variant{kind: "ancestor", sel: cls + ":" + state + " PLACEHOLDER"}, true
+	}
+
+	// data-* / aria-* / has-*.
+	if sel, ok := parseAttrVariant(v); ok {
+		return variant{kind: "ancestor", sel: sel + " PLACEHOLDER"}, true
+	}
+
+	if sel, ok := pseudoVariants[v]; ok {
+		return variant{kind: "pseudo", sel: sel}, true
+	}
+	if at, ok := mediaVariants[v]; ok {
+		return variant{kind: "media", at: at}, true
+	}
+	if at, ok := supportsVariants[v]; ok {
+		return variant{kind: "supports", at: at}, true
+	}
+	return variant{}, false
+}
+
+// parseGroupPeer recognizes group-<state>/peer-<state> and the named forms
+// group/<name>-<state> / peer/<name>-<state>.
+func parseGroupPeer(v string) (kind, name, state string, ok bool) {
+	for _, k := range []string{"group", "peer"} {
+		rest, isK := strings.CutPrefix(v, k)
+		if !isK {
+			continue
+		}
+		if named, after, hasName := strings.Cut(rest, "/"); hasName {
+			if i := strings.IndexByte(after, '-'); i > 0 {
+				state = after[i+1:]
+				if state != "" {
+					return k, named, state, true
+				}
+			}
+			continue
+		}
+		if strings.HasPrefix(rest, "-") {
+			state = rest[1:]
+			if state != "" {
+				return k, "", state, true
+			}
+		}
+	}
+	return "", "", "", false
+}
+
+// parseAttrVariant handles data-[...], aria-[...]/aria-*, and has-[...].
+func parseAttrVariant(v string) (string, bool) {
+	switch {
+	case strings.HasPrefix(v, "data-"):
+		rest := v[len("data-"):]
+		if strings.HasPrefix(rest, "[") && strings.HasSuffix(rest, "]") {
+			return "[data-" + strings.ReplaceAll(rest[1:len(rest)-1], "_", " ") + "]", true
+		}
+		return "[data-" + rest + "]", true
+	case strings.HasPrefix(v, "aria-"):
+		rest := v[len("aria-"):]
+		if strings.HasPrefix(rest, "[") && strings.HasSuffix(rest, "]") {
+			return "[aria-" + strings.ReplaceAll(rest[1:len(rest)-1], "_", " ") + "]", true
+		}
+		return "[aria-" + rest + "='true']", true
+	case strings.HasPrefix(v, "has-"):
+		rest := v[len("has-"):]
+		if strings.HasPrefix(rest, "[") && strings.HasSuffix(rest, "]") {
+			return ":has(" + strings.ReplaceAll(rest[1:len(rest)-1], "_", " ") + ")", true
+		}
+	}
+	return "", false
+}
+
+// pseudoVariants maps state variants to a selector fragment appended to the
+// utility selector (pseudo-classes and pseudo-elements alike).
+var pseudoVariants = map[string]string{
+	"hover": ":hover", "focus": ":focus", "focus-visible": ":focus-visible",
+	"focus-within": ":focus-within", "active": ":active", "visited": ":visited",
+	"target": ":target", "disabled": ":disabled", "enabled": ":enabled",
+	"checked": ":checked", "indeterminate": ":indeterminate", "default": ":default",
+	"required": ":required", "valid": ":valid", "invalid": ":invalid",
+	"in-range": ":in-range", "out-of-range": ":out-of-range",
+	"placeholder-shown": ":placeholder-shown", "autofill": ":autofill",
+	"read-only": ":read-only", "empty": ":empty", "open": "[open]",
+	"closed": ":not([open])", "first": ":first-child", "last": ":last-child",
+	"only": ":only-child", "odd": ":nth-child(odd)", "even": ":nth-child(even)",
+	"first-of-type": ":first-of-type", "last-of-type": ":last-of-type",
+	"only-of-type": ":only-of-type", "placeholder": "::placeholder",
+	"before": "::before", "after": "::after", "marker": "::marker",
+	"selection": "::selection", "file": "::file-selector-button",
+	"backdrop": "::backdrop",
+}
+
+// mediaVariants maps mode variants to their media condition.
+var mediaVariants = map[string]string{
+	"motion-safe":   "(prefers-reduced-motion: no-preference)",
+	"motion-reduce": "(prefers-reduced-motion: reduce)",
+	"contrast-more": "(prefers-contrast: more)",
+	"contrast-less": "(prefers-contrast: less)",
+	"print":         "print",
+	"portrait":      "(orientation: portrait)",
+	"landscape":     "(orientation: landscape)",
+	"forced-colors": "(forced-colors: active)",
+}
+
+// supportsVariants maps a variant to a @supports condition.
+var supportsVariants = map[string]string{
+	"supports-grid":     "(display: grid)",
+	"supports-backdrop": "(backdrop-filter: blur(0))",
+}
+
+// applyVariants builds the final selector and the wrapping at-rules for a base
+// utility selector. Pseudo variants suffix the selector; ancestor variants wrap
+// it; media/supports conditions nest outward. `baseSel` is the already-escaped
+// class name (without a leading dot); the returned selector includes the dot.
+// Returns the selector and at-rules (outermost first).
+func applyVariants(baseSel string, vs []variant) (string, []variant) {
+	sel := "." + baseSel
+	var ats []variant
+	for i := len(vs) - 1; i >= 0; i-- {
+		switch vs[i].kind {
+		case "pseudo":
+			sel += vs[i].sel
+		case "ancestor":
+			sel = strings.Replace(vs[i].sel, "PLACEHOLDER", sel, 1)
+		case "media", "supports":
+			if vs[i].at != "" {
+				ats = append(ats, vs[i])
+			}
+		}
+	}
+	// ats are innermost-first (right-to-left); reverse to outermost-first.
+	for i, j := 0, len(ats)-1; i < j; i, j = i+1, j-1 {
+		ats[i], ats[j] = ats[j], ats[i]
+	}
+	return sel, ats
+}
+
+// wrapAtRules wraps a selector/declaration block in the given at-rules
+// (outermost first) so nesting is correct.
+func wrapAtRules(sel, decls string, ats []variant) string {
+	out := sel + "{" + decls + "}"
+	for i := len(ats) - 1; i >= 0; i-- {
+		kw := "@media"
+		if ats[i].kind == "supports" {
+			kw = "@supports"
+		}
+		if ats[i].at == "print" {
+			out = "@media print{" + out + "}"
+			continue
+		}
+		out = kw + " " + ats[i].at + "{" + out + "}"
+	}
+	return out
+}

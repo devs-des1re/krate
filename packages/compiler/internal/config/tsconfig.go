@@ -351,6 +351,39 @@ func applyConfigProp(cfg *Config, key string, val interface{}) error {
 						cfg.Tailwind.ScanDirs = append(cfg.Tailwind.ScanDirs, s)
 					}
 				}
+			case "content":
+				switch cv := v.(type) {
+				case []interface{}:
+					for _, item := range cv {
+						if s, ok := item.(string); ok {
+							cfg.Tailwind.Content = append(cfg.Tailwind.Content, s)
+						}
+					}
+				case map[string]interface{}:
+					if files, ok := cv["files"].([]interface{}); ok {
+						for _, item := range files {
+							if s, ok := item.(string); ok {
+								cfg.Tailwind.Content = append(cfg.Tailwind.Content, s)
+							}
+						}
+					}
+				}
+			case "preflight":
+				if b, ok := v.(bool); ok {
+					cfg.Tailwind.Preflight = b
+				}
+			case "strict":
+				if b, ok := v.(bool); ok {
+					cfg.Tailwind.Strict = b
+				}
+			case "darkMode":
+				if s, ok := v.(string); ok {
+					cfg.Tailwind.DarkMode = s
+				}
+			case "executeConfig":
+				if b, ok := v.(bool); ok {
+					cfg.Tailwind.ExecuteConfig = b
+				}
 			}
 		}
 	case "csp":

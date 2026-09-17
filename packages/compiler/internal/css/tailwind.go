@@ -4,17 +4,35 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/kratejs/krate/packages/compiler/internal/fsutil"
 )
 
-// classAttrRe matches className="..." / class="..." string-literal attributes.
-var classAttrRe = regexp.MustCompile(`(?:className|class)\s*=\s*["']([^"']*)["']`)
-
-// classAttrTemplateRe matches className={`...`} template-literal attributes.
-// The template body may span multiple lines and contain ${...} interpolations.
-var classAttrTemplateRe = regexp.MustCompile("(?:className|class)\\s*=\\s*\\{\\s*`([^`]*)`\\s*}")
+// Hoisted matchers (compiled once, not per class). Kept as package vars for the
+// hot generator path.
+var (
+	opacityRe     = regexp.MustCompile(`^opacity-(\d+)$`)
+	leadingRe     = regexp.MustCompile(`^leading-([a-zA-Z0-9.]+)$`)
+	translateRe   = regexp.MustCompile(`^translate-([xy])-(.+)$`)
+	rotateRe      = regexp.MustCompile(`^rotate-(.+)$`)
+	skewRe        = regexp.MustCompile(`^skew-([xy])-(.+)$`)
+	scaleRe       = regexp.MustCompile(`^scale-(.+)$`)
+	originRe      = regexp.MustCompile(`^origin-(.+)$`)
+	roundedRe     = regexp.MustCompile(`^rounded-([a-zA-Z0-9]+)$`)
+	roundedSideRe = regexp.MustCompile(`^rounded-(tl|tr|bl|br|ss|se|es|ee|t|r|b|l|s|e)-([a-zA-Z0-9]+)$`)
+	maxWRe        = regexp.MustCompile(`^max-w-(.+)$`)
+	minWRe        = regexp.MustCompile(`^min-w-(.+)$`)
+	maxHRe        = regexp.MustCompile(`^max-h-(.+)$`)
+	minHRe        = regexp.MustCompile(`^min-h-(.+)$`)
+	spaceXRe      = regexp.MustCompile(`^space-x-(.+)$`)
+	spaceYRe      = regexp.MustCompile(`^space-y-(.+)$`)
+	gridColsRe    = regexp.MustCompile(`^grid-cols-(\d+)$`)
+	colSpanRe     = regexp.MustCompile(`^col-span-(\d+)$`)
+	orderRe       = regexp.MustCompile(`^order-(\d+)$`)
+)
 
 // TailwindScanner extracts Tailwind utility class names from source files.
 type TailwindScanner struct {
@@ -26,11 +44,21 @@ func NewTailwindScanner(root string) *TailwindScanner {
 	return &TailwindScanner{Root: root}
 }
 
-// ScanClasses walks the project and extracts all Tailwind class names used in className attributes.
+// ScanClasses walks the project and extracts every Tailwind class candidate
+// used in the scanned files. It is a broad candidate extractor (matching real
+// Tailwind's approach): every string and template literal is scanned and its
+// tokens filtered by shape, so classes inside `class={cond ? "a" : "b"}`,
+// `clsx()/cn()/cva()` arguments, and arrays are all found.
 func (s *TailwindScanner) ScanClasses(dirs []string) map[string]bool {
 	classes := make(map[string]bool)
-	exts := map[string]bool{".tsx": true, ".jsx": true, ".mdx": true, ".html": true, ".ts": true}
-	skipDirs := map[string]bool{"node_modules": true, ".git": true, "dist": true}
+	exts := map[string]bool{
+		".tsx": true, ".jsx": true, ".ts": true, ".js": true,
+		".mdx": true, ".md": true, ".html": true, ".mjs": true, ".cjs": true,
+	}
+	skipDirs := map[string]bool{
+		"node_modules": true, ".git": true, "dist": true, "out": true,
+		".krate": true, "build": true, ".next": true, "coverage": true,
+	}
 
 	for _, dir := range dirs {
 		fsutil.WalkExt(dir, exts, skipDirs, func(path string, _ os.FileInfo) error {
@@ -38,29 +66,164 @@ func (s *TailwindScanner) ScanClasses(dirs []string) map[string]bool {
 			if err != nil {
 				return nil
 			}
-			matches := classAttrRe.FindAllStringSubmatch(string(data), -1)
-			for _, m := range matches {
-				for _, c := range strings.Fields(m[1]) {
-					if strings.HasPrefix(c, "{") || strings.HasPrefix(c, "`") {
-						continue
-					}
-					classes[c] = true
-				}
-			}
-			tplMatches := classAttrTemplateRe.FindAllStringSubmatch(string(data), -1)
-			for _, m := range tplMatches {
-				for _, c := range strings.Fields(stripTemplateInterpolations(m[1])) {
-					if strings.HasPrefix(c, "{") || strings.HasPrefix(c, "`") {
-						continue
-					}
-					classes[c] = true
-				}
+			for _, tok := range candidateTokens(string(data)) {
+				classes[tok] = true
 			}
 			return nil
 		})
 	}
 
 	return classes
+}
+
+// candidateTokens extracts Tailwind-looking tokens from source text. It scans
+// every string literal ('...', "...") and template literal (`...`, with static
+// segments only) and keeps whitespace-separated tokens that look like utility
+// classes (optionally variant-prefixed, possibly with `/`, `[`, `]`, `.`, `-`).
+func candidateTokens(src string) []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(s string) {
+		for _, tok := range strings.Fields(s) {
+			tok = strings.Trim(tok, "\"'`,;(){}")
+			if tok == "" || seen[tok] || !looksLikeUtility(tok) {
+				continue
+			}
+			seen[tok] = true
+			out = append(out, tok)
+		}
+	}
+	for _, lit := range stringLiterals(src) {
+		add(lit)
+	}
+	return out
+}
+
+// looksLikeUtility is a conservative shape filter so prose and code identifiers
+// are not emitted as utilities. A candidate must consist only of characters
+// valid in a utility (letters, digits, `- _ / . [ ] % ( ) # ! :` plus `,` for
+// arbitrary values) and must contain a `-` (all utilities are hyphenated or
+// standalone keywords).
+func looksLikeUtility(tok string) bool {
+	if len(tok) == 0 || len(tok) > 200 {
+		return false
+	}
+	// Reject obvious non-classes.
+	if strings.ContainsAny(tok, "\n\t ") {
+		return false
+	}
+	hasHyphen := false
+	depth := 0
+	for _, r := range tok {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '-':
+			hasHyphen = true
+		case r == '_' || r == '/' || r == '.' || r == '%' || r == '#' || r == '!':
+		case r == '[':
+			depth++
+		case r == ']':
+			if depth == 0 {
+				return false
+			}
+			depth--
+		case r == '(' || r == ')':
+			// allowed inside arbitrary values
+		case r == ':':
+			// variant separator
+		case r == ',':
+			// arbitrary value list
+		default:
+			return false
+		}
+	}
+	if depth != 0 {
+		return false
+	}
+	if !hasHyphen {
+		// The token may be a variant-prefixed standalone keyword (`sm:flex`,
+		// `hover:block`, `dark:hidden`); check the base after the last colon.
+		base := tok
+		if i := strings.LastIndexByte(tok, ':'); i >= 0 {
+			base = tok[i+1:]
+		}
+		switch base {
+		case "flex", "grid", "block", "inline", "hidden", "contents", "static",
+			"fixed", "absolute", "relative", "sticky", "visible", "invisible",
+			"underline", "truncate", "italic", "uppercase", "lowercase",
+			"capitalize", "container", "sr-only", "ring", "border", "shadow",
+			"rounded", "transform", "antialiased", "subpixel-antialiased",
+			"inline-block", "inline-flex", "inline-grid", "not-sr-only":
+			return true
+		}
+		return false
+	}
+	return true
+}
+
+// stringLiterals returns the contents of every string and template literal in
+// src, with `${...}` interpolations stripped from template bodies. Escapes are
+// not fully unwound; the shape filter tolerates that.
+func stringLiterals(src string) []string {
+	var out []string
+	i, n := 0, len(src)
+	for i < n {
+		c := src[i]
+		// Skip line comments.
+		if c == '/' && i+1 < n && src[i+1] == '/' {
+			for i < n && src[i] != '\n' {
+				i++
+			}
+			continue
+		}
+		// Skip block comments.
+		if c == '/' && i+1 < n && src[i+1] == '*' {
+			i += 2
+			for i+1 < n && !(src[i] == '*' && src[i+1] == '/') {
+				i++
+			}
+			i += 2
+			continue
+		}
+		if c == '"' || c == '\'' || c == '`' {
+			quote := c
+			i++
+			start := i
+			var sb strings.Builder
+			for i < n && src[i] != quote {
+				if src[i] == '\\' && i+1 < n {
+					sb.WriteByte(src[i])
+					sb.WriteByte(src[i+1])
+					i += 2
+					continue
+				}
+				if quote == '`' && src[i] == '$' && i+1 < n && src[i+1] == '{' {
+					// Skip the interpolation (nested braces).
+					i += 2
+					depth := 1
+					for i < n && depth > 0 {
+						switch src[i] {
+						case '{':
+							depth++
+						case '}':
+							depth--
+						}
+						i++
+					}
+					sb.WriteByte(' ')
+					continue
+				}
+				sb.WriteByte(src[i])
+				i++
+			}
+			_ = start
+			out = append(out, sb.String())
+			i++ // closing quote
+			continue
+		}
+		i++
+	}
+	return out
 }
 
 // stripTemplateInterpolations removes ${...} segments from a template literal
@@ -93,6 +256,10 @@ func stripTemplateInterpolations(s string) string {
 // TailwindGenerator converts class names to CSS rules.
 type TailwindGenerator struct {
 	Theme TailwindTheme
+	// Strict, when true, collects classes that produced no rule.
+	Strict bool
+	// Unknown collects class names that yielded no rule (populated when Strict).
+	Unknown []string
 }
 
 // NewTailwindGenerator creates a generator with default theme.
@@ -102,26 +269,40 @@ func NewTailwindGenerator() *TailwindGenerator {
 	}
 }
 
-// Generate produces CSS for the given set of class names, deduplicated.
+// generatedRule is one emitted rule with its sort key for deterministic output.
+type generatedRule struct {
+	// key orders rules deterministically: variant depth, media, selector.
+	key  string
+	text string
+}
+
+// Generate produces CSS for the given set of class names. Output is
+// deterministic: rules are sorted by a stable key so identical inputs always
+// produce byte-identical stylesheets (stable content hashing).
 func (g *TailwindGenerator) Generate(classes map[string]bool) string {
 	if len(classes) == 0 {
 		return ""
 	}
 
+	// Deduplicate base class names (the scanner may return pre-split tokens).
 	seen := make(map[string]bool)
-	var rules []string
+	var rules []generatedRule
 
 	for cls := range classes {
 		for _, c := range strings.Fields(cls) {
-			if seen[c] {
+			if c == "" || seen[c] {
 				continue
 			}
 			seen[c] = true
 
-			css := classToCSS(c, g.Theme)
-			if css != "" {
-				rules = append(rules, css)
+			text, key := classToRule(c, g.Theme)
+			if text == "" {
+				if g.Strict {
+					g.Unknown = append(g.Unknown, c)
+				}
+				continue
 			}
+			rules = append(rules, generatedRule{key: key, text: text})
 		}
 	}
 
@@ -129,39 +310,396 @@ func (g *TailwindGenerator) Generate(classes map[string]bool) string {
 		return ""
 	}
 
-	return strings.Join(rules, "\n") + "\n"
+	sort.Slice(rules, func(i, j int) bool {
+		if rules[i].key != rules[j].key {
+			return rules[i].key < rules[j].key
+		}
+		return rules[i].text < rules[j].text
+	})
+
+	var b strings.Builder
+	for _, r := range rules {
+		b.WriteString(r.text)
+		b.WriteByte('\n')
+	}
+	return b.String()
 }
 
-// classToCSS converts a single Tailwind class to its CSS declaration.
-func classToCSS(cls string, theme TailwindTheme) string {
-	variant := ""
-	baseCls := cls
-
-	if idx := strings.LastIndex(cls, ":"); idx > 0 {
-		variant = cls[:idx]
-		baseCls = cls[idx+1:]
+// classToRule converts a single Tailwind class to its CSS rule text plus a
+// deterministic sort key. An empty text means "unrecognized".
+func classToRule(cls string, theme TailwindTheme) (text, key string) {
+	important := strings.Contains(cls, "!")
+	variantTokens, base := parseVariants(cls)
+	base = strings.TrimPrefix(base, "!")
+	if base == "" {
+		return "", ""
 	}
 
-	css := generateCSS(baseCls, theme)
-	if css == "" {
+	css := generateCSS(base, theme)
+	if css == "" && strings.HasPrefix(base, "-") {
+		// Negative utility: generate the positive form, then negate numeric values.
+		css = negateCSS(strings.TrimPrefix(base, "-"), theme)
+	}
+	if css == "" || !validDeclarationBlock(css) {
+		return "", ""
+	}
+	if important {
+		css = addImportant(css)
+	}
+
+	// Resolve every variant; any unknown variant means we cannot faithfully
+	// represent the class, so skip it rather than emit it unconditionally.
+	var variants []variant
+	for _, vt := range variantTokens {
+		v, ok := resolveVariant(vt, theme)
+		if !ok {
+			return "", ""
+		}
+		variants = append(variants, v)
+	}
+
+	sel, ats := applyVariants(EscapeClass(cls), variants)
+	// Utilities that target child/sibling elements append a descendant suffix.
+	if suffix := selectorSuffix(base); suffix != "" {
+		sel += " " + suffix
+	}
+	text = wrapAtRules(sel, strings.TrimSpace(css), ats)
+
+	// Sort key: at-rule conditions then variant tokens then selector, so
+	// media/variant blocks stay grouped and ordered deterministically.
+	key = atKey(ats) + "|" + strings.Join(variantTokens, ":") + "|" + EscapeClass(cls)
+	return text, key
+}
+
+// borderWidthCSS resolves a border width utility (sides and shorthands) so all
+// forms emit a consistent, visible border (width + solid style). It only matches
+// width forms: `border`, `border-2`, `border-t`, `border-t-2`, `border-t-[3px]`,
+// `border-x-2`, etc. — never colors (`border-red-500`) or styles.
+func borderWidthCSS(cls string) string {
+	width := func(v string) string {
+		if v == "" {
+			return "1px"
+		}
+		if strings.HasPrefix(v, "[") && strings.HasSuffix(v, "]") {
+			return v[1 : len(v)-1]
+		}
+		return v + "px"
+	}
+	isWidthValue := func(v string) bool {
+		if v == "" {
+			return true
+		}
+		if strings.HasPrefix(v, "[") && strings.HasSuffix(v, "]") {
+			return true
+		}
+		for _, r := range v {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+		return true
+	}
+	sideProps := map[string]string{
+		"t": "border-top-width", "r": "border-right-width",
+		"b": "border-bottom-width", "l": "border-left-width",
+		"s": "border-inline-start-width", "e": "border-inline-end-width",
+	}
+	emit := func(prop, w string) string {
+		if w == "0" || w == "0px" {
+			return prop + ": 0;"
+		}
+		return prop + ": " + w + "; border-style: solid;"
+	}
+
+	if cls == "border" {
+		return "border-width: 1px; border-style: solid;"
+	}
+	rest, ok := strings.CutPrefix(cls, "border-")
+	if !ok {
 		return ""
 	}
 
-	if variant != "" {
-		pseudo := variantToPseudo(variant)
-		if pseudo != "" {
-			return fmt.Sprintf(".%s{%s}", escapeSelector(cls), css)
+	// Axis shorthand: x / y, optionally `-<width>`.
+	for _, ax := range []string{"x", "y"} {
+		if rest == ax {
+			return emit2Axis(ax, "1px")
 		}
-		bp := variantToBreakpoint(variant)
-		if bp != "" {
-			return fmt.Sprintf("@media (min-width: %s) { .%s{%s} }", bp, escapeSelector(cls), strings.TrimSpace(css))
-		}
-		if variant == "dark" {
-			return fmt.Sprintf("@media (prefers-color-scheme: dark) { .%s{%s} }", escapeSelector(cls), strings.TrimSpace(css))
+		if after, ok := strings.CutPrefix(rest, ax+"-"); ok {
+			if isWidthValue(after) {
+				return emit2Axis(ax, width(after))
+			}
+			return ""
 		}
 	}
 
-	return fmt.Sprintf(".%s {%s}", escapeSelector(cls), css)
+	// Single side: `t`, `r`, `b`, `l`, `s`, `e`, optionally `-<width>`.
+	if len(rest) >= 1 {
+		if prop, ok := sideProps[rest[:1]]; ok {
+			tail := rest[1:]
+			if tail == "" {
+				return emit(prop, "1px")
+			}
+			if after, ok := strings.CutPrefix(tail, "-"); ok && isWidthValue(after) {
+				return emit(prop, width(after))
+			}
+			return ""
+		}
+	}
+
+	// Bare numeric / arbitrary width on all sides: `border-2`, `border-[3px]`.
+	if isWidthValue(rest) {
+		w := width(rest)
+		if w == "0" || w == "0px" {
+			return "border-width: 0;"
+		}
+		return "border-width: " + w + "; border-style: solid;"
+	}
+	return ""
+}
+
+// emit2Axis emits the left/right or top/bottom width pair.
+func emit2Axis(axis, w string) string {
+	if axis == "x" {
+		return "border-left-width: " + w + "; border-right-width: " + w + "; border-style: solid;"
+	}
+	return "border-top-width: " + w + "; border-bottom-width: " + w + "; border-style: solid;"
+}
+
+// validDeclarationBlock reports whether every declaration in a `prop: value;`
+// string has a plausible value. This is a safety net: a resolver that fails to
+// recognize an arbitrary key returns it verbatim (e.g. `margin: project`), which
+// would emit invalid CSS. Such declarations are rejected instead.
+func validDeclarationBlock(css string) bool {
+	for _, decl := range strings.Split(css, ";") {
+		decl = strings.TrimSpace(decl)
+		if decl == "" {
+			continue
+		}
+		prop, val, ok := strings.Cut(decl, ":")
+		if !ok || strings.TrimSpace(prop) == "" {
+			return false
+		}
+		val = strings.TrimSpace(val)
+		if val == "" {
+			return false
+		}
+		if !validCSSValue(val) {
+			return false
+		}
+	}
+	return true
+}
+
+// validCSSValue rejects bare identifier values that are not valid keywords, and
+// values containing characters that cannot appear in a CSS value.
+func validCSSValue(val string) bool {
+	// A value must not contain selectors/braces/raw quotes.
+	if strings.ContainsAny(val, "{}<>\"") {
+		return false
+	}
+	// A single bare word (no digits, units, %, functions, or punctuation) is
+	// only valid for a known keyword set.
+	bare := true
+	for _, r := range val {
+		if (r >= '0' && r <= '9') || r == '#' || r == '(' || r == '%' || r == '.' ||
+			r == ',' || r == '/' || r == '-' || r == ' ' {
+			if r == '-' {
+				continue // keywords may contain hyphens
+			}
+			bare = false
+			break
+		}
+	}
+	if bare {
+		switch val {
+		case "auto", "none", "inherit", "initial", "unset", "revert", "transparent",
+			"currentColor", "currentcolor", "solid", "dashed", "dotted", "double",
+			"hidden", "visible", "collapse", "separate", "normal", "nowrap",
+			"wrap", "flex", "grid", "block", "inline", "contents", "static",
+			"relative", "absolute", "fixed", "sticky", "pointer", "default",
+			"space-between", "space-around", "space-evenly", "baseline", "stretch",
+			"center", "left", "right", "top", "bottom", "middle", "start", "end",
+			"uppercase", "lowercase", "capitalize", "underline", "line-through",
+			"italic", "oblique", "smooth", "both", "forwards", "backwards",
+			"infinite", "linear", "ease", "ease-in", "ease-out", "ease-in-out",
+			"min-content", "max-content", "fit-content", "border-box", "content-box",
+			"row", "column", "row-reverse", "column-reverse", "dense", "cover",
+			"contain", "repeat", "no-repeat", "scroll", "local", "grab", "grabbing",
+			"not-allowed", "wait", "text", "move", "help", "crosshair", "ellipsis",
+			"disc", "decimal", "inside", "outside", "pre", "pre-line", "pre-wrap",
+			"break-word", "break-all", "break-normal", "keep-all", "clip":
+			return true
+		}
+		return false
+	}
+	return true
+}
+
+// negateCSS generates the positive form of a utility and negates the numeric
+// values in its declarations (for `-mt-4`, `-translate-x-1/2`, `-top-2`, …).
+func negateCSS(positive string, theme TailwindTheme) string {
+	css := generateCSS(positive, theme)
+	if css == "" {
+		return ""
+	}
+	// Negate the first length/number token after each `:`.
+	var parts []string
+	for _, decl := range strings.Split(css, ";") {
+		decl = strings.TrimSpace(decl)
+		if decl == "" {
+			continue
+		}
+		prop, val, ok := strings.Cut(decl, ":")
+		if !ok {
+			parts = append(parts, decl)
+			continue
+		}
+		val = strings.TrimSpace(val)
+		if isLengthLike(val) {
+			val = negateValue(val)
+		}
+		parts = append(parts, strings.TrimSpace(prop)+": "+val)
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, "; ") + ";"
+}
+
+// isLengthLike reports whether a value is a signed+units length or number that
+// can be negated (not a color, keyword, or function like calc()).
+func isLengthLike(v string) bool {
+	if v == "" {
+		return false
+	}
+	if strings.ContainsAny(v, "()#,\"' ") {
+		return false
+	}
+	for _, bad := range []string{"auto", "none", "inherit", "currentcolor", "transparent", "normal"} {
+		if strings.EqualFold(v, bad) {
+			return false
+		}
+	}
+	// Must start with a digit, dot, or minus and contain at least one digit.
+	hasDigit := false
+	for _, r := range v {
+		if r >= '0' && r <= '9' {
+			hasDigit = true
+			break
+		}
+	}
+	return hasDigit && (v[0] == '-' || v[0] == '.' || (v[0] >= '0' && v[0] <= '9'))
+}
+
+// translateValue resolves a translate-* value: fractions map to percentages and
+// everything else through the spacing scale.
+func translateValue(key string, theme TailwindTheme) string {
+	if pct, ok := fractionPercent(key); ok {
+		return pct
+	}
+	if strings.HasPrefix(key, "[") && strings.HasSuffix(key, "]") {
+		return key[1 : len(key)-1]
+	}
+	return spacingValue(key, theme)
+}
+
+// fractionPercent converts an "a/b" fraction key to a percentage string.
+func fractionPercent(key string) (string, bool) {
+	i := strings.IndexByte(key, '/')
+	if i <= 0 {
+		return "", false
+	}
+	num, err1 := strconv.ParseFloat(key[:i], 64)
+	den, err2 := strconv.ParseFloat(key[i+1:], 64)
+	if err1 != nil || err2 != nil || den == 0 {
+		return "", false
+	}
+	pct := num / den * 100
+	return strconv.FormatFloat(pct, 'f', -1, 64) + "%", true
+}
+
+// transformCompose is the shared transform value built from the --tw-* variables
+// so multiple transform utilities compose instead of clobbering each other.
+const transformCompose = "translate(var(--tw-translate-x,0),var(--tw-translate-y,0)) rotate(var(--tw-rotate,0)) skewX(var(--tw-skew-x,0)) skewY(var(--tw-skew-y,0)) scaleX(var(--tw-scale-x,1)) scaleY(var(--tw-scale-y,1))"
+
+// scalePercent converts a Tailwind scale key to a unitless scale factor:
+// "95" → "0.95", "100" → "1", "110" → "1.1".
+func scalePercent(key string) string {
+	if strings.HasPrefix(key, "[") && strings.HasSuffix(key, "]") {
+		return key[1 : len(key)-1]
+	}
+	// Numeric scale keys are percentages in Tailwind.
+	if f, err := strconv.ParseFloat(key, 64); err == nil {
+		return strconv.FormatFloat(f/100, 'f', -1, 64)
+	}
+	return key
+}
+
+// selectorSuffix returns the descendant/sibling selector a utility applies to,
+// or "" when the utility styles the element itself. Used for space-*, divide-*.
+func selectorSuffix(base string) string {
+	switch {
+	case strings.HasPrefix(base, "space-x-"), strings.HasPrefix(base, "space-y-"),
+		strings.HasPrefix(base, "divide-x-"), strings.HasPrefix(base, "divide-y-"),
+		base == "divide-x-reverse", base == "divide-y-reverse":
+		return "> :not([hidden]) ~ :not([hidden])"
+	}
+	return ""
+}
+
+// radiusValue resolves a border-radius scale key. "" is the `rounded` default.
+func radiusValue(key string, theme TailwindTheme) string {
+	if v, ok := theme.Radii[key]; ok {
+		return v
+	}
+	if strings.HasPrefix(key, "[") && strings.HasSuffix(key, "]") {
+		return key[1 : len(key)-1]
+	}
+	return ""
+}
+
+// maxWidthValue resolves a max-w-* key against the max-width scale, then the
+// sizing scale, then arbitrary values.
+func maxWidthValue(key string, theme TailwindTheme) string {
+	if v, ok := theme.MaxWidth[key]; ok {
+		return v
+	}
+	return sizingValue(key, theme)
+}
+
+// minWidthValue resolves a min-w-* key against the min-width scale.
+func minWidthValue(key string, theme TailwindTheme) string {
+	if v, ok := theme.MinWidth[key]; ok {
+		return v
+	}
+	return sizingValue(key, theme)
+}
+
+// atKey builds a deterministic ordering key for a rule's at-rules.
+func atKey(ats []variant) string {
+	var b strings.Builder
+	for _, a := range ats {
+		b.WriteString(a.kind)
+		b.WriteByte(':')
+		b.WriteString(a.at)
+		b.WriteByte(';')
+	}
+	return b.String()
+}
+
+// addImportant appends !important to every declaration in a CSS declaration
+// block (the `!` prefix form).
+func addImportant(css string) string {
+	parts := strings.Split(css, ";")
+	var out []string
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p == "" {
+			continue
+		}
+		out = append(out, p+" !important")
+	}
+	return strings.Join(out, "; ") + ";"
 }
 
 func generateCSS(cls string, theme TailwindTheme) string {
@@ -425,18 +963,20 @@ func generateCSS(cls string, theme TailwindTheme) string {
 		return "flex-shrink: 0;"
 	}
 
-	// Space between
-	if match := regexp.MustCompile(`^space-x-([a-zA-Z0-9.]+)$`).FindStringSubmatch(cls); match != nil {
-		return fmt.Sprintf("margin-left: %s;", spacingValue(match[1], theme))
-	}
-	if match := regexp.MustCompile(`^space-y-([a-zA-Z0-9.]+)$`).FindStringSubmatch(cls); match != nil {
-		return fmt.Sprintf("margin-top: %s;", spacingValue(match[1], theme))
-	}
+	// Space between: sibling combinator, not the container itself.
 	if cls == "space-x-reverse" {
-		return "direction: rtl;"
+		return "--tw-space-x-reverse: 1;"
 	}
 	if cls == "space-y-reverse" {
-		return "flex-direction: column-reverse;"
+		return "--tw-space-y-reverse: 1;"
+	}
+	if match := spaceXRe.FindStringSubmatch(cls); match != nil {
+		v := spacingValue(match[1], theme)
+		return "margin-right: calc(" + v + " * var(--tw-space-x-reverse,0)); margin-left: calc(" + v + " * calc(1 - var(--tw-space-x-reverse,0)));"
+	}
+	if match := spaceYRe.FindStringSubmatch(cls); match != nil {
+		v := spacingValue(match[1], theme)
+		return "margin-top: calc(" + v + " * calc(1 - var(--tw-space-y-reverse,0))); margin-bottom: calc(" + v + " * var(--tw-space-y-reverse,0));"
 	}
 
 	// Gap
@@ -450,48 +990,60 @@ func generateCSS(cls string, theme TailwindTheme) string {
 		return fmt.Sprintf("row-gap: %s;", spacingValue(match[1], theme))
 	}
 
-	// Grid
-	if cls == "grid-cols-1" {
-		return "grid-template-columns: repeat(1, minmax(0, 1fr));"
+	// Grid columns/rows and spans (1..12 plus full).
+	if match := gridColsRe.FindStringSubmatch(cls); match != nil {
+		return "grid-template-columns: repeat(" + match[1] + ", minmax(0, 1fr));"
 	}
-	if cls == "grid-cols-2" {
-		return "grid-template-columns: repeat(2, minmax(0, 1fr));"
+	if match := regexp.MustCompile(`^grid-rows-(\d+)$`).FindStringSubmatch(cls); match != nil {
+		return "grid-template-rows: repeat(" + match[1] + ", minmax(0, 1fr));"
 	}
-	if cls == "grid-cols-3" {
-		return "grid-template-columns: repeat(3, minmax(0, 1fr));"
-	}
-	if cls == "grid-cols-4" {
-		return "grid-template-columns: repeat(4, minmax(0, 1fr));"
-	}
-	if cls == "grid-cols-5" {
-		return "grid-template-columns: repeat(5, minmax(0, 1fr));"
-	}
-	if cls == "grid-cols-6" {
-		return "grid-template-columns: repeat(6, minmax(0, 1fr));"
-	}
-	if cls == "grid-cols-12" {
-		return "grid-template-columns: repeat(12, minmax(0, 1fr));"
-	}
-	if cls == "col-span-1" {
-		return "grid-column: span 1 / span 1;"
-	}
-	if cls == "col-span-2" {
-		return "grid-column: span 2 / span 2;"
-	}
-	if cls == "col-span-3" {
-		return "grid-column: span 3 / span 3;"
+	if match := colSpanRe.FindStringSubmatch(cls); match != nil {
+		return "grid-column: span " + match[1] + " / span " + match[1] + ";"
 	}
 	if cls == "col-span-full" {
 		return "grid-column: 1 / -1;"
 	}
-	if match := regexp.MustCompile(`^grid-rows-(\d+)$`).FindStringSubmatch(cls); match != nil {
-		return fmt.Sprintf("grid-template-rows: repeat(%s, minmax(0, 1fr));", match[1])
-	}
 	if match := regexp.MustCompile(`^row-span-(\d+)$`).FindStringSubmatch(cls); match != nil {
-		return fmt.Sprintf("grid-row: span %s / span %s;", match[1], match[1])
+		return "grid-row: span " + match[1] + " / span " + match[1] + ";"
 	}
 	if cls == "row-span-full" {
 		return "grid-row: 1 / -1;"
+	}
+	if match := regexp.MustCompile(`^col-start-(\d+)$`).FindStringSubmatch(cls); match != nil {
+		return "grid-column-start: " + match[1] + ";"
+	}
+	if match := regexp.MustCompile(`^col-end-(\d+)$`).FindStringSubmatch(cls); match != nil {
+		return "grid-column-end: " + match[1] + ";"
+	}
+	if match := regexp.MustCompile(`^row-start-(\d+)$`).FindStringSubmatch(cls); match != nil {
+		return "grid-row-start: " + match[1] + ";"
+	}
+	if match := regexp.MustCompile(`^row-end-(\d+)$`).FindStringSubmatch(cls); match != nil {
+		return "grid-row-end: " + match[1] + ";"
+	}
+	if cls == "grid-flow-row" {
+		return "grid-auto-flow: row;"
+	}
+	if cls == "grid-flow-col" {
+		return "grid-auto-flow: column;"
+	}
+	if cls == "grid-flow-dense" {
+		return "grid-auto-flow: dense;"
+	}
+	if cls == "grid-flow-row-dense" {
+		return "grid-auto-flow: row dense;"
+	}
+	if cls == "grid-flow-col-dense" {
+		return "grid-auto-flow: column dense;"
+	}
+	if match := regexp.MustCompile(`^auto-cols-(auto|min|max|fr)$`).FindStringSubmatch(cls); match != nil {
+		return "grid-auto-columns: " + match[1] + ";"
+	}
+	if match := regexp.MustCompile(`^auto-rows-(auto|min|max|fr)$`).FindStringSubmatch(cls); match != nil {
+		return "grid-auto-rows: " + match[1] + ";"
+	}
+	if match := regexp.MustCompile(`^basis-(.+)$`).FindStringSubmatch(cls); match != nil {
+		return "flex-basis: " + sizingValue(match[1], theme) + ";"
 	}
 
 	// Padding
@@ -541,88 +1093,38 @@ func generateCSS(cls string, theme TailwindTheme) string {
 	}
 
 	// Width
-	if match := regexp.MustCompile(`^w-([a-zA-Z0-9./]+)$`).FindStringSubmatch(cls); match != nil {
+	if match := regexp.MustCompile(`^w-(.+)$`).FindStringSubmatch(cls); match != nil {
 		return fmt.Sprintf("width: %s;", sizingValue(match[1], theme))
 	}
-	if match := regexp.MustCompile(`^min-w-([a-zA-Z0-9./]+)$`).FindStringSubmatch(cls); match != nil {
-		return fmt.Sprintf("min-width: %s;", sizingValue(match[1], theme))
+	if match := minWRe.FindStringSubmatch(cls); match != nil {
+		return fmt.Sprintf("min-width: %s;", minWidthValue(match[1], theme))
 	}
-	if match := regexp.MustCompile(`^max-w-([a-zA-Z0-9./]+)$`).FindStringSubmatch(cls); match != nil {
-		return fmt.Sprintf("max-width: %s;", sizingValue(match[1], theme))
+	if match := maxWRe.FindStringSubmatch(cls); match != nil {
+		return fmt.Sprintf("max-width: %s;", maxWidthValue(match[1], theme))
 	}
 
 	// Height
-	if match := regexp.MustCompile(`^h-([a-zA-Z0-9./]+)$`).FindStringSubmatch(cls); match != nil {
+	if match := regexp.MustCompile(`^h-(.+)$`).FindStringSubmatch(cls); match != nil {
 		return fmt.Sprintf("height: %s;", sizingValue(match[1], theme))
 	}
-	if match := regexp.MustCompile(`^min-h-([a-zA-Z0-9./]+)$`).FindStringSubmatch(cls); match != nil {
+	if match := minHRe.FindStringSubmatch(cls); match != nil {
 		return fmt.Sprintf("min-height: %s;", sizingValue(match[1], theme))
 	}
-	if cls == "h-screen" {
-		return "height: 100vh;"
-	}
-	if cls == "h-full" {
-		return "height: 100%;"
-	}
-	if cls == "w-screen" {
-		return "width: 100vw;"
-	}
-	if cls == "w-full" {
-		return "width: 100%;"
-	}
-	if cls == "w-auto" {
-		return "width: auto;"
-	}
-	if cls == "w-max" {
-		return "width: max-content;"
-	}
-	if cls == "w-min" {
-		return "width: min-content;"
-	}
-
-	// Min/max height
-	if cls == "min-h-screen" {
-		return "min-height: 100vh;"
-	}
-	if cls == "min-h-full" {
-		return "min-height: 100%;"
-	}
-	if cls == "max-h-screen" {
-		return "max-height: 100vh;"
-	}
-	if cls == "max-h-full" {
-		return "max-height: 100%;"
-	}
-	if match := regexp.MustCompile(`^min-h-([a-zA-Z0-9./]+)$`).FindStringSubmatch(cls); match != nil {
-		return fmt.Sprintf("min-height: %s;", sizingValue(match[1], theme))
-	}
-	if match := regexp.MustCompile(`^max-h-([a-zA-Z0-9./]+)$`).FindStringSubmatch(cls); match != nil {
+	if match := maxHRe.FindStringSubmatch(cls); match != nil {
 		return fmt.Sprintf("max-height: %s;", sizingValue(match[1], theme))
 	}
 
-	// Text color with shade: text-gray-600
-	if match := regexp.MustCompile(`^text-([a-z]+)-(\d+)$`).FindStringSubmatch(cls); match != nil {
-		color := match[1]
-		shade := match[2]
-		if hex, ok := theme.Colors[color]; ok {
-			if shadeVal, ok := hex[shade]; ok {
-				return fmt.Sprintf("color: %s;", shadeVal)
-			}
-		}
+	// Size shorthand: size-4 → width + height.
+	if match := regexp.MustCompile(`^size-(.+)$`).FindStringSubmatch(cls); match != nil {
+		v := sizingValue(match[1], theme)
+		return fmt.Sprintf("width: %s; height: %s;", v, v)
 	}
-	// Named text color: text-white, text-black, text-current, text-transparent, text-inherit
-	if match := regexp.MustCompile(`^text-([a-z]+)$`).FindStringSubmatch(cls); match != nil {
-		name := match[1]
-		// Check BgColors for named colors (white, black, transparent, current)
-		if val, ok := theme.BgColors[name]; ok {
-			return fmt.Sprintf("color: %s;", val)
-		}
-		// Check TextSizes for size names (xs, sm, base, lg, xl, etc.)
-		if val, ok := theme.TextSizes[name]; ok {
-			return val
-		}
-		if name == "inherit" {
-			return "color: inherit;"
+
+	// Text color with shade (and optional /alpha): text-gray-600, text-white/70.
+	if match := regexp.MustCompile(`^text-(.+)$`).FindStringSubmatch(cls); match != nil {
+		colorKey, alpha := splitColorModifier(match[1])
+		if v, ok := colorValue(colorKey, alpha, theme); ok {
+			return "color: " + v + ";"
 		}
 	}
 
@@ -703,24 +1205,17 @@ func generateCSS(cls string, theme TailwindTheme) string {
 		return "font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, \"Liberation Mono\", \"Courier New\", monospace;"
 	}
 
-	// Line height
-	if match := regexp.MustCompile(`^leading-([a-zA-Z0-9.]+)$`).FindStringSubmatch(cls); match != nil {
-		val := match[1]
-		switch val {
-		case "none":
-			return "line-height: 1;"
-		case "tight":
-			return "line-height: 1.25;"
-		case "snug":
-			return "line-height: 1.375;"
-		case "normal":
-			return "line-height: 1.5;"
-		case "relaxed":
-			return "line-height: 1.625;"
-		case "loose":
-			return "line-height: 2;"
-		default:
-			return fmt.Sprintf("line-height: %srem;", val)
+	// Line height: numeric maps through the spacing scale (leading-6 → 1.5rem).
+	if match := leadingRe.FindStringSubmatch(cls); match != nil {
+		key := match[1]
+		if v, ok := theme.LineHeight[key]; ok {
+			return "line-height: " + v + ";"
+		}
+		if v, ok := theme.Spacing[key]; ok {
+			return "line-height: " + v + ";"
+		}
+		if strings.HasPrefix(key, "[") && strings.HasSuffix(key, "]") {
+			return "line-height: " + key[1:len(key)-1] + ";"
 		}
 	}
 
@@ -830,89 +1325,26 @@ func generateCSS(cls string, theme TailwindTheme) string {
 		return "background-repeat: space;"
 	}
 
-	// Background color
-	if match := regexp.MustCompile(`^bg-([a-z]+)-(\d+)$`).FindStringSubmatch(cls); match != nil {
-		color := match[1]
-		shade := match[2]
-		if hex, ok := theme.Colors[color]; ok {
-			if shadeVal, ok := hex[shade]; ok {
-				return fmt.Sprintf("background-color: %s;", shadeVal)
-			}
-		}
-	}
-	if match := regexp.MustCompile(`^bg-([a-z]+)$`).FindStringSubmatch(cls); match != nil {
-		if val, ok := theme.BgColors[match[1]]; ok {
-			return fmt.Sprintf("background-color: %s;", val)
+	// Background color: bg-blue-500, bg-blue-500/50, bg-white.
+	if match := regexp.MustCompile(`^bg-(.+)$`).FindStringSubmatch(cls); match != nil {
+		colorKey, alpha := splitColorModifier(match[1])
+		if v, ok := colorValue(colorKey, alpha, theme); ok {
+			return "background-color: " + v + ";"
 		}
 	}
 
-	// Border color with shade
-	if match := regexp.MustCompile(`^border-([a-z]+)-(\d+)$`).FindStringSubmatch(cls); match != nil {
-		color := match[1]
-		shade := match[2]
-		if hex, ok := theme.Colors[color]; ok {
-			if shadeVal, ok := hex[shade]; ok {
-				return fmt.Sprintf("border-color: %s;", shadeVal)
-			}
+	// Border family, resolved with explicit precedence: width (sides/shorthand)
+	// then color then style. Every width emits border-style so a visible border
+	// results even without Preflight (matches Tailwind's `border` default).
+	if css := borderWidthCSS(cls); css != "" {
+		return css
+	}
+	if match := regexp.MustCompile(`^border-(.+)$`).FindStringSubmatch(cls); match != nil {
+		colorKey, alpha := splitColorModifier(match[1])
+		if v, ok := colorValue(colorKey, alpha, theme); ok {
+			return "border-color: " + v + ";"
 		}
 	}
-	// Named border color
-	if match := regexp.MustCompile(`^border-([a-z]+)$`).FindStringSubmatch(cls); match != nil {
-		name := match[1]
-		if val, ok := theme.BgColors[name]; ok {
-			return fmt.Sprintf("border-color: %s;", val)
-		}
-	}
-
-	// Border width
-	if match := regexp.MustCompile(`^border-(\d+)$`).FindStringSubmatch(cls); match != nil {
-		return fmt.Sprintf("border-width: %spx;", match[1])
-	}
-	if cls == "border" {
-		return "border-width: 1px; border-style: solid;"
-	}
-	if cls == "border-0" {
-		return "border-width: 0;"
-	}
-	if cls == "border-t" {
-		return "border-top-width: 1px;"
-	}
-	if cls == "border-b" {
-		return "border-bottom-width: 1px;"
-	}
-	if cls == "border-l" {
-		return "border-left-width: 1px;"
-	}
-	if cls == "border-r" {
-		return "border-right-width: 1px;"
-	}
-	if cls == "border-t-0" {
-		return "border-top-width: 0;"
-	}
-	if cls == "border-b-0" {
-		return "border-bottom-width: 0;"
-	}
-	if cls == "border-l-0" {
-		return "border-left-width: 0;"
-	}
-	if cls == "border-r-0" {
-		return "border-right-width: 0;"
-	}
-
-	// Border x/y shorthand
-	if cls == "border-x" {
-		return "border-left-width: 1px; border-right-width: 1px;"
-	}
-	if cls == "border-y" {
-		return "border-top-width: 1px; border-bottom-width: 1px;"
-	}
-	if cls == "border-x-0" {
-		return "border-left-width: 0; border-right-width: 0;"
-	}
-	if cls == "border-y-0" {
-		return "border-top-width: 0; border-bottom-width: 0;"
-	}
-
 	// Border style
 	if cls == "border-solid" {
 		return "border-style: solid;"
@@ -941,44 +1373,48 @@ func generateCSS(cls string, theme TailwindTheme) string {
 		return fmt.Sprintf("outline-width: %spx;", match[1])
 	}
 
-	// Border radius
-	if match := regexp.MustCompile(`^rounded-([a-zA-Z0-9]+)$`).FindStringSubmatch(cls); match != nil {
-		if val, ok := theme.Radii[match[1]]; ok {
-			return fmt.Sprintf("border-radius: %s;", val)
-		}
-	}
+	// Border radius (base). `rounded` (no suffix) → theme default ("").
 	if cls == "rounded" {
-		return "border-radius: 0.25rem;"
+		return "border-radius: " + radiusValue("", theme) + ";"
 	}
-	if cls == "rounded-full" {
-		return "border-radius: 9999px;"
-	}
-	if cls == "rounded-none" {
-		return "border-radius: 0;"
+	if match := roundedRe.FindStringSubmatch(cls); match != nil {
+		v := radiusValue(match[1], theme)
+		if v != "" {
+			return "border-radius: " + v + ";"
+		}
 	}
 
-	// Rounded sides
-	if match := regexp.MustCompile(`^rounded-(tl|tr|bl|br)-([a-zA-Z0-9]+)$`).FindStringSubmatch(cls); match != nil {
-		corner := match[1]
-		val := spacingValue(match[2], theme)
-		props := map[string]string{
-			"tl": "border-top-left-radius",
-			"tr": "border-top-right-radius",
-			"bl": "border-bottom-left-radius",
-			"br": "border-bottom-right-radius",
+	// Rounded sides/corners: rounded-t-*, rounded-tl-*, and logical s/e.
+	if match := roundedSideRe.FindStringSubmatch(cls); match != nil {
+		corner, val := match[1], match[2]
+		v := radiusValue(val, theme)
+		if v == "" {
+			return ""
 		}
-		return fmt.Sprintf("%s: %s;", props[corner], val)
+		props := map[string]string{
+			"t":  "border-top-left-radius: " + v + "; border-top-right-radius: " + v + ";",
+			"r":  "border-top-right-radius: " + v + "; border-bottom-right-radius: " + v + ";",
+			"b":  "border-bottom-right-radius: " + v + "; border-bottom-left-radius: " + v + ";",
+			"l":  "border-top-left-radius: " + v + "; border-bottom-left-radius: " + v + ";",
+			"tl": "border-top-left-radius: " + v + ";",
+			"tr": "border-top-right-radius: " + v + ";",
+			"bl": "border-bottom-left-radius: " + v + ";",
+			"br": "border-bottom-right-radius: " + v + ";",
+			"s":  "border-start-start-radius: " + v + "; border-end-start-radius: " + v + ";",
+			"e":  "border-start-end-radius: " + v + "; border-end-end-radius: " + v + ";",
+			"ss": "border-start-start-radius: " + v + ";",
+			"se": "border-start-end-radius: " + v + ";",
+			"es": "border-end-start-radius: " + v + ";",
+			"ee": "border-end-end-radius: " + v + ";",
+		}
+		return props[corner]
 	}
 
 	// Opacity
-	if match := regexp.MustCompile(`^opacity-(\d+)$`).FindStringSubmatch(cls); match != nil {
-		return fmt.Sprintf("opacity: 0.%s;", match[1])
-	}
-	if cls == "opacity-0" {
-		return "opacity: 0;"
-	}
-	if cls == "opacity-100" {
-		return "opacity: 1;"
+	if match := opacityRe.FindStringSubmatch(cls); match != nil {
+		if v, ok := theme.Opacity[match[1]]; ok {
+			return "opacity: " + v + ";"
+		}
 	}
 
 	// Shadow
@@ -1210,27 +1646,97 @@ func generateCSS(cls string, theme TailwindTheme) string {
 		return "transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);"
 	}
 
-	// Transform
-	if cls == "scale-95" {
-		return "transform: scale(0.95);"
+	// Transform: composed via CSS variables so utilities stack instead of
+	// overwriting each other (translate/rotate/skew/scale).
+	if cls == "transform" || cls == "transform-gpu" || cls == "transform-none" {
+		return "transform: " + transformCompose + ";"
 	}
-	if cls == "scale-100" {
-		return "transform: scale(1);"
+	if match := translateRe.FindStringSubmatch(cls); match != nil {
+		axis, val := match[1], match[2]
+		return "--tw-translate-" + axis + ": " + translateValue(val, theme) + "; transform: " + transformCompose + ";"
 	}
-	if cls == "scale-105" {
-		return "transform: scale(1.05);"
+	if match := rotateRe.FindStringSubmatch(cls); match != nil {
+		return "--tw-rotate: " + match[1] + "deg; transform: " + transformCompose + ";"
 	}
-	if cls == "scale-110" {
-		return "transform: scale(1.10);"
+	if match := skewRe.FindStringSubmatch(cls); match != nil {
+		axis, val := match[1], match[2]
+		return "--tw-skew-" + axis + ": " + val + "deg; transform: " + transformCompose + ";"
 	}
-	if cls == "rotate-45" {
-		return "transform: rotate(45deg);"
+	if match := scaleRe.FindStringSubmatch(cls); match != nil {
+		pct := match[1]
+		if strings.HasPrefix(pct, "[") {
+			pct = strings.Trim(pct, "[]")
+		} else {
+			pct = scalePercent(pct)
+		}
+		return "--tw-scale-x: " + pct + "; --tw-scale-y: " + pct + "; transform: " + transformCompose + ";"
 	}
-	if cls == "rotate-90" {
-		return "transform: rotate(90deg);"
+	if match := originRe.FindStringSubmatch(cls); match != nil {
+		return "transform-origin: " + match[1] + ";"
 	}
-	if cls == "rotate-180" {
-		return "transform: rotate(180deg);"
+
+	// Ring (box-shadow ring) — width, color, offset, inset.
+	if cls == "ring" {
+		return "--tw-ring-offset-shadow: var(--tw-ring-inset, ) 0 0 0 var(--tw-ring-offset-width,0px) var(--tw-ring-offset-color,#fff); --tw-ring-shadow: var(--tw-ring-inset, ) 0 0 0 calc(3px + var(--tw-ring-offset-width,0px)) var(--tw-ring-color,rgb(59 130 246 / 0.5)); box-shadow: var(--tw-ring-offset-shadow), var(--tw-ring-shadow), var(--tw-shadow, 0 0 #0000);"
+	}
+	if match := regexp.MustCompile(`^ring-(\d+)$`).FindStringSubmatch(cls); match != nil {
+		return "--tw-ring-shadow: var(--tw-ring-inset, ) 0 0 0 calc(" + match[1] + "px + var(--tw-ring-offset-width,0px)) var(--tw-ring-color,rgb(59 130 246 / 0.5)); box-shadow: var(--tw-ring-offset-shadow, 0 0 #0000), var(--tw-ring-shadow), var(--tw-shadow, 0 0 #0000);"
+	}
+	if cls == "ring-inset" {
+		return "--tw-ring-inset: inset;"
+	}
+	if match := regexp.MustCompile(`^ring-offset-(\d+)$`).FindStringSubmatch(cls); match != nil {
+		return "--tw-ring-offset-width: " + match[1] + "px;"
+	}
+	if match := regexp.MustCompile(`^ring-(.+)$`).FindStringSubmatch(cls); match != nil {
+		colorKey, alpha := splitColorModifier(match[1])
+		if v, ok := colorValue(colorKey, alpha, theme); ok {
+			return "--tw-ring-color: " + v + ";"
+		}
+	}
+
+	// Divide (border between children) via the sibling selector.
+	if match := regexp.MustCompile(`^divide-x-(\d+)$`).FindStringSubmatch(cls); match != nil {
+		return "border-left-width: " + match[1] + "px; border-style: solid;"
+	}
+	if match := regexp.MustCompile(`^divide-y-(\d+)$`).FindStringSubmatch(cls); match != nil {
+		return "border-top-width: " + match[1] + "px; border-style: solid;"
+	}
+	if match := regexp.MustCompile(`^divide-(.+)$`).FindStringSubmatch(cls); match != nil {
+		colorKey, alpha := splitColorModifier(match[1])
+		if v, ok := colorValue(colorKey, alpha, theme); ok {
+			return "border-color: " + v + ";"
+		}
+	}
+
+	// Content (pseudo-element text).
+	if cls == "content-none" {
+		return "content: none;"
+	}
+	if match := regexp.MustCompile(`^content-\[(.+)\]$`).FindStringSubmatch(cls); match != nil {
+		return "content: " + strings.ReplaceAll(match[1], "_", " ") + ";"
+	}
+
+	// Line clamp.
+	if match := regexp.MustCompile(`^line-clamp-(\d+)$`).FindStringSubmatch(cls); match != nil {
+		return "overflow: hidden; display: -webkit-box; -webkit-box-orient: vertical; -webkit-line-clamp: " + match[1] + ";"
+	}
+	if cls == "line-clamp-none" {
+		return "-webkit-line-clamp: unset;"
+	}
+
+	// Aspect ratio.
+	if cls == "aspect-auto" {
+		return "aspect-ratio: auto;"
+	}
+	if cls == "aspect-square" {
+		return "aspect-ratio: 1 / 1;"
+	}
+	if cls == "aspect-video" {
+		return "aspect-ratio: 16 / 9;"
+	}
+	if match := regexp.MustCompile(`^aspect-\[(.+)\]$`).FindStringSubmatch(cls); match != nil {
+		return "aspect-ratio: " + strings.ReplaceAll(match[1], "_", " ") + ";"
 	}
 
 	// Visibility
@@ -1636,66 +2142,4 @@ func arbitraryPropToCSS(prop, val string) string {
 		return "--tw-gradient-to: " + val + ";"
 	}
 	return ""
-}
-
-func variantToPseudo(variant string) string {
-	switch variant {
-	case "hover":
-		return "&:hover"
-	case "focus":
-		return "&:focus"
-	case "active":
-		return "&:active"
-	case "visited":
-		return "&:visited"
-	case "disabled":
-		return "&:disabled"
-	case "checked":
-		return "&:checked"
-	case "first":
-		return "&:first-child"
-	case "last":
-		return "&:last-child"
-	case "odd":
-		return "&:nth-child(odd)"
-	case "even":
-		return "&:nth-child(even)"
-	case "focus-within":
-		return "&:focus-within"
-	case "focus-visible":
-		return "&:focus-visible"
-	case "group-hover":
-		return ".group:hover &"
-	case "group-focus":
-		return ".group:focus &"
-	case "placeholder":
-		return "&::placeholder"
-	case "before":
-		return "&::before"
-	case "after":
-		return "&::after"
-	}
-	return ""
-}
-
-func variantToBreakpoint(variant string) string {
-	switch variant {
-	case "sm":
-		return "640px"
-	case "md":
-		return "768px"
-	case "lg":
-		return "1024px"
-	case "xl":
-		return "1280px"
-	case "2xl":
-		return "1536px"
-	case "3xl":
-		return "1920px"
-	}
-	return ""
-}
-
-func escapeSelector(s string) string {
-	return strings.ReplaceAll(s, ":", "\\:")
 }
