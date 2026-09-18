@@ -42,6 +42,7 @@ async function main() {
     console.log('  serve     Build and serve for preview');
     console.log('  init      Scaffold a new project (alias: create)');
     console.log('  version   Show version');
+    console.log('  mcp       Run the MCP (Model Context Protocol) for model interactions');
     process.exit(0);
   }
 
@@ -60,6 +61,7 @@ async function main() {
     case 'build':
     case 'dev':
     case 'serve':
+    case 'mcp':
       try {
         await execBinary(args);
       } catch (err: any) {
