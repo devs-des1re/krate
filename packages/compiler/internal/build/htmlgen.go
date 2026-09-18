@@ -18,7 +18,7 @@ func generateHTML(bodyHTML, headHTML, scriptHTML, styleHTML string, cssFiles []s
 
 	b.WriteString("<!DOCTYPE html>\n<html lang=\"en\">\n<head>\n")
 	b.WriteString("<meta charset=\"UTF-8\">\n")
-	b.WriteString("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0\">\n")
+	b.WriteString("<meta name=\"viewport\" content=\"width=device-width, initial-scale=1.0, viewport-fit=cover\">\n")
 
 	if headHTML != "" {
 		b.WriteString(headHTML)

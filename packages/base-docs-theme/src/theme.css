@@ -4,6 +4,8 @@
     --sidebar-width: 280px;
     --toc-width: 240px;
     --header-height: 56px;
+    --toc-bar-height: 0px;
+    --chrome-height: var(--header-height);
     --gap: 2rem;
     --radius: 8px;
     
@@ -98,6 +100,13 @@
     box-sizing: border-box;
 }
 
+html {
+    /* Anchored headings should not hide beneath the sticky header / mobile TOC
+       bar. --chrome-height tracks the full sticky chrome and is expanded by the
+       mobile media query when the TOC bar is present. */
+    scroll-padding-top: var(--chrome-height);
+}
+
 body {
     margin: 0;
     font-family: var(--font-sans);
@@ -107,6 +116,12 @@ body {
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
     transition: background-color 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+/* Lock background scrolling while the mobile drawer or TOC sheet is open. */
+body.krc-nav-open {
+    overflow: hidden;
+    overscroll-behavior: contain;
 }
 
 a {
@@ -125,6 +140,8 @@ a:hover {
     align-items: center;
     height: var(--header-height);
     padding: 0 1.5rem;
+    padding-left: max(1.5rem, env(safe-area-inset-left));
+    padding-right: max(1.5rem, env(safe-area-inset-right));
     background: var(--navbar-bg);
     backdrop-filter: blur(var(--blur-intensity));
     -webkit-backdrop-filter: blur(var(--blur-intensity));
@@ -228,6 +245,8 @@ a:hover {
     z-index: 95;
     display: flex;
     flex-direction: column;
+    padding-left: env(safe-area-inset-left);
+    padding-bottom: env(safe-area-inset-bottom);
     transition: transform 0.25s cubic-bezier(0.4, 0, 0.2, 1);
 }
 
@@ -399,14 +418,18 @@ a:hover {
     display: flex;
     margin-top: 0;
     min-height: calc(100vh - var(--header-height));
+    min-height: calc(100dvh - var(--header-height));
 }
 
 .docs-main {
     flex: 1;
     min-width: 0;
     padding: 2.5rem 2rem 4rem;
+    padding-bottom: max(4rem, env(safe-area-inset-bottom));
     max-width: 840px;
     margin: 0 auto;
+    /* Long unbreakable tokens (URLs, hashes) wrap instead of overflowing. */
+    overflow-wrap: break-word;
 }
 
 .breadcrumbs {
@@ -469,7 +492,15 @@ a:hover {
     color: var(--color-text-main);
 }
 
-.docs-content code {
+.docs-content p,
+.docs-content li,
+.docs-content a {
+    overflow-wrap: break-word;
+}
+
+/* Inline code chips only — never code inside a fenced block, so the Code
+   component and syntax-highlighted blocks keep their own styling. */
+.docs-content :not(pre) > code {
     background: var(--color-muted-bg);
     padding: 0.2rem 0.4rem;
     border-radius: 4px;
@@ -479,12 +510,56 @@ a:hover {
     border: 1px solid var(--color-border);
 }
 
-.docs-content pre code {
-    background: none;
-    color: inherit;
-    padding: 0;
-    font-size: inherit;
-    border: none;
+/* Plain markdown code blocks (no syntax highlighting). The Code component wraps
+   its chrome in `.krate-code-block` and highlighted blocks carry `.chroma`, so
+   both are excluded here. */
+.docs-content :not(.krate-code-block) > pre:not(.chroma) {
+    max-width: 100%;
+    overflow-x: auto;
+    margin: 1.5rem 0;
+    padding: 1rem 1.25rem;
+    border-radius: var(--radius);
+    background: var(--color-pre-bg);
+    color: var(--color-pre-fg);
+    border: 1px solid var(--color-border);
+    font-size: 0.8125rem;
+    line-height: 1.6;
+    -webkit-overflow-scrolling: touch;
+}
+
+/* Syntax-highlighted blocks keep chroma's own background/token colors, but
+   adopt the same compact scale and box as the plain blocks. */
+.docs-content :not(.krate-code-block) > pre.chroma {
+    max-width: 100%;
+    overflow-x: auto;
+    margin: 1.5rem 0;
+    padding: 1rem 1.25rem;
+    border-radius: var(--radius);
+    border: 1px solid var(--color-border);
+    font-size: 0.8125rem;
+    line-height: 1.6;
+    -webkit-overflow-scrolling: touch;
+}
+
+/* The Code component sets its code at 0.875rem; trim it a touch and re-assert
+   its chrome so bundle order can't reintroduce the old inflated size. */
+.docs-content .krate-code-block pre {
+    margin: 0;
+    padding: 16px;
+    border: 0;
+    border-radius: 0 0 8px 8px;
+    background: transparent;
+}
+
+.docs-content .krate-code-block code {
+    font-size: 0.8125rem;
+}
+
+/* Wide GFM tables scroll horizontally instead of overflowing the layout. */
+.table-wrap {
+    max-width: 100%;
+    overflow-x: auto;
+    -webkit-overflow-scrolling: touch;
 }
 
 .docs-content a {
@@ -798,7 +873,19 @@ a:hover {
 
 /* --- Media Queries (Clean, Fluid Responsive Layouts) --- */
 
-@media (max-width: 1279px) {
+/* Tablet / mobile: drawer sidebar, inline TOC sheet. */
+@media (max-width: 1023px) {
+    /* One custom property drives every sticky offset + scroll-padding below. */
+    :root {
+        --toc-bar-height: 48px;
+        --chrome-height: calc(var(--header-height) + var(--toc-bar-height));
+    }
+
+    /* No TOC for this page: don't reserve space for the (absent) bar. */
+    html:not(:has(.toc-mobile-toggle)) {
+        --toc-bar-height: 0px;
+    }
+
     .sidebar {
         transform: translateX(-100%);
         top: 0;
@@ -806,6 +893,7 @@ a:hover {
         width: min(85vw, 300px);
         background: var(--color-bg);
         box-shadow: 20px 0 40px rgba(0, 0, 0, 0.15);
+        padding-top: env(safe-area-inset-top);
     }
     
     .sidebar.open {
@@ -830,8 +918,10 @@ a:hover {
 
     .toc-mobile-toggle {
         width: 100%;
-        height: 48px;
+        height: var(--toc-bar-height);
         padding: 0 1.5rem;
+        padding-left: max(1.5rem, env(safe-area-inset-left));
+        padding-right: max(1.5rem, env(safe-area-inset-right));
         border: none;
         border-radius: 0;
         justify-content: space-between;
@@ -863,33 +953,43 @@ a:hover {
         max-width: 70vw;
     }
 
+    /* TOC becomes a top sheet anchored just below the sticky chrome. */
     .toc {
         display: block;
-        width: 100%;
+        position: fixed;
+        top: var(--chrome-height);
+        left: 0;
+        right: 0;
+        width: auto;
         padding: 0;
-        position: sticky;
-        top: calc(var(--header-height) + 48px);
         z-index: 96;
         background: var(--navbar-bg);
         backdrop-filter: blur(var(--blur-intensity));
+        -webkit-backdrop-filter: blur(var(--blur-intensity));
         border-bottom: 1px solid var(--color-border);
         box-shadow: 0 12px 24px rgba(0, 0, 0, 0.05);
-        order: -1;
+        overflow: hidden;
+        opacity: 0;
+        max-height: 0;
+        visibility: hidden;
+        transition: max-height 0.25s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.2s ease, visibility 0.25s;
+    }
+
+    .toc.open {
+        opacity: 1;
+        visibility: visible;
+        max-height: min(70vh, 30rem);
+        max-height: min(70dvh, 30rem);
     }
 
     .toc-panel {
-        top: auto;
-        max-height: 0;
-        overflow: hidden;
-        opacity: 0;
-        padding: 0 1.5rem;
-        transition: max-height 0.25s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.2s ease, padding 0.25s ease;
-    }
-
-    .toc.open .toc-panel {
-        max-height: calc(50vh - var(--header-height));
-        opacity: 1;
+        position: static;
+        height: auto;
+        max-height: inherit;
+        overflow-y: auto;
         padding: 1rem 1.5rem;
+        padding-left: max(1.5rem, env(safe-area-inset-left));
+        padding-right: max(1.5rem, env(safe-area-inset-right));
     }
 
     .toc-header {
@@ -897,35 +997,81 @@ a:hover {
     }
 
     .toc-nav {
-        max-height: calc(50vh - var(--header-height) - 2rem);
-        overflow-y: auto;
+        max-height: none;
+        overflow: visible;
     }
 
     .docs-main {
         padding: 1.5rem 1.5rem 3rem;
+        padding-bottom: max(3rem, env(safe-area-inset-bottom));
     }
 
     .docs-content h1 { font-size: 1.85rem; }
     .docs-content h2 { font-size: 1.35rem; }
+
+    /* Touch: every interactive control gets at least a 44px hit target. */
+    .theme-toggle,
+    .sidebar-toggle,
+    .sidebar-close,
+    .social-link,
+    .sidebar-section-toggle,
+    .toc-link {
+        min-width: 44px;
+        min-height: 44px;
+    }
+
+    .sidebar-link,
+    .sidebar-section-link {
+        min-height: 44px;
+    }
+
+    .sidebar-section-toggle {
+        width: 44px;
+        height: 44px;
+    }
+
+    .krate-search-trigger {
+        min-width: 44px;
+        min-height: 44px;
+    }
+
+    /* Keep the code header compact: the copy button sits in a 36px bar, so a
+       44px target would inflate it. 32px is still comfortable to tap. */
+    .krate-code-copy {
+        min-width: 32px;
+        min-height: 32px;
+        padding: 6px 10px;
+    }
 }
 
 @media (max-width: 767px) {
     .docs-navbar {
         padding: 0 1rem;
+        padding-left: max(1rem, env(safe-area-inset-left));
+        padding-right: max(1rem, env(safe-area-inset-right));
     }
     .toc-mobile-toggle {
         padding: 0 1rem;
     }
     .docs-main {
         padding: 1.5rem 1rem 3rem;
+        padding-bottom: max(3rem, env(safe-area-inset-bottom));
     }
 }
 
-@media (min-width: 1280px) {
+@media (min-width: 1024px) {
     .sidebar-toggle,
     .toc-mobile-shell,
     .sidebar-close,
     .sidebar-header {
+        display: none;
+    }
+
+    /* Drawers/overlays are mobile-only; never show them on desktop. */
+    .sidebar-overlay,
+    .toc-overlay,
+    .sidebar-overlay.open,
+    .toc-overlay.open {
         display: none;
     }
 
@@ -936,6 +1082,11 @@ a:hover {
     .docs-body {
         padding-left: var(--sidebar-width);
         padding-right: var(--toc-width);
+    }
+
+    /* No table of contents: reclaim the right column. */
+    .docs-page-no-toc .docs-body {
+        padding-right: 0;
     }
 
     .sidebar {
@@ -951,6 +1102,18 @@ a:hover {
         width: var(--toc-width);
         background: transparent;
         order: 0;
+    }
+}
+
+/* Respect users who ask for less motion. */
+@media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+        animation-duration: 0.001ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.001ms !important;
+        scroll-behavior: auto !important;
     }
 }
 

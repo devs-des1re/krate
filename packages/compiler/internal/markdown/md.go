@@ -363,7 +363,7 @@ func renderTable(b block, cfg Config) string {
 		return ""
 	}
 	var out strings.Builder
-	out.WriteString("<table>\n")
+	out.WriteString("<div class=\"table-wrap\">\n<table>\n")
 	for i, row := range b.cells {
 		tag := "td"
 		if i == 0 {
@@ -379,7 +379,7 @@ func renderTable(b block, cfg Config) string {
 			out.WriteString("</thead>\n<tbody>\n")
 		}
 	}
-	out.WriteString("</tbody>\n</table>\n")
+	out.WriteString("</tbody>\n</table>\n</div>\n")
 	return out.String()
 }
 

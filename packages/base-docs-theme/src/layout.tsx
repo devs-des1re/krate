@@ -1,5 +1,5 @@
 import { SidebarNav, TOCNav, Breadcrumbs, PrevNext, SocialLinks } from "./chrome";
-import { createSignal, createEffect, onMount } from "@krate/runtime";
+import { createSignal, createEffect, onMount, onCleanup } from "@krate/runtime";
 import "./theme.css";
 
 interface SidebarItem {
@@ -70,7 +70,8 @@ interface BaseDocsLayoutProps {
 export default function BaseDocsLayout(props: BaseDocsLayoutProps) {
   const pageTitle = props.pageTitle;
   const siteTitle = props.siteTitle;
-  const showToc = !props.tocHidden;
+  const tocItems = props.tocItems || [];
+  const showToc = !props.tocHidden && tocItems.length > 0;
   const tocHeading = props.tocLabel || "On this page";
   const description = props.description;
   const editUrl = props.editUrl;
@@ -90,6 +91,7 @@ export default function BaseDocsLayout(props: BaseDocsLayoutProps) {
   var sidebarRef: HTMLElement | null = null;
   var tocBtnRef: HTMLElement | null = null;
   var tocRef: HTMLElement | null = null;
+  var tocOverlayRef: HTMLElement | null = null;
 
   onMount(function () {
     var saved = "";
@@ -102,7 +104,7 @@ export default function BaseDocsLayout(props: BaseDocsLayoutProps) {
     }
     setTheme(dark ? "dark" : "light");
 
-    var mq = window.matchMedia("(min-width: 1280px)");
+    var mq = window.matchMedia("(min-width: 1024px)");
     function onDesktop(e: MediaQueryListEvent) {
       if (e.matches) {
         setSidebarOpen(false);
@@ -113,6 +115,12 @@ export default function BaseDocsLayout(props: BaseDocsLayoutProps) {
     else if (mq.addListener) mq.addListener(onDesktop);
 
     window.addEventListener("keydown", onKeydown);
+
+    onCleanup(function () {
+      window.removeEventListener("keydown", onKeydown);
+      if (mq.removeEventListener) mq.removeEventListener("change", onDesktop);
+      else if (mq.removeListener) mq.removeListener(onDesktop);
+    });
   });
 
   createEffect(function () {
@@ -137,8 +145,17 @@ export default function BaseDocsLayout(props: BaseDocsLayoutProps) {
   createEffect(function () {
     var open = tocOpen();
     if (tocRef) tocRef.classList.toggle("open", open);
+    if (tocOverlayRef) tocOverlayRef.classList.toggle("open", open);
     if (tocBtnRef) tocBtnRef.setAttribute("aria-expanded", open ? "true" : "false");
     if (open) setSidebarOpen(false);
+  });
+
+  // Lock background scrolling while a mobile drawer/sheet is open. The drawer
+  // and TOC never open together (each closes the other), so either flag is
+  // enough to decide the lock.
+  createEffect(function () {
+    if (typeof document === "undefined" || !document.body) return;
+    document.body.classList.toggle("krc-nav-open", sidebarOpen() || tocOpen());
   });
 
   function onKeydown(e: KeyboardEvent) {
@@ -162,7 +179,7 @@ export default function BaseDocsLayout(props: BaseDocsLayoutProps) {
   }
 
   return (
-    <div class="docs-page">
+    <div class={`docs-page${showToc ? "" : " docs-page-no-toc"}`}>
       <Head>
         <title>{pageTitle} - {siteTitle}</title>
       </Head>
@@ -183,19 +200,23 @@ export default function BaseDocsLayout(props: BaseDocsLayoutProps) {
         </div>
       </header>
 
-      <div class="toc-mobile-shell">
-        {showToc && (
+      {showToc && (
+        <div class="toc-mobile-shell">
           <button class="toc-mobile-toggle" id="toc-toggle" ref={tocBtnRef} aria-label="Toggle table of contents" aria-controls="toc" aria-expanded="false" onClick={() => setTocOpen(!tocOpen())}>
             <span class="toc-mobile-copy">
               <span class="toc-mobile-label">{tocHeading}</span>
-              <span class="toc-current" id="toc-current">Introduction</span>
+              <span class="toc-current" id="toc-current"></span>
             </span>
             <Icon name="tabler:chevron-down" width="18" height="18" />
           </button>
-        )}
-      </div>
+        </div>
+      )}
 
       <div class="sidebar-overlay" id="sidebar-overlay" ref={overlayRef} onClick={closeNav}></div>
+
+      {showToc && (
+        <div class="toc-overlay" id="toc-overlay" ref={tocOverlayRef} onClick={closeNav}></div>
+      )}
 
       <nav class="sidebar" id="sidebar" ref={sidebarRef}>
         <div class="sidebar-header">

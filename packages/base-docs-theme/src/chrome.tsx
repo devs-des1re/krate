@@ -1,4 +1,4 @@
-import { onMount } from "@krate/runtime";
+import { onMount, onCleanup } from "@krate/runtime";
 
 interface SidebarItem {
   title: string;
@@ -495,18 +495,13 @@ export function TOCNav(props: TOCNavProps) {
       }
     }
 
-    window.addEventListener("scroll", onScroll, { passive: true });
-    window.addEventListener("resize", onResize);
-    window.addEventListener("hashchange", onHashChange);
-
-    for (var n = 0; n < links.length; n++) {
-      links[n].addEventListener("click", function () {
-        if (onNavigate) onNavigate();
-        window.setTimeout(scheduleUpdate, 80);
-      });
-    }
-
     window.setTimeout(scheduleUpdate, 120);
+
+    onCleanup(function () {
+      window.removeEventListener("scroll", onScroll);
+      window.removeEventListener("resize", onResize);
+      window.removeEventListener("hashchange", onHashChange);
+    });
   });
 
   if (!items || items.length === 0) return <span />;
