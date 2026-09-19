@@ -251,6 +251,109 @@ func TestShadcnButtonAsChildMergesOntoChild(t *testing.T) {
 	}
 }
 
+// buildWithFiles writes the given files under a temp project and returns the
+// page output directory. Keys are paths relative to the project root.
+func buildWithFiles(t *testing.T, files map[string]string) string {
+	t.Helper()
+	root := t.TempDir()
+	for rel, content := range files {
+		full := filepath.Join(root, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cfg := config.Default()
+	cfg.PagesDir = filepath.Join(root, "src", "pages")
+	cfg.OutDir = filepath.Join(root, "dist")
+	cfg.Minify = false
+	if err := New(root, cfg).BuildAll(); err != nil {
+		t.Fatalf("BuildAll: %v", err)
+	}
+	return cfg.OutDir
+}
+
+// TestDottedComponentNamespace verifies `import * as Card` + `<Card.Root>`
+// resolves dotted tags to the imported module's exported functions.
+func TestDottedComponentNamespace(t *testing.T) {
+	outDir := buildWithFiles(t, map[string]string{
+		"src/components/ui/card.tsx": `
+			export function Root(props: any) { return <div class="card-root">{props.children}</div>; }
+			export function Header(props: any) { return <h3 class="card-header">{props.children}</h3>; }
+		`,
+		"src/pages/index.tsx": `
+			import * as Card from '../components/ui/card';
+			export default function Page() {
+				return <Card.Root><Card.Header>Title</Card.Header></Card.Root>;
+			}
+		`,
+	})
+	html := readOut(t, outDir, "index.html")
+	if !strings.Contains(html, `class="card-root"`) || !strings.Contains(html, `<h3 class="card-header">Title</h3>`) {
+		t.Errorf("dotted components did not render:\n%.500s", html)
+	}
+}
+
+// TestDottedComponentNamespaceWithState verifies dotted components that use
+// signals/handlers/attr bindings hydrate correctly.
+func TestDottedComponentNamespaceWithState(t *testing.T) {
+	outDir := buildWithFiles(t, map[string]string{
+		"src/components/ui/panel.tsx": `
+			import { createSignal } from '@krate/runtime';
+			export function Root(props: any) {
+				const [open, setOpen] = createSignal(false);
+				return (
+					<div class="panel" data-state={open() ? 'open' : 'closed'}>
+						<button onClick={() => setOpen(!open())}>toggle</button>
+						{props.children}
+					</div>
+				);
+			}
+		`,
+		"src/pages/index.tsx": `
+			import * as Panel from '../components/ui/panel';
+			export default function Page() {
+				return <Panel.Root>body</Panel.Root>;
+			}
+		`,
+	})
+	html := readOut(t, outDir, "index.html")
+	if !strings.Contains(html, `data-state="closed"`) {
+		t.Errorf("dotted component SSR state missing:\n%.500s", html)
+	}
+	jsFiles, _ := filepath.Glob(filepath.Join(outDir, "index.*.js"))
+	if len(jsFiles) == 0 {
+		t.Fatalf("expected hydration bundle for a stateful dotted component")
+	}
+	js, _ := os.ReadFile(jsFiles[0])
+	if !strings.Contains(string(js), "createSignal") {
+		t.Errorf("dotted component should hydrate:\n%s", js)
+	}
+}
+
+// TestNamespaceReexportBarrel verifies `export * as Card from './card'` in a
+// barrel resolves `<Card.Root>` from a named import of the namespace.
+func TestNamespaceReexportBarrel(t *testing.T) {
+	outDir := buildWithFiles(t, map[string]string{
+		"src/components/card.tsx": `
+			export function Root(props: any) { return <div class="card-root">{props.children}</div>; }
+		`,
+		"src/components/ui.ts": `export * as Card from './card';`,
+		"src/pages/index.tsx": `
+			import { Card } from '../components/ui';
+			export default function Page() {
+				return <Card.Root>hi</Card.Root>;
+			}
+		`,
+	})
+	html := readOut(t, outDir, "index.html")
+	if !strings.Contains(html, `class="card-root"`) {
+		t.Errorf("namespace re-export barrel did not resolve:\n%.500s", html)
+	}
+}
+
 // TestReactStyleObjectBuild verifies a literal style object folds to CSS.
 func TestReactStyleObjectBuild(t *testing.T) {
 	page := `

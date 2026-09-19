@@ -826,9 +826,15 @@ func (p *Parser) parseExport() ast.Stmt {
 	case lexer.Type_:
 		exp.Declaration = p.parseTypeAliasDecl()
 	case lexer.STAR:
-		// export * from 'source'
+		// export * from 'source'   or   export * as Name from 'source'
 		p.next()
 		exp.StarReexport = true
+		if p.match(lexer.As) && isIdentifierToken(p.peek().Kind) {
+			// `export * as Name from 'x'` — a namespace re-export. Record the
+			// namespace binding so downstream alias resolution can address
+			// `Name.<Export>` (mirrors `import * as Name`).
+			exp.Namespace = p.next().Value
+		}
 		if p.match(lexer.From) {
 			if p.peek().Kind == lexer.String {
 				exp.ReexportSource = p.next().Value
@@ -1892,6 +1898,13 @@ func (p *Parser) parseInfix(left ast.Expr) ast.Expr {
 func (p *Parser) parseFnExpr() ast.Expr {
 	p.next()
 	fn := &ast.ArrowFn{Async: false}
+	// A function expression may carry a name (`function Foo() {}`). It is only
+	// visible inside the body, so it is consumed and ignored — matching how the
+	// compiler treats unnamed function expressions. Compiled library output
+	// (e.g. Radix UI's `__name(function Foo() {...}, "Foo")`) relies on this.
+	if isIdentifierToken(p.peek().Kind) {
+		p.next()
+	}
 	p.expect(lexer.LPAREN)
 	fn.Params = p.parseParamList()
 	p.expect(lexer.RPAREN)

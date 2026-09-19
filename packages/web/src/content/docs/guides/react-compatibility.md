@@ -199,6 +199,34 @@ The `cn`/`clsx`/`cva`/`twMerge`/`Slot`/`cloneElement` helpers ship in
 `class-variance-authority`, `clsx`, `tailwind-merge`, or `@radix-ui/react-slot`
 can import them from `@krate/runtime` instead.
 
+## Compound (Radix-style) components
+
+Radix UI exposes compound components through a **namespace API** —
+`<Popover.Root>`, `<Popover.Trigger>`, `<Accordion.Item>`, and so on. Krate
+resolves these dotted tags at build time, so the same authoring pattern works
+whether the components come from your own source or a source-shipping library:
+
+```tsx
+import * as Accordion from '../components/ui/accordion';
+
+<Accordion.Root>
+  <Accordion.Item title="What is Krate?">…</Accordion.Item>
+</Accordion.Root>
+```
+
+A namespace import (`import * as Card`) and a namespace re-export barrel
+(`export * as Card from './card'`) both resolve `<Card.Root>` to the declared
+`Root` function. This is the same shape Radix components use.
+
+> **Note.** The published `@radix-ui/react-*` npm packages ship **compiled
+> JavaScript only** (no source), built on `react/jsx-runtime`, `React.*`, and
+> internal `@radix-ui/*` packages. Running those exact files would require a
+> React runtime — which Krate deliberately does not ship. Instead, use the
+> built-in [`@krate/components`](/docs/reference/component-library/) library,
+> which reimplements the common Radix/shadcn primitives as Krate source with the
+> same compound API, or copy the relevant component into your project. Both
+> compile to static HTML with no client runtime.
+
 ## What is not supported
 
 Krate transpiles React **syntax**, it does not run the React runtime. The

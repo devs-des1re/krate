@@ -376,6 +376,7 @@ type ExportStmt struct {
 	Default        bool
 	Local          string
 	StarReexport   bool   // export * from 'source'
+	Namespace      string // export * as Namespace from 'source'
 	ReexportSource string // source path for re-exports (export * from '...' or export { X } from '...')
 }
 

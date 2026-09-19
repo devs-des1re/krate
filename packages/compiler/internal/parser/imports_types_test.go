@@ -75,6 +75,39 @@ func TestInterfaceExtends(t *testing.T) {
 	}
 }
 
+// TestNamedFunctionExpression covers `__name(function Foo() {...}, "Foo")`, the
+// shape compiled library output (Radix UI) uses.
+func TestNamedFunctionExpression(t *testing.T) {
+	prog := parseOK(t, `
+		var __name = (t, v) => Object.defineProperty(t, "name", { value: v });
+		var Bar = __name(function Bar2(props) { return <span>{props.children}</span>; }, "Bar");
+	`)
+	if len(prog.Body) != 2 {
+		t.Fatalf("expected 2 statements, got %d", len(prog.Body))
+	}
+}
+
+func TestNamedFunctionExpressionBare(t *testing.T) {
+	parseOK(t, `const f = function named(a) { return a; };`)
+	parseOK(t, `const g = function (a) { return a; };`)
+	parseOK(t, `const h = async function named(a) { return a; };`)
+}
+
+// TestExportStarAs covers `export * as Name from 'source'`.
+func TestExportStarAs(t *testing.T) {
+	prog := parseOK(t, `export * as Card from './card';`)
+	if len(prog.Body) != 1 {
+		t.Fatalf("expected 1 statement, got %d", len(prog.Body))
+	}
+	exp, ok := prog.Body[0].(*ast.ExportStmt)
+	if !ok {
+		t.Fatalf("expected ExportStmt, got %T", prog.Body[0])
+	}
+	if exp.Namespace != "Card" || !exp.StarReexport || exp.ReexportSource != "'./card'" {
+		t.Fatalf("unexpected export: namespace=%q star=%v source=%q", exp.Namespace, exp.StarReexport, exp.ReexportSource)
+	}
+}
+
 func TestInterfaceExtendsGeneric(t *testing.T) {
 	prog := parseOK(t, `
 		interface A<T> extends B<T>, C { value: T }
