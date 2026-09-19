@@ -1788,6 +1788,11 @@ func (b *builder) buildStaticElementSlots(el *ast.JSXElement, parentID string) [
 		if attr.Spread {
 			continue
 		}
+		// React-only directives (key, suppressHydrationWarning) carry no DOM
+		// meaning and must not become attributes or hydration bindings.
+		if isReactDirectiveAttr(attr.Name) {
+			continue
+		}
 		if attr.Name == "ref" {
 			if attr.Value != nil {
 				// Callback ref: ref={(el) => {...}}. The arrow function is the
@@ -1948,6 +1953,9 @@ func (b *builder) buildElementOpening(el *ast.JSXElement, handlers []HandlerDecl
 	// Static attributes
 	for _, attr := range el.Opening.Attributes {
 		if attr.Spread || attr.Name == "ref" || attr.Name == "dangerouslySetInnerHTML" {
+			continue
+		}
+		if isReactDirectiveAttr(attr.Name) {
 			continue
 		}
 		if isOnEvent(attr.Name) {
@@ -3053,7 +3061,7 @@ func (b *builder) buildFragmentSlots(frag *ast.JSXFragment, parentID string) []S
 // ─── buildHandlerDecl — extract event handler ──────────────────────────────
 
 func (b *builder) buildHandlerDecl(attr *ast.JSXAttr, elementID string) *HandlerDecl {
-	eventName := strings.ToLower(attr.Name[2:]) // "onClick" → "click"
+	eventName := reactEventName(attr.Name)
 	body := b.extractHandlerBody(attr.Value)
 	if body == "" {
 		return nil
@@ -4419,6 +4427,15 @@ func declaredLocalNames(node *ComponentNode, fn *ast.FnDecl) map[string]bool {
 			declared[name] = true
 		}
 	}
+	// Pre-signal vars (e.g. useRef's `{current:...}` object) are declared before
+	// the signal decls. Treat them as declared so collectLocalVars does not
+	// re-emit a duplicate `var` that clobbers the object with a string literal.
+	for _, ev := range node.PreSignalVars {
+		name := extraVarName(ev)
+		if name != "" {
+			declared[name] = true
+		}
+	}
 	for _, stmt := range fn.Body {
 		if fd, ok := stmt.(*ast.FnDecl); ok {
 			declared[fd.Name] = true
@@ -4458,6 +4475,33 @@ func (b *builder) nextElementTag(tagName, parentID string) string {
 
 func isOnEvent(name string) bool {
 	return len(name) > 2 && name[0] == 'o' && name[1] == 'n' && name[2] >= 'A' && name[2] <= 'Z'
+}
+
+// isReactDirectiveAttr reports whether a JSX attribute is a React-only
+// directive with no HTML representation.
+func isReactDirectiveAttr(name string) bool {
+	switch name {
+	case "key", "suppressHydrationWarning":
+		return true
+	}
+	return false
+}
+
+// reactEventAliases maps JSX event prop names whose DOM event differs from a
+// simple lowercasing of the prop. Only unambiguous renames live here; React's
+// onChange/onFocus/onBlur remapping needs input-type-aware handling and is
+// deferred to the shadcn/radix milestone.
+var reactEventAliases = map[string]string{
+	"onDoubleClick": "dblclick",
+}
+
+// reactEventName resolves a JSX event prop (onClick, onDoubleClick, ...) to the
+// DOM event name used for delegated listeners.
+func reactEventName(attrName string) string {
+	if mapped, ok := reactEventAliases[attrName]; ok {
+		return mapped
+	}
+	return strings.ToLower(attrName[2:])
 }
 
 // componentNeedsClient reports whether a signal-less component must be built
@@ -4606,7 +4650,7 @@ func isAttrBinding(attr *ast.JSXAttr) bool {
 	if attr.Spread || attr.Value == nil {
 		return false
 	}
-	if isOnEvent(attr.Name) {
+	if isOnEvent(attr.Name) || isReactDirectiveAttr(attr.Name) {
 		return false
 	}
 	switch attr.Value.(type) {
@@ -5635,7 +5679,7 @@ func evalMemberExprWithBindings(expr *ast.MemberExpr, bindings map[string]string
 func extractPropsAST(el *ast.JSXElement) map[string]ast.Expr {
 	props := make(map[string]ast.Expr)
 	for _, attr := range el.Opening.Attributes {
-		if attr.Spread || isShowIfAttr(attr.Name) {
+		if attr.Spread || isShowIfAttr(attr.Name) || isReactDirectiveAttr(attr.Name) {
 			continue
 		}
 		if attr.Value != nil {
