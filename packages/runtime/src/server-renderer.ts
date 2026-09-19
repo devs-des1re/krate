@@ -167,7 +167,27 @@ class ISRCache {
   }
 }
 
-const isrCache = new ISRCache();
+// ISR cache size and the render timeout are configurable via the compiler
+// (ssr.maxCacheSize / ssr.timeout), which exports them to the sidecar env.
+const isrCache = new ISRCache(parseInt(process.env.KRATE_SSR_MAX_CACHE || "", 10) || 512);
+
+// renderTimeoutMs bounds a single renderToString call so one pathological page
+// cannot pin the sidecar. 0 disables the bound.
+const renderTimeoutMs = parseInt(process.env.KRATE_SSR_TIMEOUT || "", 10) || 5000;
+
+// withRenderTimeout rejects if p does not settle within renderTimeoutMs. The
+// underlying render keeps running (JS cannot cancel it), but the request fails
+// fast rather than hanging.
+function withRenderTimeout<T>(p: Promise<T>): Promise<T> {
+  if (renderTimeoutMs <= 0) return p;
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`render timed out after ${renderTimeoutMs}ms`)), renderTimeoutMs);
+    p.then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      (e) => { clearTimeout(timer); reject(e); },
+    );
+  });
+}
 
 // ISR cache persistence — survives renderer restarts so a bounce doesn't
 // cold-render every ISR variant. Written debounced (coalesced) to the build
@@ -281,7 +301,10 @@ async function renderFresh(page: ManifestPage, req: RenderRequest): Promise<Rend
     }
 
     const jsxNode = Component(buildProps(req));
-    const html = renderToString(jsxNode);
+    // Bound the render. renderToString is synchronous, so a page that blocks
+    // would block the sidecar's event loop regardless; the timeout still
+    // protects the request path when rendering is async (suspense/resource).
+    const html = await withRenderTimeout(Promise.resolve(renderToString(jsxNode)));
 
     const response: RenderResponse = {
       html,
