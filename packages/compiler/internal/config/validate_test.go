@@ -47,3 +47,27 @@ func TestUnknownKeyWarningsIgnoresValidate(t *testing.T) {
 		t.Errorf("validate hook should not warn: %v", w)
 	}
 }
+
+// TestDeprecatedEmitReactAcceptedSilently verifies the removed emitReact option
+// still loads without an unknown-key warning, in either boolean state.
+func TestDeprecatedEmitReactAcceptedSilently(t *testing.T) {
+	for _, raw := range [][]byte{
+		[]byte(`{"entry":"x","emitReact":true}`),
+		[]byte(`{"entry":"x","emitReact":false}`),
+	} {
+		if w := UnknownKeyWarnings(raw); len(w) != 0 {
+			t.Errorf("emitReact should be accepted silently, got warnings: %v", w)
+		}
+	}
+}
+
+// TestApplyConfigPropEmitReactNoOp verifies the tsconfig-style config loader
+// accepts emitReact without error or effect.
+func TestApplyConfigPropEmitReactNoOp(t *testing.T) {
+	cfg := Default()
+	for _, v := range []interface{}{true, false} {
+		if err := applyConfigProp(cfg, "emitReact", v); err != nil {
+			t.Errorf("applyConfigProp(emitReact, %v) returned error: %v", v, err)
+		}
+	}
+}

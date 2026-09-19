@@ -167,6 +167,7 @@ export interface KrateConfig {
   minifyCSS?: boolean;
   minifyJS?: boolean;
   sourcemap?: boolean;
+  /** @deprecated React-to-krate transpilation is always enabled; accepted but ignored. */
   emitReact?: boolean;
   devServer?: DevServerConfig;
   plugins?: PluginConfig[];

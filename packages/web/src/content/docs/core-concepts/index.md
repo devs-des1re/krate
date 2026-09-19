@@ -59,8 +59,10 @@ setCount(c => c + 1) // functional update
 Effects re-run when the signals they read change. Memos cache derived values.
 Context provides dependency injection. Resources handle async data.
 
-React compatibility exists through `emitReact: true`, which rewrites React
-imports/primitives to Krate equivalents for gradual migration.
+React compatibility is always on: React imports and primitives (`useState`,
+`useEffect`, `useRef`, `useMemo`, `forwardRef`, `React.*`) are automatically
+rewritten to their Krate equivalents for gradual migration. No config is
+required.
 
 ## Rendering modes
 

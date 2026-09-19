@@ -312,11 +312,8 @@ func applyConfigProp(cfg *Config, key string, val interface{}) error {
 			}
 		}
 	case "emitReact":
-		b, ok := val.(bool)
-		if !ok {
-			return fmt.Errorf("expected boolean, got %T", val)
-		}
-		cfg.EmitReact = b
+		// Deprecated no-op: React-to-krate transpilation is always enabled.
+		// Accepted silently so existing configs keep loading without warnings.
 	case "markdown":
 		m, ok := val.(map[string]interface{})
 		if !ok {

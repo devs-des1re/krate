@@ -9,7 +9,6 @@ export default defineConfig({
   publicDir: "public",
   minify: true,
   sourcemap: true,
-  emitReact: true,
   devServer: {
     port: 3001,
     open: false,

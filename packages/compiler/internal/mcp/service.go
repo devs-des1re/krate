@@ -1168,7 +1168,6 @@ type configView struct {
 	PublicDir         string                    `json:"publicDir"`
 	Minify            bool                      `json:"minify"`
 	Sourcemap         bool                      `json:"sourcemap"`
-	EmitReact         bool                      `json:"emitReact"`
 	Output            string                    `json:"output,omitempty"`
 	DevServer         map[string]any            `json:"devServer,omitempty"`
 	ServerComponents  []string                  `json:"serverComponents,omitempty"`
@@ -1200,7 +1199,6 @@ func (s *Service) readConfigResource(ctx context.Context, uri string) (ResourceC
 		PublicDir:         rel(c.PublicDir),
 		Minify:            c.Minify,
 		Sourcemap:         c.Sourcemap,
-		EmitReact:         c.EmitReact,
 		Output:            c.Output,
 		ServerComponents:  c.ServerComponents,
 		RuntimeComponents: c.RuntimeComponents,

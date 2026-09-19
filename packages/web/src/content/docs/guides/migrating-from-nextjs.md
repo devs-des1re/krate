@@ -84,10 +84,11 @@ signals.
 
 ## Gradual adoption via React interop
 
-If a file is deeply tied to React hooks, set `emitReact: true` in
-`krate.config.ts` and Krate rewrites `useState`/`useEffect`/`useRef` to
-signal-based equivalents during compilation. This is a migration aid, not a
-full React runtime — see [Configuration](/docs/reference/config/).
+React interop is always on. Krate automatically rewrites `useState`/
+`useEffect`/`useRef` imports and `React.*` member calls to signal-based
+equivalents during compilation, so files deeply tied to React hooks compile
+without config changes. This is a migration aid, not a full React runtime —
+see [Configuration](/docs/reference/config/).
 
 ## What is intentionally different
 

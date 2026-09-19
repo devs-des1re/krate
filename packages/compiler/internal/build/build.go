@@ -934,7 +934,6 @@ func (b *Builder) cfgPathAliasTargets() [][]string {
 // component tiers, and virtual modules (codegen'd `krate/content`).
 func (b *Builder) newBundler() *bundler.Bundler {
 	bnd := bundler.New(b.Root)
-	bnd.SetEmitReact(b.Cfg.EmitReact)
 	bnd.SetPathAliases(b.cfgPathAliasPrefixes(), b.cfgPathAliasTargets(), b.Cfg.TSBaseDir)
 	bnd.SetServerComponents(b.Cfg.ServerComponents, b.Cfg.RuntimeComponents, b.Cfg.ServerDirs, b.Cfg.RuntimeDirs)
 	if b.contentMods != nil {

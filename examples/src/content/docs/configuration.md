@@ -28,8 +28,11 @@ export default {
 | `pagesDir` | string | `src/pages` | Pages directory |
 | `publicDir` | string | `public` | Static files directory |
 | `minify` | bool | `true` | Enable all minification |
-| `emitReact` | bool | `false` | Emit React-compatible JSX |
 | `sourcemap` | bool | `false` | Generate source maps |
+
+React syntax (`useState`, `useEffect`, JSX) is always transpiled to Krate
+signals and effects. The old `emitReact` option is accepted for backwards
+compatibility but ignored.
 
 ## Markdown Configuration
 

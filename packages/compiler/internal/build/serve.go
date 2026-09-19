@@ -1289,14 +1289,15 @@ func loggingMiddleware(next http.Handler) http.Handler {
 		lrw := &loggingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 		next.ServeHTTP(lrw, r)
 
-		// Structured log line (slog). Request ID is attached by the outer
-		// requestIDMiddleware so logs can be correlated with responses.
+		// Request line rendered by prettyHandler. The request ID is attached by
+		// the outer requestIDMiddleware so logs can be correlated with responses;
+		// it is emitted as an attribute for the structured fallback path.
 		Logger.Info("request",
 			"id", requestIDFrom(r.Context()),
 			"method", r.Method,
 			"path", r.URL.Path,
 			"status", lrw.statusCode,
-			"duration_ms", time.Since(start).Milliseconds(),
+			"duration", time.Since(start),
 		)
 	})
 }

@@ -57,7 +57,6 @@ type Bundler struct {
 	workerEsm         map[string]bool   // worker source path → built as ES module
 	dynImports        map[string]string // dynamic-import source path → hashed site URL (/chunks/…)
 	frontmatter       map[string]any    // from .mdx frontmatter
-	emitReact         bool
 	pathAliases       []pathAlias
 	tsBaseDir         string
 	serverComponents  []string
@@ -122,11 +121,6 @@ func (b *Bundler) SetVirtualModules(mods map[string]string) {
 	for spec, path := range mods {
 		b.virtualModules[spec] = path
 	}
-}
-
-// SetEmitReact enables React-to-krate rewriting for all modules.
-func (b *Bundler) SetEmitReact(v bool) {
-	b.emitReact = v
 }
 
 // SetPathAliases configures TypeScript path alias resolution.
@@ -339,9 +333,7 @@ func (b *Bundler) resolveModule(path string, isEntry bool) error {
 			return fmt.Errorf("%s: %s", path, parser.FormatDiagnostics(errs))
 		}
 
-		if b.emitReact {
-			RewriteReact(prog)
-		}
+		RewriteReact(prog)
 
 		mod := &Module{
 			Path:    path,
@@ -411,9 +403,7 @@ func (b *Bundler) resolveModule(path string, isEntry bool) error {
 		return fmt.Errorf("%s", parser.FormatDiagnostics(p.Errors()))
 	}
 
-	if b.emitReact {
-		RewriteReact(prog)
-	}
+	RewriteReact(prog)
 
 	mod := &Module{
 		Path:       path,

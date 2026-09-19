@@ -8,7 +8,6 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
-	"os"
 	"regexp"
 	"runtime/debug"
 	"strings"
@@ -19,17 +18,14 @@ import (
 )
 
 // Logger is the process-wide structured logger for the serving layer. Default
-// level is Info; SetVerboseLogging raises it to Debug. Request logs and
-// recovered panics go through it.
-var Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+// level is Info; SetVerboseLogging raises it to Debug. Request logs render as a
+// compact styled line (prettyHandler), while panics and diagnostics stay
+// structured. Writes to stdout to match the CLI's build output.
+var Logger = newLogger(false)
 
 // SetVerboseLogging switches the serving logger between Info and Debug.
 func SetVerboseLogging(verbose bool) {
-	level := slog.LevelInfo
-	if verbose {
-		level = slog.LevelDebug
-	}
-	Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+	Logger = newLogger(verbose)
 }
 
 // HTTP server tuning. These bound how long a single request may take so a slow

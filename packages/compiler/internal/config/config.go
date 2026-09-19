@@ -170,7 +170,6 @@ type Config struct {
 	Sourcemap   bool            `json:"sourcemap"`
 	DevServer   DevServer       `json:"devServer"`
 	Plugins     []PluginConfig  `json:"plugins,omitempty"`
-	EmitReact   bool            `json:"emitReact"`
 	Markdown    markdown.Config `json:"markdown,omitempty"`
 	Tailwind    TailwindCfg     `json:"tailwind,omitempty"`
 	CSP         CSPConfig       `json:"csp,omitempty"`

@@ -36,7 +36,6 @@ func TestBuildPageAssetImport(t *testing.T) {
 	cfg := config.Default()
 	cfg.PagesDir = pagesDir
 	cfg.OutDir = filepath.Join(root, "dist")
-	cfg.EmitReact = true
 	b := New(root, cfg)
 	if err := b.BuildAll(); err != nil {
 		t.Fatalf("BuildAll: %v", err)

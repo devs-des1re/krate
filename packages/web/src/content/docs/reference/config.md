@@ -36,8 +36,10 @@ unused utility classes never ship. There are no per-feature CSS config toggles.
 
 ```typescript
 sourcemap: false,             // Write per-page sourcemaps (index.<hash>.js.map)
-emitReact: false,             // React compatibility mode (rewrites React → krate)
 ```
+
+React syntax is always transpiled to Krate signals and effects; the former
+`emitReact` option is accepted but ignored.
 
 ## Dev server
 

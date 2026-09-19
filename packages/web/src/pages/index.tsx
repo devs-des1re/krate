@@ -35,7 +35,7 @@ export default function Home() {
       <section class="features">
         <a class="feature-card" href="/docs/core-concepts/reactivity/">
           <h3>Signals, not React</h3>
-          <p>Fine-grained reactivity with <code>createSignal</code>, <code>createEffect</code> and <code>createMemo</code> — compatible with React via <code>emitReact</code>.</p>
+          <p>Fine-grained reactivity with <code>createSignal</code>, <code>createEffect</code> and <code>createMemo</code> — React syntax is transpiled automatically.</p>
         </a>
         <a class="feature-card" href="/docs/core-concepts/rendering/">
           <h3>SSG-first rendering</h3>

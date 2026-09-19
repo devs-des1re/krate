@@ -41,7 +41,10 @@ export default defineConfig({
 | `publicDir` | `string` | `public` | Static assets directory |
 | `minify` | `boolean` | `true` | Enable all minification |
 | `sourcemap` | `boolean` | `false` | Write per-page sourcemaps (`index.<hash>.js.map`) |
-| `emitReact` | `boolean` | `false` | React compatibility mode (rewrites React → krate) |
+
+React syntax (`useState`, `useEffect`, `useRef`, JSX) is always transpiled to
+Krate signals and effects; no config is required. The former `emitReact` option
+is accepted but ignored.
 
 ## Runtime
 
