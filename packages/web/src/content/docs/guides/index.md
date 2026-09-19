@@ -23,3 +23,4 @@ Practical, end-to-end walkthroughs.
 | [Troubleshooting](/docs/guides/troubleshooting/) | Fix common errors |
 | [Migrating from Next.js](/docs/guides/migrating-from-nextjs/) | Move an existing site to Krate |
 | [Testing](/docs/guides/testing/) | Test logic, components, and pages |
+| [TypeScript Setup](/docs/guides/typescript-setup/) | Configure tsconfig and typed routes |
