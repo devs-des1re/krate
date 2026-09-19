@@ -59,6 +59,12 @@ krate check && echo "quality gates passed"
 | `a11y/img-alt` | a11y | error | `<img>` missing an `alt` attribute |
 | `a11y/heading-order` | a11y | warning | skipped heading levels, missing/multiple `<h1>` |
 | `a11y/accessible-name` | a11y | warning | icon-only links/buttons with no accessible name |
+| `a11y/duplicate-id` | a11y | warning | repeated `id` values |
+| `a11y/landmark` | a11y | warning | no `<main>`/`<nav>`/landmark role on the page |
+| `a11y/form-label` | a11y | warning | form control with no associated label |
+| `a11y/tabindex` | a11y | warning | positive `tabindex` (breaks focus order) |
+| `a11y/aria-role` | a11y | warning | unknown/invalid ARIA `role` value |
+| `a11y/color-contrast` | a11y | warning | inline text/background contrast below 4.5:1 |
 | `seo/title` | seo | error | missing `<title>` or title over 60 characters |
 | `seo/description` | seo | warning | missing/over-long meta description |
 | `seo/canonical` | seo | warning | missing `<link rel="canonical">` |

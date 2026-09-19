@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -44,14 +45,10 @@ func main() {
 	krateversion.Value = version
 	flags, args := parseFlags(os.Args[1:])
 	plugin.SetVerbose(flags.Verbose)
+	build.SetVerboseLogging(flags.Verbose)
 
 	if len(args) == 0 {
-		fmt.Fprintf(os.Stderr, "Usage: krate [flags] <build|dev|serve|types|check|mcp|version> [dir]\n")
-		fmt.Fprintf(os.Stderr, "Flags:\n")
-		fmt.Fprintf(os.Stderr, "  --config <path>   Path to config file (default: project/krate.config.ts)\n")
-		fmt.Fprintf(os.Stderr, "  --out-dir <path>  Override output directory\n")
-		fmt.Fprintf(os.Stderr, "  --watch           Rebuild on file changes\n")
-		fmt.Fprintf(os.Stderr, "  --verbose         Print diagnostic details (e.g. reactive validation)\n")
+		printUsage(os.Stderr)
 		os.Exit(1)
 	}
 
@@ -66,14 +63,38 @@ func main() {
 		runTypes(flags, args)
 	case "check":
 		runCheck(flags, args)
+	case "plugin":
+		runPlugin(flags, args)
 	case "mcp":
 		runMCP(flags, args)
-	case "version":
+	case "version", "--version", "-v":
 		fmt.Println("krate v" + version)
+	case "help", "--help", "-h":
+		printUsage(os.Stdout)
 	default:
 		fmt.Fprintf(os.Stderr, "%sUnknown command:%s %s\n", cRed, cReset, args[0])
+		fmt.Fprintf(os.Stderr, "Run %skrate help%s for usage.\n", cCyan, cReset)
 		os.Exit(1)
 	}
+}
+
+func printUsage(w io.Writer) {
+	fmt.Fprintf(w, "Usage: krate [flags] <command> [dir]\n\n")
+	fmt.Fprintf(w, "Commands:\n")
+	fmt.Fprintf(w, "  build     Build the project for production\n")
+	fmt.Fprintf(w, "  dev       Start the development server with hot reload\n")
+	fmt.Fprintf(w, "  serve     Build, then serve for preview\n")
+	fmt.Fprintf(w, "  types     Generate route/content TypeScript declarations\n")
+	fmt.Fprintf(w, "  check     Run compiler-enforced quality gates (a11y/SEO/perf)\n")
+	fmt.Fprintf(w, "  plugin    Manage plugins (add <pkg>)\n")
+	fmt.Fprintf(w, "  mcp       Run the MCP server (Model Context Protocol)\n")
+	fmt.Fprintf(w, "  version   Print the version\n")
+	fmt.Fprintf(w, "  help      Print this help\n\n")
+	fmt.Fprintf(w, "Flags:\n")
+	fmt.Fprintf(w, "  --config <path>   Path to config file (default: project/krate.config.ts)\n")
+	fmt.Fprintf(w, "  --out-dir <path>  Override output directory\n")
+	fmt.Fprintf(w, "  --watch           Rebuild on file changes\n")
+	fmt.Fprintf(w, "  --verbose         Print diagnostic details (e.g. reactive validation)\n")
 }
 
 func parseFlags(args []string) (cliFlags, []string) {
@@ -91,6 +112,10 @@ func parseFlags(args []string) (cliFlags, []string) {
 			flags.Watch = true
 		case args[i] == "--verbose":
 			flags.Verbose = true
+		case args[i] == "--help" || args[i] == "-h" || args[i] == "--version":
+			// Handled as commands in main(); keep them in the arg list rather
+			// than rejecting them as unknown flags.
+			remaining = append(remaining, args[i])
 		case strings.HasPrefix(args[i], "-"):
 			fmt.Fprintf(os.Stderr, "%sUnknown flag:%s %s\n", cRed, cReset, args[i])
 			os.Exit(1)
@@ -116,6 +141,9 @@ func resolveConfig(flags cliFlags, args []string) (string, *config.Config) {
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "%sConfig error:%s %v\n", cRed, cReset, err)
 		os.Exit(1)
+	}
+	for _, w := range config.Warnings {
+		fmt.Fprintf(os.Stderr, "  %s⚠ config:%s %s\n", cYellow, cReset, w)
 	}
 	cfg.Resolve(root)
 
@@ -165,7 +193,7 @@ func runBuild(flags cliFlags, args []string) {
 	fmt.Printf("%s%s  Done! (built in %s)%s\n", cBold, cGreen, time.Since(start).Round(time.Millisecond), cReset)
 
 	if flags.Watch {
-		reload := make(chan []string, 1)
+		reload := make(chan build.ReloadEvent, 1)
 		errc := make(chan error, 1)
 		go func() {
 			if err := build.Watch(root, cfg, 500*time.Millisecond, reload); err != nil {
@@ -173,8 +201,12 @@ func runBuild(flags cliFlags, args []string) {
 			}
 		}()
 		go func() {
-			for routes := range reload {
-				fmt.Printf("\n%s%s  Rebuilt:%s %v (%s)\n", cBold, cCyan, cReset, routes, time.Now().Format("15:04:05"))
+			for ev := range reload {
+				if len(ev.Errors) > 0 {
+					fmt.Printf("\n%s%s  Build failed:%s %v (%s)\n", cBold, cRed, cReset, ev.Errors, time.Now().Format("15:04:05"))
+					continue
+				}
+				fmt.Printf("\n%s%s  Rebuilt:%s %v (%s)\n", cBold, cCyan, cReset, ev.Routes, time.Now().Format("15:04:05"))
 			}
 		}()
 		err := <-errc
@@ -199,7 +231,7 @@ func runDev(flags cliFlags, args []string) {
 		os.Exit(1)
 	}
 
-	reload := make(chan []string, 1)
+	reload := make(chan build.ReloadEvent, 1)
 	errc := make(chan error, 2)
 
 	go func() {

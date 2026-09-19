@@ -1,0 +1,313 @@
+package build
+
+import (
+	"compress/gzip"
+	"context"
+	"fmt"
+	"io"
+	"log/slog"
+	"net"
+	"net/http"
+	"os"
+	"regexp"
+	"runtime/debug"
+	"strings"
+	"sync/atomic"
+	"time"
+
+	"github.com/kratejs/krate/packages/compiler/internal/config"
+)
+
+// Logger is the process-wide structured logger for the serving layer. Default
+// level is Info; SetVerboseLogging raises it to Debug. Request logs and
+// recovered panics go through it.
+var Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelInfo}))
+
+// SetVerboseLogging switches the serving logger between Info and Debug.
+func SetVerboseLogging(verbose bool) {
+	level := slog.LevelInfo
+	if verbose {
+		level = slog.LevelDebug
+	}
+	Logger = slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
+}
+
+// HTTP server tuning. These bound how long a single request may take so a slow
+// or malicious client cannot pin a goroutine (or the whole process) forever.
+// SSE (live reload) and streaming regions explicitly extend their deadlines.
+const (
+	serverReadHeaderTimeout = 10 * time.Second
+	serverReadTimeout       = 30 * time.Second
+	// serverWriteTimeout must exceed the longest server-side render. Streaming
+	// handlers extend the deadline themselves, so this only caps non-streaming
+	// responses.
+	serverWriteTimeout = 60 * time.Second
+	serverIdleTimeout  = 120 * time.Second
+
+	// maxRequestBodyBytes caps how much of a request body Krate will read for
+	// API routes and middleware. Protects against unbounded memory use.
+	maxRequestBodyBytes = 4 << 20 // 4 MiB
+
+	// shutdownGrace bounds graceful shutdown before the server is forced closed.
+	shutdownGrace = 15 * time.Second
+)
+
+// sidecarClient is the shared HTTP client for talking to local sidecars (SSR
+// renderer, API/middleware). It has a bounded timeout so a wedged sidecar can't
+// hang a request goroutine forever.
+var sidecarClient = &http.Client{Timeout: 30 * time.Second}
+
+// newHTTPServer builds the main server with hardened timeouts.
+func newHTTPServer(handler http.Handler) *http.Server {
+	return &http.Server{
+		Handler:           handler,
+		ReadHeaderTimeout: serverReadHeaderTimeout,
+		ReadTimeout:       serverReadTimeout,
+		WriteTimeout:      serverWriteTimeout,
+		IdleTimeout:       serverIdleTimeout,
+	}
+}
+
+// ─── request IDs + logging ──────────────────────────────────────────────────
+
+var requestSeq atomic.Uint64
+
+type requestIDKey struct{}
+
+// requestIDMiddleware assigns each request a short, unique ID and exposes it on
+// the response and request context so logs and error responses can correlate.
+func requestIDMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		id := fmt.Sprintf("req-%d", requestSeq.Add(1))
+		w.Header().Set("X-Request-Id", id)
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), requestIDKey{}, id)))
+	})
+}
+
+func requestIDFrom(ctx context.Context) string {
+	if v, ok := ctx.Value(requestIDKey{}).(string); ok {
+		return v
+	}
+	return ""
+}
+
+// panicRecoveryMiddleware catches panics from downstream handlers so a single
+// bad request cannot take the whole process down. It logs the panic and stack
+// and returns 500 (JSON for /api/*, plain text otherwise).
+func panicRecoveryMiddleware(logger *slog.Logger, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				logger.Error("panic recovered",
+					"id", requestIDFrom(r.Context()),
+					"method", r.Method,
+					"path", r.URL.Path,
+					"panic", fmt.Sprint(rec),
+					"stack", string(debug.Stack()),
+				)
+				if strings.HasPrefix(r.URL.Path, "/api/") {
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(http.StatusInternalServerError)
+					io.WriteString(w, `{"error":"Internal Server Error"}`)
+					return
+				}
+				http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
+// ─── security headers (1.4) ─────────────────────────────────────────────────
+
+// securityHeadersMiddleware applies safe defaults. Nothing here breaks static
+// sites; HSTS is only emitted for https base URLs.
+func securityHeadersMiddleware(cfg *config.Config, next http.Handler) http.Handler {
+	hsts := ""
+	if strings.HasPrefix(strings.ToLower(cfg.SEO.BaseURL), "https://") {
+		hsts = "max-age=31536000; includeSubDomains"
+	}
+	csp := buildCSPHeader(cfg)
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		h := w.Header()
+		h.Set("X-Content-Type-Options", "nosniff")
+		h.Set("X-Frame-Options", "DENY")
+		h.Set("Referrer-Policy", "strict-origin-when-cross-origin")
+		h.Set("Permissions-Policy", "camera=(), microphone=(), geolocation=()")
+		if hsts != "" {
+			h.Set("Strict-Transport-Security", hsts)
+		}
+		if csp != "" {
+			h.Set("Content-Security-Policy", csp)
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// buildCSPHeader returns the CSP directive for the HTTP header. A user-supplied
+// directive wins; otherwise, when enabled, a conservative default is emitted.
+// Unlike the meta-tag CSP this can carry frame-ancestors.
+func buildCSPHeader(cfg *config.Config) string {
+	if !cfg.CSP.Enabled {
+		return ""
+	}
+	if d := strings.TrimSpace(cfg.CSP.Directive); d != "" {
+		return d
+	}
+	return "frame-ancestors 'none'"
+}
+
+// ─── compression (4.3, static path) ─────────────────────────────────────────
+
+// compressibleType reports whether a content type benefits from gzip. Already
+// compressed formats (images, fonts, wasm, zip) are excluded.
+func compressibleType(ct string) bool {
+	ct = strings.ToLower(ct)
+	switch {
+	case strings.HasPrefix(ct, "text/"):
+		return true
+	case strings.Contains(ct, "javascript"):
+		return true
+	case strings.Contains(ct, "json"):
+		return true
+	case strings.Contains(ct, "svg"):
+		return true
+	case strings.Contains(ct, "xml"):
+		return true
+	default:
+		return false
+	}
+}
+
+// gzipMiddleware gzips compressible responses when the client advertises gzip
+// support. Because the Content-Type is set by the downstream handler immediately
+// before WriteHeader, the decision is made on the first WriteHeader/Write.
+func gzipMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		gw := &gzipResponseWriter{ResponseWriter: w}
+		defer gw.close()
+		next.ServeHTTP(gw, r)
+	})
+}
+
+type gzipResponseWriter struct {
+	http.ResponseWriter
+	zw          *gzip.Writer
+	decided     bool
+	useGzip     bool
+	wroteHeader bool
+}
+
+func (g *gzipResponseWriter) decide() {
+	if g.decided {
+		return
+	}
+	g.decided = true
+	g.useGzip = compressibleType(g.Header().Get("Content-Type"))
+	if g.useGzip {
+		g.Header().Del("Content-Length")
+		g.Header().Set("Content-Encoding", "gzip")
+		g.Header().Add("Vary", "Accept-Encoding")
+		g.zw = gzip.NewWriter(g.ResponseWriter)
+	}
+}
+
+func (g *gzipResponseWriter) WriteHeader(code int) {
+	if g.wroteHeader {
+		return
+	}
+	g.decide()
+	g.wroteHeader = true
+	g.ResponseWriter.WriteHeader(code)
+}
+
+func (g *gzipResponseWriter) Write(b []byte) (int, error) {
+	if !g.wroteHeader {
+		g.WriteHeader(http.StatusOK)
+	}
+	if g.useGzip {
+		return g.zw.Write(b)
+	}
+	return g.ResponseWriter.Write(b)
+}
+
+func (g *gzipResponseWriter) Flush() {
+	if g.useGzip && g.zw != nil {
+		g.zw.Flush()
+	}
+	if f, ok := g.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (g *gzipResponseWriter) Unwrap() http.ResponseWriter { return g.ResponseWriter }
+
+func (g *gzipResponseWriter) close() {
+	if g.useGzip && g.zw != nil {
+		g.zw.Close()
+	}
+}
+
+// ─── streaming helpers ──────────────────────────────────────────────────────
+
+// hashedAssetRe matches content-hashed asset filenames: a `.<hash>.` segment
+// before the extension (e.g. index.abc123.js, styles.abc123.css) or a
+// `-<hash>.<ext>` suffix (e.g. logo-abc123.png). The build emits these names,
+// so a one-year immutable cache is safe.
+var hashedAssetRe = regexp.MustCompile(`\.[0-9a-z]{6,}\.[a-z0-9]+$|-[0-9a-z]{6,}\.[a-z0-9]+$`)
+
+func isHashedAsset(urlPath string) bool {
+	p := urlPath
+	if i := strings.IndexByte(p, '?'); i >= 0 {
+		p = p[:i]
+	}
+	if i := strings.IndexByte(p, '#'); i >= 0 {
+		p = p[:i]
+	}
+	switch strings.ToLower(filepathExt(p)) {
+	case ".css", ".js", ".mjs", ".woff2", ".woff", ".png", ".jpg", ".jpeg",
+		".gif", ".webp", ".avif", ".svg", ".ico", ".wasm":
+		return hashedAssetRe.MatchString(p)
+	}
+	return false
+}
+
+func filepathExt(p string) string {
+	for i := len(p) - 1; i >= 0; i-- {
+		if p[i] == '.' {
+			return p[i:]
+		}
+		if p[i] == '/' {
+			return ""
+		}
+	}
+	return ""
+}
+
+// setStreamingDeadline extends the write deadline for long-lived SSE/streaming
+// responses.
+func setStreamingDeadline(w http.ResponseWriter, d time.Duration) {
+	rc := http.NewResponseController(w)
+	_ = rc.SetWriteDeadline(time.Now().Add(d))
+}
+
+// dialSidecar opens a bounded TCP connection for the region stream and sets a
+// read deadline so a stalled sidecar can't block the request goroutine forever.
+func dialSidecar(port int, readTimeout time.Duration) (net.Conn, error) {
+	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", port), 5*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(readTimeout))
+	return conn, nil
+}
+
+// readBodyLimited reads at most maxRequestBodyBytes from r.Body.
+func readBodyLimited(r *http.Request) ([]byte, error) {
+	return io.ReadAll(io.LimitReader(r.Body, maxRequestBodyBytes))
+}

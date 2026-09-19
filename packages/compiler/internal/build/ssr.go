@@ -18,14 +18,26 @@ import (
 
 // SSRServer manages the SSR sidecar renderer process (node/bun/deno).
 type SSRServer struct {
-	port     int
-	root     string
-	runtime  string // "node" (default) | "bun" | "deno"
-	env      []string
-	cmd      *exec.Cmd
-	mu       sync.Mutex
-	running  bool
-	manifest *ServerManifest
+	port         int
+	root         string
+	runtime      string // "node" (default) | "bun" | "deno"
+	env          []string
+	cmd          *exec.Cmd
+	done         chan struct{} // closed when the sidecar process exits
+	mu           sync.Mutex
+	running      bool
+	manifest     *ServerManifest
+	timeout      int // per-render timeout (ms); 0 = sidecar default
+	maxCacheSize int // ISR cache entries; 0 = sidecar default
+}
+
+// SetTuning configures the render timeout (ms) and ISR cache size exported to
+// the sidecar via KRATE_SSR_TIMEOUT / KRATE_SSR_MAX_CACHE.
+func (s *SSRServer) SetTuning(timeoutMs, maxCacheSize int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.timeout = timeoutMs
+	s.maxCacheSize = maxCacheSize
 }
 
 // SetEnv provides environment variables for the sidecar process.
@@ -51,19 +63,21 @@ func NewSSRServer(root string, port int, runtime string) *SSRServer {
 // bundled at build time so plain runtimes work without tsx.
 func (s *SSRServer) Start() error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	if s.running {
+		s.mu.Unlock()
 		return nil
 	}
 
 	rendererPath := s.findRendererScript()
 	if rendererPath == "" {
+		s.mu.Unlock()
 		return fmt.Errorf("krate SSR renderer not found — ensure @krate/runtime is installed")
 	}
 
 	manifestPath := filepath.Join(s.root, "dist", "server-manifest.json")
 	if _, err := os.Stat(manifestPath); os.IsNotExist(err) {
+		s.mu.Unlock()
 		return fmt.Errorf("server-manifest.json not found in dist/ — no SSR/ISR pages to render")
 	}
 
@@ -74,6 +88,7 @@ func (s *SSRServer) Start() error {
 
 	runtimeCmd, runtimeArgs, err := ssrRuntimeCommand(s.runtime, rendererPath)
 	if err != nil {
+		s.mu.Unlock()
 		return err
 	}
 
@@ -84,6 +99,12 @@ func (s *SSRServer) Start() error {
 		fmt.Sprintf("KRATE_MANIFEST=%s", manifestPath),
 		fmt.Sprintf("KRATE_ROOT=%s", s.root),
 	)
+	if s.timeout > 0 {
+		env = append(env, fmt.Sprintf("KRATE_SSR_TIMEOUT=%d", s.timeout))
+	}
+	if s.maxCacheSize > 0 {
+		env = append(env, fmt.Sprintf("KRATE_SSR_MAX_CACHE=%d", s.maxCacheSize))
+	}
 
 	s.cmd = exec.Command(runtimeCmd, runtimeArgs...)
 	s.cmd.Env = env
@@ -91,10 +112,12 @@ func (s *SSRServer) Start() error {
 	s.cmd.Stderr = os.Stderr
 
 	if err := s.cmd.Start(); err != nil {
+		s.mu.Unlock()
 		return fmt.Errorf("starting SSR renderer: %w", err)
 	}
 
 	s.running = true
+	s.done = make(chan struct{})
 
 	// Wait for server to be ready
 	go func() {
@@ -102,13 +125,15 @@ func (s *SSRServer) Start() error {
 		s.mu.Lock()
 		s.running = false
 		s.mu.Unlock()
+		close(s.done)
 	}()
+	s.mu.Unlock()
 
 	// Poll for readiness
 	ready := false
 	for i := 0; i < 50; i++ { // 5 seconds max
 		time.Sleep(100 * time.Millisecond)
-		resp, err := http.Get(fmt.Sprintf("http://localhost:%d/__krate/ssr/health", s.port))
+		resp, err := sidecarClient.Get(fmt.Sprintf("http://localhost:%d/__krate/ssr/health", s.port))
 		if err == nil && resp.StatusCode == 200 {
 			ready = true
 			resp.Body.Close()
@@ -127,16 +152,36 @@ func (s *SSRServer) Start() error {
 	return nil
 }
 
-// Stop gracefully shuts down the Node.js renderer server.
+// Stop gracefully shuts down the renderer sidecar: signal it first (SIGTERM,
+// which Node handles as a normal exit request), wait a short grace period, then
+// kill if it is still alive.
 func (s *SSRServer) Stop() {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	cmd := s.cmd
+	done := s.done
+	s.mu.Unlock()
 
-	if s.cmd != nil && s.cmd.Process != nil {
-		s.cmd.Process.Kill()
-		s.cmd.Wait()
+	if cmd == nil || cmd.Process == nil {
+		s.mu.Lock()
+		s.running = false
+		s.mu.Unlock()
+		return
 	}
+
+	_ = cmd.Process.Signal(os.Interrupt)
+
+	if done != nil {
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			_ = cmd.Process.Kill()
+			<-done
+		}
+	}
+
+	s.mu.Lock()
 	s.running = false
+	s.mu.Unlock()
 }
 
 // IsRunning returns whether the SSR server process is alive.

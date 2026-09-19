@@ -46,6 +46,10 @@ func executeTSConfig(configPath string, cfg *Config) error {
 		return fmt.Errorf("parsing config output: %w", err)
 	}
 
+	// Warn on unrecognized top-level keys — the typed unmarshal drops them
+	// silently, so a typo (e.g. "tailwnd") would otherwise no-op.
+	Warnings = append(Warnings, UnknownKeyWarnings(output)...)
+
 	// Resolve plugin module paths relative to the config directory
 	for i, p := range cfg.Plugins {
 		if p.Module != "" && !filepath.IsAbs(p.Module) {

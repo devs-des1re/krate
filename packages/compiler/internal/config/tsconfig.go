@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 
 	"github.com/kratejs/krate/packages/compiler/internal/lexer"
@@ -56,12 +57,31 @@ func (p *configParser) parseRoot(cfg *Config) error {
 	if err != nil {
 		return err
 	}
+	recordUnknownKeys(obj)
 	for _, prop := range obj {
 		if err := applyConfigProp(cfg, prop.key, prop.val); err != nil {
 			return fmt.Errorf("property %q: %w", prop.key, err)
 		}
 	}
 	return nil
+}
+
+// recordUnknownKeys appends a warning for each top-level key not present in
+// knownTopLevelKeys. Called after a successful static parse so typos surface.
+func recordUnknownKeys(obj []configProp) {
+	var unknown []string
+	for _, prop := range obj {
+		if prop.key == "validate" {
+			continue
+		}
+		if !knownTopLevelKeys[prop.key] {
+			unknown = append(unknown, prop.key)
+		}
+	}
+	sort.Strings(unknown)
+	for _, k := range unknown {
+		Warnings = append(Warnings, fmt.Sprintf("unknown config key %q (ignored)", k))
+	}
 }
 
 type configProp struct {

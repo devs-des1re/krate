@@ -235,9 +235,25 @@ func Default() *Config {
 	}
 }
 
+// Warnings collects non-fatal config issues (unknown keys, suspicious values).
+// It is populated by Load and read by the CLI to print notices.
+var Warnings []string
+
+// Validate runs semantic checks on a loaded config. Fatal issues are returned
+// as an error; tolerated-but-suspicious ones are appended to Warnings.
+func (c *Config) ValidateConfig() error {
+	warnings, err := c.Validate()
+	if err != nil {
+		return err
+	}
+	Warnings = append(Warnings, warnings...)
+	return nil
+}
+
 // Load reads the krate config. If configPath is provided and non-empty, it uses
 // that file directly. Otherwise it looks for krate.config.ts in root.
 func Load(root string, configPath ...string) (*Config, error) {
+	Warnings = nil
 	cfg := Default()
 
 	tsPath := ""
@@ -269,6 +285,10 @@ func Load(root string, configPath ...string) (*Config, error) {
 				return nil, fmt.Errorf("parsing config %s: %w", tsPath, parseErr)
 			}
 		}
+	}
+
+	if err := cfg.ValidateConfig(); err != nil {
+		return nil, fmt.Errorf("invalid config: %w", err)
 	}
 
 	cfg.Resolve(root)

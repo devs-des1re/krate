@@ -1203,16 +1203,20 @@ func (b *Builder) buildPage(page string) (*PageResult, string, error) {
 			jsPath := filepath.Join(pageDir, jsFile)
 			os.WriteFile(jsPath, []byte(finalJS), 0644)
 
+			if b.Cfg.Sourcemap {
+				// The hydration bundle is compiler-generated, so the "source" is
+				// the page file; embed both the generated code and the page
+				// label so devtools can show a coherent (if synthetic) file.
+				sm := generateSourcemap(finalJS, outName, hydrationJS)
+				os.WriteFile(jsPath+".map", []byte(sm), 0644)
+				finalJS = appendSourceMappingURL(finalJS, jsFile+".map")
+				os.WriteFile(jsPath, []byte(finalJS), 0644)
+			}
+
 			// Keep the CSP hash and any other ingest in sync with the bytes
 			// actually written (which may differ from hydrationJS if
-			// import.meta.url was substituted).
+			// import.meta.url was substituted or a sourcemap comment appended).
 			hydrationJS = finalJS
-
-			if b.Cfg.Sourcemap {
-				sm := generateSourcemap(finalJS, hydrationJS, page)
-				smPath := jsPath + ".map"
-				os.WriteFile(smPath, []byte(sm), 0644)
-			}
 		} else {
 			hydrationJS = ""
 		}
@@ -1944,6 +1948,7 @@ func (b *Builder) writeWorkerBundles() error {
 			Write:            true,
 			Loader:           map[string]api.Loader{ext: loader},
 			MinifyWhitespace: b.Cfg.ShouldMinifyJS(),
+			Sourcemap:        sourceMapMode(b.Cfg.Sourcemap),
 			LogLevel:         api.LogLevelSilent,
 		})
 		if len(result.Errors) > 0 {
@@ -1962,6 +1967,16 @@ func (b *Builder) writeWorkerBundles() error {
 		os.WriteFile(filepath.Join(b.Cfg.OutDir, "workers.json"), idx, 0644)
 	}
 	return nil
+}
+
+// sourceMapMode maps Krate's sourcemap config to esbuild's mode. Linked maps
+// are written next to the output and referenced by a comment; when disabled,
+// none are produced.
+func sourceMapMode(enabled bool) api.SourceMap {
+	if enabled {
+		return api.SourceMapLinked
+	}
+	return api.SourceMapNone
 }
 
 // registerDynamicChunks collects dynamic-import chunk registrations from a page
@@ -2033,6 +2048,7 @@ func (b *Builder) writeDynamicChunkBundles() error {
 			Write:            true,
 			Loader:           map[string]api.Loader{ext: loader},
 			MinifyWhitespace: b.Cfg.ShouldMinifyJS(),
+			Sourcemap:        sourceMapMode(b.Cfg.Sourcemap),
 			LogLevel:         api.LogLevelSilent,
 		})
 		if len(result.Errors) > 0 {

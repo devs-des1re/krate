@@ -131,6 +131,12 @@ var builtinRules = []builtinRule{
 	{"a11y/img-alt", CategoryA11y, Error, ruleImgAlt},
 	{"a11y/heading-order", CategoryA11y, Warning, ruleHeadingOrder},
 	{"a11y/accessible-name", CategoryA11y, Warning, ruleAccessibleName},
+	{"a11y/duplicate-id", CategoryA11y, Warning, ruleDuplicateID},
+	{"a11y/landmark", CategoryA11y, Warning, ruleLandmark},
+	{"a11y/form-label", CategoryA11y, Warning, ruleFormLabel},
+	{"a11y/tabindex", CategoryA11y, Warning, rulePositiveTabindex},
+	{"a11y/aria-role", CategoryA11y, Warning, ruleARIARole},
+	{"a11y/color-contrast", CategoryA11y, Warning, ruleColorContrast},
 
 	// ── seo ───────────────────────────────────────────────────────────────
 	{"seo/title", CategorySEO, Error, ruleTitle},

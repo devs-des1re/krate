@@ -72,6 +72,8 @@ jobs:
       - name: Go test
         run: go test ./...
         working-directory: packages/compiler
+        env:
+          KRATE_REQUIRE_E2E: "1"
 
   fuzz:
     name: Fuzz

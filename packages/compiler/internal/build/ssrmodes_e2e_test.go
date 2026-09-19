@@ -239,7 +239,7 @@ func TestBuildServerModesManifestE2E(t *testing.T) {
 func TestISRVariantCacheE2E(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
-		t.Skipf("node not available: %v", err)
+		requireE2E(t, "node not available: %v", err)
 	}
 
 	repoRoot, err := repoRootPath()
@@ -249,7 +249,7 @@ func TestISRVariantCacheE2E(t *testing.T) {
 	runtimeSrc := filepath.Join(repoRoot, "packages", "runtime", "src")
 	serverTS := filepath.Join(runtimeSrc, "server.ts")
 	if _, err := os.Stat(serverTS); err != nil {
-		t.Skipf("@krate/runtime server source not found: %v", err)
+		requireE2E(t, "@krate/runtime server source not found: %v", err)
 	}
 
 	fakeRoot := t.TempDir()
@@ -532,7 +532,7 @@ func postRegionsList(t *testing.T, base, route, url string, params map[string]st
 func TestRegionSidecarE2E(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
-		t.Skipf("node not available: %v", err)
+		requireE2E(t, "node not available: %v", err)
 	}
 
 	repoRoot, err := repoRootPath()
@@ -639,7 +639,7 @@ func TestRegionSidecarE2E(t *testing.T) {
 func TestNestedRuntimeSuspenseSidecarE2E(t *testing.T) {
 	node, err := exec.LookPath("node")
 	if err != nil {
-		t.Skipf("node not available: %v", err)
+		requireE2E(t, "node not available: %v", err)
 	}
 
 	repoRoot, err := repoRootPath()
@@ -759,7 +759,7 @@ func TestPageRegionSidecarE2E(t *testing.T) {
 	ensureRuntimeDist(t)
 	node, err := exec.LookPath("node")
 	if err != nil {
-		t.Skipf("node not available: %v", err)
+		requireE2E(t, "node not available: %v", err)
 	}
 
 	repoRoot, err := repoRootPath()
@@ -876,7 +876,7 @@ func TestDynamicPageRegionSidecarE2E(t *testing.T) {
 	ensureRuntimeDist(t)
 	node, err := exec.LookPath("node")
 	if err != nil {
-		t.Skipf("node not available: %v", err)
+		requireE2E(t, "node not available: %v", err)
 	}
 
 	repoRoot, err := repoRootPath()
@@ -1020,7 +1020,7 @@ func ensureRuntimeDist(t *testing.T) {
 			npmCmd = "npm.cmd"
 		}
 		if _, err := exec.LookPath(npmCmd); err != nil {
-			t.Skipf("packages/runtime/dist missing and npm not available: %v", err)
+			requireE2E(t, "packages/runtime/dist missing and npm not available: %v", err)
 		}
 		out, err := exec.Command(npmCmd, "run", "build").CombinedOutput()
 		if err != nil {

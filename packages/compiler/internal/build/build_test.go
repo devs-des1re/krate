@@ -58,7 +58,7 @@ func TestBuildTestProject(t *testing.T) {
 	// from packages/compiler/internal/build/ -> packages/compiler/ -> examples
 	projectRoot := filepath.Clean(filepath.Join(pkgDir, "..", "..", "..", "..", "examples"))
 	if _, err := os.Stat(projectRoot); os.IsNotExist(err) {
-		t.Skipf("examples not found at %s", projectRoot)
+		requireE2E(t, "examples not found at %s", projectRoot)
 	}
 
 	cfg, err := config.Load(projectRoot)
@@ -295,7 +295,7 @@ func TestBuildRejectsUnsupportedRenderSyntax(t *testing.T) {
 	}
 	projectRoot := filepath.Clean(filepath.Join(pkgDir, "..", "..", "..", "..", "examples"))
 	if _, err := os.Stat(projectRoot); os.IsNotExist(err) {
-		t.Skipf("examples not found at %s", projectRoot)
+		requireE2E(t, "examples not found at %s", projectRoot)
 	}
 
 	cfg, err := config.Load(projectRoot)
@@ -365,7 +365,7 @@ func TestStageServerRenderer(t *testing.T) {
 	}
 	src := findServerRendererSource(repoRoot)
 	if src == "" {
-		t.Skipf("server-renderer source not found under %s", repoRoot)
+		requireE2E(t, "server-renderer source not found under %s", repoRoot)
 	}
 
 	// Fake project root so findRendererScript locates dist/.krate/ exactly as
@@ -394,7 +394,7 @@ func TestStageServerRenderer(t *testing.T) {
 	// Node must be able to parse the driver without tsx.
 	node, err := exec.LookPath("node")
 	if err != nil {
-		t.Skipf("node not available: %v", err)
+		requireE2E(t, "node not available: %v", err)
 	}
 	if out, err := exec.Command(node, "--check", staged).CombinedOutput(); err != nil {
 		t.Fatalf("node --check failed: %v\n%s", err, out)

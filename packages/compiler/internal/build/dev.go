@@ -13,6 +13,14 @@ import (
 	"github.com/kratejs/krate/packages/compiler/internal/config"
 )
 
+// ReloadEvent is sent on the dev reload channel after each rebuild: the routes
+// that changed (for partial reload) and any build errors (so the browser error
+// overlay can display them).
+type ReloadEvent struct {
+	Routes []string `json:"routes"`
+	Errors []string `json:"errors,omitempty"`
+}
+
 // Watch watches root for filesystem changes using native OS events (inotify,
 // FSEvents, kqueue, ReadDirectoryChangesW via fsnotify).
 // Each debounced batch of changes is fed through the dependency graph to
@@ -20,7 +28,7 @@ import (
 // reload. debounceDelay is the coalescing window: a single save (or an
 // atomic-rename editor) can emit many events in a burst, so only one rebuild
 // runs per burst. It returns an error only if the watcher fails to start.
-func Watch(root string, cfg *config.Config, debounceDelay time.Duration, reload chan<- []string) error {
+func Watch(root string, cfg *config.Config, debounceDelay time.Duration, reload chan<- ReloadEvent) error {
 	b := New(root, cfg)
 	b.DevMode = reload != nil
 
@@ -139,7 +147,7 @@ func Watch(root string, cfg *config.Config, debounceDelay time.Duration, reload 
 // processChanges routes a batch of changed files through the dependency graph
 // and rebuilds exactly what depends on them, falling back to a full rebuild when
 // nothing matches dependency tracking. Rebuilt routes are sent to reload.
-func (b *Builder) processChanges(changed []string, cfg *config.Config, reload chan<- []string) {
+func (b *Builder) processChanges(changed []string, cfg *config.Config, reload chan<- ReloadEvent) {
 	// Go files outside src/api/ are not krate-managed; ignore them so they
 	// don't trigger a full rebuild.
 	var filtered []string
@@ -186,6 +194,7 @@ func (b *Builder) processChanges(changed []string, cfg *config.Config, reload ch
 	pagesToBuild = uniqueStrings(pagesToBuild)
 
 	var routes []string
+	var buildErrors []string
 
 	if len(pagesToBuild) > 0 {
 		for _, p := range pagesToBuild {
@@ -200,6 +209,7 @@ func (b *Builder) processChanges(changed []string, cfg *config.Config, reload ch
 		fmt.Printf("  %sAffected pages:%s %v\n", cBlue, cReset, routes)
 		if err := b.BuildPages(pagesToBuild); err != nil {
 			fmt.Fprintf(os.Stderr, "  %sUI Compilation Error: %v%s\n", cRed, err, cReset)
+			buildErrors = append(buildErrors, "UI: "+err.Error())
 		}
 	}
 
@@ -207,6 +217,7 @@ func (b *Builder) processChanges(changed []string, cfg *config.Config, reload ch
 		fmt.Printf("  %sCompiling changed API endpoints...%s\n", cCyan, cReset)
 		if err := b.CompileAPIRoutes(apiToBuild); err != nil {
 			fmt.Fprintf(os.Stderr, "  %sAPI Compilation Error: %v%s\n", cRed, err, cReset)
+			buildErrors = append(buildErrors, "API: "+err.Error())
 		}
 	}
 
@@ -214,6 +225,7 @@ func (b *Builder) processChanges(changed []string, cfg *config.Config, reload ch
 		fmt.Printf("  %sCompiling changed Go API routes...%s\n", cCyan, cReset)
 		if err := b.BuildAllGoAPI(); err != nil {
 			fmt.Fprintf(os.Stderr, "  %sGo API Compilation Error: %v%s\n", cRed, err, cReset)
+			buildErrors = append(buildErrors, "Go API: "+err.Error())
 		}
 	}
 
@@ -221,15 +233,17 @@ func (b *Builder) processChanges(changed []string, cfg *config.Config, reload ch
 		fmt.Printf("  %sNo dependency tracking matches; rebuilding all...%s\n", cYellow, cReset)
 		if err := b.BuildAll(); err != nil {
 			fmt.Fprintf(os.Stderr, "  %sError: %v%s\n", cRed, err, cReset)
+			buildErrors = append(buildErrors, err.Error())
 		}
 		if err := b.BuildAllAPI(); err != nil {
 			fmt.Fprintf(os.Stderr, "  %sError: %v%s\n", cRed, err, cReset)
+			buildErrors = append(buildErrors, err.Error())
 		}
 	}
 
 	if reload != nil {
 		select {
-		case reload <- routes:
+		case reload <- ReloadEvent{Routes: routes, Errors: buildErrors}:
 		default:
 		}
 	}

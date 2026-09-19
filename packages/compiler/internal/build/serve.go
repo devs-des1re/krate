@@ -20,6 +20,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/kratejs/krate/packages/compiler/internal/config"
@@ -219,19 +220,6 @@ const (
 	cBold   = "\033[1m"
 )
 
-func colorStatus(code int) string {
-	switch {
-	case code >= 200 && code < 300:
-		return fmt.Sprintf("%s%d%s", cGreen, code, cReset)
-	case code >= 300 && code < 400:
-		return fmt.Sprintf("%s%d%s", cCyan, code, cReset)
-	case code >= 400 && code < 500:
-		return fmt.Sprintf("%s%d%s", cYellow, code, cReset)
-	default:
-		return fmt.Sprintf("%s%d%s", cRed, code, cReset)
-	}
-}
-
 // regionOpenRe matches a compiled dynamic region's opening splice marker:
 // <!--suspense:ID--> (Suspense boundary) or <!--region:ID--> (standalone
 // runtime component). The matching closing marker is <!--/suspense:ID--> or
@@ -344,8 +332,10 @@ func streamRegionPage(w http.ResponseWriter, flusher http.Flusher, absOut, route
 	// The marker id "page" denotes a coarse whole-page region (SSR/ISR shell);
 	// its frame carries the page's ISR cache status for the caller's headers.
 
-	// Open a raw TCP connection to the sidecar and POST /__krate/regions.
-	conn, err := net.DialTimeout("tcp", fmt.Sprintf("127.0.0.1:%d", ssrPort), 5*time.Second)
+	// Open a raw TCP connection to the sidecar and POST /__krate/regions. The
+	// read deadline bounds how long we wait for region frames so a stalled
+	// sidecar can't pin this request goroutine forever.
+	conn, err := dialSidecar(ssrPort, 30*time.Second)
 	if err != nil {
 		res.served = false
 		return res
@@ -512,7 +502,7 @@ func replaceTitle(shell, title string) string {
 }
 
 // ServeDev starts an HTTP server with live reload SSE + request logging.
-func ServeDev(root string, cfg *config.Config, reload <-chan []string, startTime time.Time) error {
+func ServeDev(root string, cfg *config.Config, reload <-chan ReloadEvent, startTime time.Time) error {
 	return serve(root, cfg, reload, startTime)
 }
 
@@ -521,7 +511,7 @@ func Serve(root string, cfg *config.Config, startTime time.Time) error {
 	return serve(root, cfg, nil, startTime)
 }
 
-func serve(root string, cfg *config.Config, reload <-chan []string, startTime time.Time) error {
+func serve(root string, cfg *config.Config, reload <-chan ReloadEvent, startTime time.Time) error {
 	port := cfg.DevServer.Port
 	if port == 0 {
 		port = 3000
@@ -620,7 +610,7 @@ func serve(root string, cfg *config.Config, reload <-chan []string, startTime ti
 
 			var body string
 			if r.Method != "GET" && r.Method != "HEAD" {
-				b, _ := io.ReadAll(r.Body)
+				b, _ := readBodyLimited(r)
 				body = string(b)
 			}
 
@@ -655,6 +645,7 @@ func serve(root string, cfg *config.Config, reload <-chan []string, startTime ti
 	}
 	ssr := NewSSRServer(root, ssrPort, cfg.SSR.SSRRuntime)
 	ssr.SetEnv(environ.Current)
+	ssr.SetTuning(cfg.SSR.Timeout, cfg.SSR.MaxCacheSize)
 	ssrStarted := false
 	if err := ssr.Start(); err != nil {
 		fmt.Fprintf(os.Stderr, "  %s⚠ SSR renderer not started:%s %v\n", cYellow, cReset, err)
@@ -670,7 +661,7 @@ func serve(root string, cfg *config.Config, reload <-chan []string, startTime ti
 			ssrURL := fmt.Sprintf("http://localhost:%d%s", ssrPort, r.URL.Path)
 			proxyReq, _ := http.NewRequest(r.Method, ssrURL, r.Body)
 			proxyReq.Header = r.Header
-			resp, err := http.DefaultClient.Do(proxyReq)
+			resp, err := sidecarClient.Do(proxyReq)
 			if err != nil {
 				w.WriteHeader(502)
 				w.Write([]byte(`{"error":"SSR renderer unavailable"}`))
@@ -694,6 +685,15 @@ func serve(root string, cfg *config.Config, reload <-chan []string, startTime ti
 	}
 
 	handlerWith404 := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Hashed assets (styles.<hash>.css, index.<hash>.js, chunks/*.<hash>.js,
+		// assets/<name>-<hash>.*) are content-addressed, so they can be cached
+		// immutably. HTML must never be, since it changes per build.
+		if isHashedAsset(r.URL.Path) {
+			w.Header().Set("Cache-Control", "public, max-age=31536000, immutable")
+		} else if strings.HasSuffix(r.URL.Path, ".html") || strings.HasSuffix(r.URL.Path, "/") || r.URL.Path == "" {
+			w.Header().Set("Cache-Control", "no-cache")
+		}
+
 		// A concrete static file beats any dynamic [param] pattern: /items/alpha
 		// must resolve to the static page, not the /items/[id] template.
 		if !staticRouteExists(absOut, r.URL.Path) {
@@ -750,18 +750,26 @@ func serve(root string, cfg *config.Config, reload <-chan []string, startTime ti
 				http.Error(w, "streaming unsupported", http.StatusInternalServerError)
 				return
 			}
+			// SSE is long-lived: extend the write deadline so the server's
+			// WriteTimeout doesn't kill an idle stream.
+			setStreamingDeadline(w, 24*time.Hour)
 			w.Header().Set("Content-Type", "text/event-stream")
 			w.Header().Set("Cache-Control", "no-cache")
 			w.Header().Set("Connection", "keep-alive")
 			fmt.Fprintf(w, "event: connected\ndata: {}\n\n")
 			flusher.Flush()
 
+			// Heartbeat keeps intermediaries from idle-closing the stream.
+			heartbeat := time.NewTicker(25 * time.Second)
+			defer heartbeat.Stop()
+
 			for {
 				select {
-				case routes, ok := <-reload:
+				case ev, ok := <-reload:
 					if !ok {
 						return
 					}
+					routes := ev.Routes
 
 					// Invalidate SSR renderer cache for changed pages
 					if ssrStarted && len(routes) > 0 {
@@ -773,16 +781,24 @@ func serve(root string, cfg *config.Config, reload <-chan []string, startTime ti
 									"source":     page.Source,
 									"bundlePath": page.BundlePath,
 								})
-								http.Post(
+								resp, err := sidecarClient.Post(
 									fmt.Sprintf("http://localhost:%d/__krate/ssr/invalidate", ssrPort),
 									"application/json",
 									bytes.NewReader(invBody),
 								)
+								if err == nil {
+									resp.Body.Close()
+								}
 							}
 						}
 					}
 
-					if len(routes) > 0 {
+					// Build errors take priority: tell the client to show them
+					// instead of reloading (a reload would show stale output).
+					if len(ev.Errors) > 0 {
+						errJSON, _ := json.Marshal(map[string][]string{"errors": ev.Errors})
+						fmt.Fprintf(w, "event: build-error\ndata: %s\n\n", errJSON)
+					} else if len(routes) > 0 {
 						// Partial reload: send affected page routes
 						data := `{"pages":[`
 						for i, r := range routes {
@@ -796,6 +812,9 @@ func serve(root string, cfg *config.Config, reload <-chan []string, startTime ti
 					} else {
 						fmt.Fprintf(w, "event: reload\ndata: {}\n\n")
 					}
+					flusher.Flush()
+				case <-heartbeat.C:
+					fmt.Fprintf(w, ": ping\n\n")
 					flusher.Flush()
 				case <-r.Context().Done():
 					return
@@ -1037,7 +1056,7 @@ func serve(root string, cfg *config.Config, reload <-chan []string, startTime ti
 			"path":   r.URL.Path,
 		})
 		middlewareURL := fmt.Sprintf("http://localhost:%d/__krate/middleware", apiPort)
-		resp, err := http.Post(middlewareURL, "application/json", bytes.NewReader(middlewareBody))
+		resp, err := sidecarClient.Post(middlewareURL, "application/json", bytes.NewReader(middlewareBody))
 		if err != nil {
 			// Middleware unavailable, continue
 			redirectRewriteHandler.ServeHTTP(w, r)
@@ -1094,7 +1113,34 @@ func serve(root string, cfg *config.Config, reload <-chan []string, startTime ti
 	if len(cfg.Plugins) > 0 {
 		top = wirePluginServeHandlers(root, cfg, top)
 	}
+	if reload == nil {
+		// Preview/static serving: gzip compressible assets.
+		top = gzipMiddleware(top)
+	}
 	mux.Handle("/", loggingMiddleware(top))
+
+	// Health/readiness endpoints. /healthz is liveness (always 200 while the
+	// process serves); /readyz additionally requires the SSR sidecar when one
+	// was expected.
+	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, "ok\n")
+	})
+	mux.HandleFunc("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		if ssrStarted && !ssr.IsRunning() {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			io.WriteString(w, "ssr-unavailable\n")
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		io.WriteString(w, "ready\n")
+	})
+
+	// Wrap the mux so every route (including /api/, /__krate/, health) gets
+	// request IDs, security headers, and panic recovery.
+	var rootHandler http.Handler = requestIDMiddleware(securityHeadersMiddleware(cfg, panicRecoveryMiddleware(Logger, mux)))
 
 	listener, err := net.Listen("tcp", fmt.Sprintf(":%d", port))
 	if err != nil {
@@ -1150,11 +1196,13 @@ func serve(root string, cfg *config.Config, reload <-chan []string, startTime ti
 		}
 	}
 
-	// Graceful shutdown: handle SIGINT/SIGTERM, stop SSR server
+	// Graceful shutdown: handle SIGINT and SIGTERM (containers send SIGTERM),
+	// stop sidecars, then drain with a bounded deadline so a stalled/streaming
+	// connection can't hang shutdown forever.
 	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, os.Interrupt)
+	signal.Notify(sigCh, os.Interrupt, syscall.SIGTERM)
 
-	httpServer := &http.Server{Handler: mux}
+	httpServer := newHTTPServer(rootHandler)
 	isrCloseOnce := sync.Once{}
 
 	go func() {
@@ -1170,7 +1218,12 @@ func serve(root string, cfg *config.Config, reload <-chan []string, startTime ti
 			goAPI.Close()
 			fmt.Printf("  %s✓%s Go API sidecar stopped\n", cGreen, cReset)
 		}
-		httpServer.Shutdown(context.Background())
+		ctx, cancel := context.WithTimeout(context.Background(), shutdownGrace)
+		defer cancel()
+		if err := httpServer.Shutdown(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "  %s⚠ graceful shutdown timed out, forcing close:%s %v\n", cYellow, cReset, err)
+			_ = httpServer.Close()
+		}
 	}()
 
 	if cfg.DevServer.Open {
@@ -1236,17 +1289,15 @@ func loggingMiddleware(next http.Handler) http.Handler {
 		lrw := &loggingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
 		next.ServeHTTP(lrw, r)
 
-		duration := time.Since(start)
-		durStr := fmt.Sprintf("%dms", duration.Milliseconds())
-		if duration.Milliseconds() == 0 {
-			durStr = fmt.Sprintf("%dμs", duration.Microseconds())
-		}
-		fmt.Printf("  %s %s %s %s %s%s%s\n",
-			cGray+time.Now().Format("15:04:05")+cReset,
-			r.Method,
-			r.URL.Path,
-			colorStatus(lrw.statusCode),
-			cGray, durStr, cReset)
+		// Structured log line (slog). Request ID is attached by the outer
+		// requestIDMiddleware so logs can be correlated with responses.
+		Logger.Info("request",
+			"id", requestIDFrom(r.Context()),
+			"method", r.Method,
+			"path", r.URL.Path,
+			"status", lrw.statusCode,
+			"duration_ms", time.Since(start).Milliseconds(),
+		)
 	})
 }
 

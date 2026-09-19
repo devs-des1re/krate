@@ -22,7 +22,7 @@ func testProjectPath(t *testing.T) string {
 	}
 	root := filepath.Clean(filepath.Join(pkgDir, "..", "..", "..", "..", "examples"))
 	if _, err := os.Stat(root); os.IsNotExist(err) {
-		t.Skipf("examples not found at %s", root)
+		requireE2E(t, "examples not found at %s", root)
 	}
 	return root
 }
