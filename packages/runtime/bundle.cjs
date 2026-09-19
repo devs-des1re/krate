@@ -40,7 +40,9 @@ async function buildBundle(outFile, entry) {
     globalName: '__krate_exports',
     minify: true,
     treeShaking: true,
-    target: 'es2017',
+    // Matches the .browserslistrc baseline (ES2020); the compiler emits ES2020
+    // for hydration chunks and workers too.
+    target: 'es2020',
     charset: 'utf8',
     logLevel: 'silent',
     footer: {
