@@ -56,6 +56,19 @@ jobs:
         run: go vet ./...
         working-directory: packages/compiler
 
+      - name: Check embedded docs are in sync
+        run: node scripts/sync-krate-docs.mjs --check
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "gofmt found unformatted files:"
+            echo "$unformatted"
+            exit 1
+          fi
+        working-directory: packages/compiler
+
       - name: Go test
         run: go test ./...
         working-directory: packages/compiler
