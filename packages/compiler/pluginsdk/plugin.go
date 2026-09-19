@@ -97,8 +97,8 @@ type Result struct {
 	RawCSS         *string         `json:"rawCSS,omitempty"`
 	Scripts        []string        `json:"scripts,omitempty"`
 	MetaTags       []string        `json:"metaTags,omitempty"`
-// Ast is the edited program document for AfterParse. Set by Dispatch from
-// ParseArgs.Program; plugins do not construct it directly.
+	// Ast is the edited program document for AfterParse. Set by Dispatch from
+	// ParseArgs.Program; plugins do not construct it directly.
 	Ast json.RawMessage `json:"ast,omitempty"`
 }
 

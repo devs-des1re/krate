@@ -42,7 +42,7 @@ func newKrateCapabilities(root, outDir string, env CommunityEnv, hookName string
 		PagesDir: env.PagesDir,
 		DevMode:  env.DevMode,
 		Pages:    pages,
-		Version:  version.Value,		Config:   env.Config,
+		Version:  version.Value, Config: env.Config,
 	}
 }
 

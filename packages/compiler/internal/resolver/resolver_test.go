@@ -39,7 +39,7 @@ func TestNodeModuleUnscoped(t *testing.T) {
 func TestNodeModuleScopedAtProjectRoot(t *testing.T) {
 	root := t.TempDir()
 	writePkg(t, filepath.Join(root, "node_modules", "@scope", "theme"), map[string]string{
-		"package.json": `{"module": "src/layout.js", "main": "legacy.js"}`,
+		"package.json":  `{"module": "src/layout.js", "main": "legacy.js"}`,
 		"src/layout.js": "export default () => null;",
 		"legacy.js":     "export default () => null;",
 	})
@@ -60,7 +60,7 @@ func TestNodeModuleHoisted(t *testing.T) {
 	}
 	writePkg(t, filepath.Join(root, "node_modules", "hoisted-theme"), map[string]string{
 		"package.json": `{"main": "layout.js"}`,
-		"layout.js":     "export default () => null;",
+		"layout.js":    "export default () => null;",
 	})
 	got := NodeModule(inner, "hoisted-theme")
 	want := filepath.Join(root, "node_modules", "hoisted-theme", "layout.js")

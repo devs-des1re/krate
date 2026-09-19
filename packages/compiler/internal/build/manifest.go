@@ -40,10 +40,10 @@ type ManifestPage struct {
 
 // ServerManifest is the on-disk format read by the Node.js renderer server.
 type ServerManifest struct {
-	Pages             []ManifestPage         `json:"pages"`
-	Stylesheet        string                 `json:"stylesheet,omitempty"`
-	RuntimeJS         string                 `json:"runtimeJS,omitempty"`         // shared runtime chunk path
-	RuntimeComponents []RuntimeComponentMeta `json:"runtimeComponents,omitempty"` // runtime server components
+	Pages             []ManifestPage          `json:"pages"`
+	Stylesheet        string                  `json:"stylesheet,omitempty"`
+	RuntimeJS         string                  `json:"runtimeJS,omitempty"`         // shared runtime chunk path
+	RuntimeComponents []RuntimeComponentMeta  `json:"runtimeComponents,omitempty"` // runtime server components
 	Regions           map[string][]RegionMeta `json:"regions,omitempty"`
 }
 

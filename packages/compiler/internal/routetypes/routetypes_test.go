@@ -50,9 +50,9 @@ func TestNormalize(t *testing.T) {
 
 func TestGenerateStaticAndDynamic(t *testing.T) {
 	out := Generate([]Route{
-		{Pattern: ".", Source: "src/pages/index.tsx"},        // root -> "/"
-		{Pattern: "about", Source: "src/pages/about.tsx"},    // -> "/about"
-		{Pattern: "about/", Source: "src/pages/about.tsx"},   // duplicate after normalize
+		{Pattern: ".", Source: "src/pages/index.tsx"},      // root -> "/"
+		{Pattern: "about", Source: "src/pages/about.tsx"},  // -> "/about"
+		{Pattern: "about/", Source: "src/pages/about.tsx"}, // duplicate after normalize
 		{Pattern: "video/[id]", Source: "src/pages/video/[id].tsx", Mode: "ssr"},
 		{Pattern: "user/[username]/posts/[postId]", Source: "src/pages/user/x.tsx"},
 	})

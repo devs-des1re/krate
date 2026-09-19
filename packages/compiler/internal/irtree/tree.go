@@ -378,20 +378,20 @@ func NewRuntimePropStore() *RuntimePropStore {
 
 // ─── ComponentSignature — serializable metadata for SPA reconciliation ─────
 type ComponentSignature struct {
-	ComponentID   SlotID
-	Tier          ComponentTier
-	Signals       []SignalDecl
-	Handlers      []HandlerDecl
-	RefBindings   []RefBinding
-	Effects       []string
-	Memos         []string
-	ExtraVars     []string
-	PreSignalVars []string
+	ComponentID     SlotID
+	Tier            ComponentTier
+	Signals         []SignalDecl
+	Handlers        []HandlerDecl
+	RefBindings     []RefBinding
+	Effects         []string
+	Memos           []string
+	ExtraVars       []string
+	PreSignalVars   []string
 	FuncPropAliases []string
-	BodyUses      []string
-	Children      []SlotID
-	SlotBindings  []SlotBinding
-	AttrBindings  []AttrBinding
+	BodyUses        []string
+	Children        []SlotID
+	SlotBindings    []SlotBinding
+	AttrBindings    []AttrBinding
 }
 
 // ─── SlotBinding — describes a content binding for hydration ────────────────

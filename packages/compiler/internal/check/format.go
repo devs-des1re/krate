@@ -106,9 +106,9 @@ func (s styler) wrap(code, v string) string {
 	return code + v + ansiReset
 }
 
-func (s styler) bold(v string) string     { return s.wrap(ansiBold, v) }
-func (s styler) dim(v string) string      { return s.wrap(ansiDim, v) }
-func (s styler) red(v string) string      { return s.wrap(ansiRed, v) }
+func (s styler) bold(v string) string      { return s.wrap(ansiBold, v) }
+func (s styler) dim(v string) string       { return s.wrap(ansiDim, v) }
+func (s styler) red(v string) string       { return s.wrap(ansiRed, v) }
 func (s styler) brightRed(v string) string { return s.wrap(ansiBrightR, v) }
-func (s styler) yellow(v string) string   { return s.wrap(ansiYellow, v) }
-func (s styler) cyan(v string) string     { return s.wrap(ansiCyan, v) }
+func (s styler) yellow(v string) string    { return s.wrap(ansiYellow, v) }
+func (s styler) cyan(v string) string      { return s.wrap(ansiCyan, v) }
