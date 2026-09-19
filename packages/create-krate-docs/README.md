@@ -43,10 +43,12 @@ A ready-to-run Krate docs site, powered by the `docs` plugin:
 
 - `krate.config.ts` — `docs()` plugin with search, social links, and SEO
 - `tsconfig.json` — TypeScript configuration
-- `src/components/docs-layout.tsx` — full docs layout (sidebar, TOC, prev/next)
 - `src/pages/` — home, `_layout`, and 404 pages
 - `src/content/docs/` — markdown/mdx content (add files here to create pages)
-- `public/` — styles, search script, favicon
+- `public/` — site styles, favicon, robots.txt
+
+The docs shell (sidebar, table of contents, breadcrumbs, prev/next, theme
+toggle) comes from `@krate/base-docs-theme` via `theme: baseDocsTheme()`.
 
 ## Writing docs
 
