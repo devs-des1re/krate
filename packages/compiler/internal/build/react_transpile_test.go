@@ -104,6 +104,59 @@ func TestReactKeyNotEmitted(t *testing.T) {
 	}
 }
 
+// TestReactUseReducerBuild verifies useReducer lowers to createReducer in the
+// hydration JS and the state getter renders its SSR initial.
+func TestReactUseReducerBuild(t *testing.T) {
+	page := `
+		import { useReducer } from 'react';
+		export default function Page() {
+			const [count, dispatch] = useReducer((s, a) => s + a, 7);
+			return <button onClick={() => dispatch(1)}>{count}</button>;
+		}
+	`
+	html, js := buildReactPage(t, page)
+	if !strings.Contains(html, ">7<") {
+		t.Errorf("SSR should render reducer initial 7:\n%.400s", html)
+	}
+	if !strings.Contains(js, "createReducer") {
+		t.Errorf("hydration should emit createReducer:\n%s", js)
+	}
+}
+
+// TestReactUseIdBuild verifies useId lowers to a stable per-instance literal
+// used for both the id and htmlFor attributes, with no runtime useId call.
+func TestReactUseIdBuild(t *testing.T) {
+	page := `
+		import { useId } from 'react';
+		export default function Page() {
+			const id = useId();
+			return <div><label htmlFor={id}>Name</label><input id={id} /></div>;
+		}
+	`
+	html, js := buildReactPage(t, page)
+	if strings.Contains(js, "useId") {
+		t.Errorf("useId should be compile-time resolved:\n%s", js)
+	}
+	// The same generated id must appear on both the label and input.
+	if !strings.Contains(html, `for="krate-`) || !strings.Contains(html, `id="krate-`) {
+		t.Errorf("expected matching for/id literals:\n%.500s", html)
+	}
+}
+
+// TestReactFragmentBuild verifies <Fragment> renders its children inline.
+func TestReactFragmentBuild(t *testing.T) {
+	page := `
+		import { Fragment } from 'react';
+		export default function Page() {
+			return <Fragment><span>a</span><span>b</span></Fragment>;
+		}
+	`
+	html, _ := buildReactPage(t, page)
+	if !strings.Contains(html, "<span>a</span><span>b</span>") {
+		t.Errorf("fragment children should render inline:\n%.400s", html)
+	}
+}
+
 // TestReactStyleObjectBuild verifies a literal style object folds to CSS.
 func TestReactStyleObjectBuild(t *testing.T) {
 	page := `

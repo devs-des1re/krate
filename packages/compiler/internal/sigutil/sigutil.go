@@ -35,6 +35,13 @@ type Decl struct {
 	Setter     string   // createSignal's second destructured name
 	Initial    ast.Expr // initial value expression (may be nil for resources)
 	IsResource bool
+	// Factory names the reactive factory the declaration was built with
+	// (createSignal, createReducer, ...). Empty for resources/CSS primitives.
+	Factory string
+	// Args holds the factory call's arguments so lowering passes can emit the
+	// original call (e.g. createReducer's reducer function) instead of a plain
+	// createSignal.
+	Args []ast.Expr
 	// CSSKind marks a zero-JS CSS declaration (choice/toggle/flags/group/range/
 	// stack). These are compiled to hidden inputs + `:has()` CSS, never emitted
 	// as JS signals.
@@ -100,7 +107,14 @@ func Find(body []ast.Stmt, recurse bool) []Decl {
 					switch id.Name {
 					case "createSignal":
 						if len(decl.Names) >= 2 && len(call.Args) >= 1 {
-							out = append(out, Decl{Name: decl.Names[0], Setter: decl.Names[1], Initial: call.Args[0]})
+							out = append(out, Decl{Name: decl.Names[0], Setter: decl.Names[1], Initial: call.Args[0], Factory: "createSignal", Args: call.Args})
+						}
+					case "createReducer":
+						// Reducer state getter: the initial value is the second
+						// argument (reducer, initial) — the third for the
+						// optional init function form.
+						if len(decl.Names) >= 2 && len(call.Args) >= 2 {
+							out = append(out, Decl{Name: decl.Names[0], Setter: decl.Names[1], Initial: call.Args[1], Factory: "createReducer", Args: call.Args})
 						}
 					case "createResource":
 						if len(decl.Names) >= 1 && len(call.Args) >= 1 {

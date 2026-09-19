@@ -427,7 +427,22 @@ func (b *builder) buildComponentNode(fn *ast.FnDecl, parentID string) *Component
 	if b.localProps == nil {
 		b.localProps = make(map[string]string)
 	}
-	locals := collectLocalVars(fn.Body, b.sigMap(), b.localProps)
+	// useId() resolves to a per-component-instance build-time literal. The
+	// instance ID is stable across SSR and hydration, so `<Label htmlFor={id}>`
+	// / `<Input id={id}>` agree without any runtime state (and without the
+	// SSR/hydration divergence React's runtime counter risks). Multiple calls
+	// within one instance get distinct suffixes.
+	useIdBase := "krate-" + strings.ReplaceAll(string(id), ".", "-")
+	useIdN := 0
+	nextUseId := func() string {
+		n := useIdN
+		useIdN++
+		if n == 0 {
+			return useIdBase
+		}
+		return useIdBase + "-" + itoa(n)
+	}
+	locals, useIdLocals := collectLocalVars(fn.Body, b.sigMap(), b.localProps, nextUseId)
 	if b.localFuncProps != nil && tier == TierClient {
 		// Remove function-prop aliases from the fold set so they aren't
 		// serialized as the function's name string, and re-declare them as
@@ -437,6 +452,19 @@ func (b *builder) buildComponentNode(fn *ast.FnDecl, parentID string) *Component
 				funcPropAliases = append(funcPropAliases, name+"=props."+prop)
 				delete(locals, name)
 			}
+		}
+	}
+	// useId locals are referenced by SSR-resolved attributes and any client
+	// bindings, so emit them as extra vars for every client component —
+	// including the page root (whose ordinary locals are intentionally left
+	// unemitted to allow static promotion).
+	if tier == TierClient {
+		declared := declaredLocalNames(node, fn)
+		for _, name := range sortedKeys(useIdLocals) {
+			if declared[name] {
+				continue
+			}
+			node.ExtraVars = append(node.ExtraVars, "var "+name+"="+jsLiteralFor(useIdLocals[name]))
 		}
 	}
 	if len(locals) > 0 {
@@ -613,6 +641,13 @@ func (b *builder) collectReferencedFunctions(node *ComponentNode, body []ast.Stm
 	}
 	for _, memo := range node.Memos {
 		scan(memo)
+	}
+	// Signal factory calls (e.g. createReducer's reducer function) may reference
+	// local/module functions that must be hoisted into the hydration scope.
+	for _, s := range node.Signals {
+		if s.FactoryJS != "" {
+			scan(s.FactoryJS)
+		}
 	}
 	// Props registrations (__krate_props["<id>"]={onClick:clear,...}) reference
 	// local functions from the parent scope; hoist them so the child's forwarded
@@ -3320,9 +3355,28 @@ func (b *builder) collectSignalDecls(fn *ast.FnDecl) []SignalDecl {
 			IsString:    isStr,
 			InitialExpr: d.Initial,
 			RawInit:     signalRawInit(d.Initial, initial, b.sigMap(), b.localProps),
+			FactoryJS:   b.reducerFactoryJS(d),
 		})
 	}
 	return decls
+}
+
+// reducerFactoryJS renders the hydration `createReducer(reducer, initial)` call
+// for a createReducer declaration. Returns "" for ordinary signals so the normal
+// createSignal emission path applies.
+func (b *builder) reducerFactoryJS(d sigutil.Decl) string {
+	if d.Factory != "createReducer" || len(d.Args) < 2 {
+		return ""
+	}
+	reducer := generateExprJS(d.Args[0], b.sigMap())
+	if reducer == "" {
+		return ""
+	}
+	initial := generateExprJS(d.Args[1], b.sigMap())
+	if initial == "" {
+		initial = "undefined"
+	}
+	return "createReducer(" + reducer + "," + initial + ")"
 }
 
 // signalRawInit decides whether a signal initializer must be emitted verbatim
@@ -3819,6 +3873,12 @@ func (b *builder) collectExtraVarJS(body []ast.Stmt) (pre, post []string) {
 		case *ast.VarStmt:
 			for _, decl := range s.Decls {
 				if decl.Init != nil {
+					// useId() is resolved to a per-instance literal by the
+					// caller (collectLocalVars) and emitted from there, so it is
+					// skipped here to avoid emitting the raw marker.
+					if isUseIdCall(decl.Init) {
+						continue
+					}
 					if call, ok := decl.Init.(*ast.CallExpr); ok {
 						if id, ok := call.Callee.(*ast.Identifier); ok {
 							// createMemo stays an extra var so the named getter
@@ -4206,17 +4266,18 @@ func findReturnStmt(body []ast.Stmt) *ast.ReturnStmt {
 // (`x = ...`, `x += ...`) across `var`/expression/`if` statements. The result
 // is used to resolve SSR initial values AND to emit `var x = <const>` decls into
 // the hydration bundle so bindings referencing locals don't throw ReferenceError.
-func collectLocalVars(body []ast.Stmt, sigMap map[string]ast.Expr, props map[string]string) map[string]string {
-	locals := make(map[string]string)
+func collectLocalVars(body []ast.Stmt, sigMap map[string]ast.Expr, props map[string]string, nextUseId func() string) (locals, useIds map[string]string) {
+	locals = make(map[string]string)
+	useIds = make(map[string]string)
 	working := make(map[string]string, len(props))
 	for k, v := range props {
 		working[k] = v
 	}
-	applyLocalStmts(body, locals, working, sigMap)
-	return locals
+	applyLocalStmts(body, locals, working, sigMap, nextUseId, useIds)
+	return locals, useIds
 }
 
-func applyLocalStmts(stmts []ast.Stmt, locals, working map[string]string, sigMap map[string]ast.Expr) {
+func applyLocalStmts(stmts []ast.Stmt, locals, working map[string]string, sigMap map[string]ast.Expr, nextUseId func() string, useIds map[string]string) {
 	for _, stmt := range stmts {
 		switch s := stmt.(type) {
 		case *ast.VarStmt:
@@ -4229,6 +4290,20 @@ func applyLocalStmts(stmts []ast.Stmt, locals, working map[string]string, sigMap
 					continue
 				}
 				if decl.Init != nil {
+					// useId() resolves to a per-instance build-time literal so
+					// SSR and hydration agree without runtime state.
+					if isUseIdCall(decl.Init) {
+						idLit := ""
+						if nextUseId != nil {
+							idLit = nextUseId()
+						}
+						locals[name] = idLit
+						working[name] = idLit
+						if useIds != nil {
+							useIds[name] = idLit
+						}
+						continue
+					}
 					// Skip locals whose initializer references unknowns (leaks),
 					// but KEEP those that resolve to a definitive value even if
 					// it's an empty string (e.g. `var src = props.src || ""`
@@ -4246,17 +4321,28 @@ func applyLocalStmts(stmts []ast.Stmt, locals, working map[string]string, sigMap
 		case *ast.IfStmt:
 			test := evalConstWithSignals(s.Test, sigMap, working)
 			if isTruthyValue(test) {
-				applyLocalStmts(s.Consequent, locals, working, sigMap)
+				applyLocalStmts(s.Consequent, locals, working, sigMap, nextUseId, useIds)
 				continue
 			}
 			if isFalsyValue(test) {
-				applyLocalStmts(s.Alternate, locals, working, sigMap)
+				applyLocalStmts(s.Alternate, locals, working, sigMap, nextUseId, useIds)
 				continue
 			}
 		case *ast.BlockStmt:
-			applyLocalStmts(s.Body, locals, working, sigMap)
+			applyLocalStmts(s.Body, locals, working, sigMap, nextUseId, useIds)
 		}
 	}
+}
+
+// isUseIdCall reports whether expr is the rewritten `__krate_useId()` marker
+// (React's useId) that the IR builder resolves to a per-instance literal.
+func isUseIdCall(expr ast.Expr) bool {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	id, ok := call.Callee.(*ast.Identifier)
+	return ok && id.Name == "__krate_useId"
 }
 
 func applyLocalAssignment(expr ast.Expr, locals, working map[string]string, sigMap map[string]ast.Expr) {

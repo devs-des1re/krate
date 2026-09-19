@@ -236,6 +236,87 @@ func TestRewriteReactStyleObjectNonLiteralUntouched(t *testing.T) {
 	}
 }
 
+// ─── useReducer ─────────────────────────────────────────────────────────────
+
+func TestRewriteReactUseReducer(t *testing.T) {
+	out := rewriteSrc(t, `
+		import { useReducer } from 'react';
+		export default function Page() {
+			const [count, dispatch] = useReducer((s, a) => s + a, 0);
+			return <button onClick={() => dispatch(1)}>{count}</button>;
+		}
+	`)
+	if !strings.Contains(out, "createReducer") {
+		t.Errorf("useReducer should map to createReducer:\n%s", out)
+	}
+	if !strings.Contains(out, "count()") {
+		t.Errorf("reducer getter should be auto-called:\n%s", out)
+	}
+	if strings.Contains(out, "dispatch()") {
+		t.Errorf("dispatch must not be auto-called:\n%s", out)
+	}
+}
+
+func TestRewriteReactNamespaceUseReducer(t *testing.T) {
+	out := rewriteSrc(t, `
+		import React from 'react';
+		export default function Page() {
+			const [s, dispatch] = React.useReducer((s, a) => a, 0);
+			return <div>{s}</div>;
+		}
+	`)
+	if !strings.Contains(out, "createReducer") || strings.Contains(out, "React.") {
+		t.Errorf("React.useReducer should map to createReducer:\n%s", out)
+	}
+}
+
+// ─── Fragment ───────────────────────────────────────────────────────────────
+
+func TestRewriteReactFragmentNamedImport(t *testing.T) {
+	out := rewriteSrc(t, `
+		import { Fragment } from 'react';
+		export default function Page() {
+			return <Fragment><div>a</div><div>b</div></Fragment>;
+		}
+	`)
+	if strings.Contains(out, "Fragment") {
+		t.Errorf("Fragment tag should lower to a JSX fragment:\n%s", out)
+	}
+	if !strings.Contains(out, "<>") {
+		t.Errorf("expected a JSX fragment:\n%s", out)
+	}
+}
+
+func TestRewriteReactFragmentNamespace(t *testing.T) {
+	out := rewriteSrc(t, `
+		import React from 'react';
+		export default function Page() {
+			return <React.Fragment><div>a</div></React.Fragment>;
+		}
+	`)
+	if strings.Contains(out, "Fragment") || strings.Contains(out, "React.") {
+		t.Errorf("React.Fragment should lower to a JSX fragment:\n%s", out)
+	}
+}
+
+// ─── useId ──────────────────────────────────────────────────────────────────
+
+func TestRewriteReactUseIdMarker(t *testing.T) {
+	out := rewriteSrc(t, `
+		import { useId } from 'react';
+		export default function Page() {
+			const id = useId();
+			return <div id={id} />;
+		}
+	`)
+	if strings.Contains(out, "= useId()") {
+		t.Errorf("useId should be lowered to a marker:\n%s", out)
+	}
+	if !strings.Contains(out, "__krate_useId()") {
+		t.Errorf("expected the useId marker:\n%s", out)
+	}
+}
+
 // ─── no React import ────────────────────────────────────────────────────────
 
 func TestRewriteReactNoReactLeavesKrateCodeAlone(t *testing.T) {

@@ -84,11 +84,13 @@ signals.
 
 ## Gradual adoption via React interop
 
-React interop is always on. Krate automatically rewrites `useState`/
-`useEffect`/`useRef` imports and `React.*` member calls to signal-based
-equivalents during compilation, so files deeply tied to React hooks compile
-without config changes. This is a migration aid, not a full React runtime —
-see [Configuration](/docs/reference/config/).
+React interop is always on. Krate automatically rewrites React hooks
+(`useState`, `useEffect`, `useMemo`, `useReducer`, `useRef`, `useCallback`,
+`useContext`, `useId`) and `React.*` member calls to signal-based equivalents
+during compilation, and auto-calls bare reads (`{count}` → `count()`), so files
+deeply tied to React hooks compile without config changes. This is a migration
+aid, not a full React runtime — see
+[React Compatibility](/docs/guides/react-compatibility/).
 
 ## What is intentionally different
 

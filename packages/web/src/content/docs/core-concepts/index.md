@@ -60,9 +60,10 @@ Effects re-run when the signals they read change. Memos cache derived values.
 Context provides dependency injection. Resources handle async data.
 
 React compatibility is always on: React imports and primitives (`useState`,
-`useEffect`, `useRef`, `useMemo`, `forwardRef`, `React.*`) are automatically
-rewritten to their Krate equivalents for gradual migration. No config is
-required.
+`useEffect`, `useRef`, `useMemo`, `useReducer`, `useId`, `forwardRef`,
+`React.*`) are automatically rewritten to their Krate equivalents, and bare
+reads like `{count}` are auto-called, so React source runs unmodified. No config
+is required — see [React Compatibility](/docs/guides/react-compatibility/).
 
 ## Rendering modes
 

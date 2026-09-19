@@ -117,13 +117,19 @@ func GenerateNewHydrationJS(result *EmitResult) string {
 				// literals or they reference an undefined global at runtime.
 				val = "'" + escapeJSString(val) + "'"
 			}
+			factory := "createSignal(" + val + ")"
+			if s.FactoryJS != "" {
+				// Reactive primitives whose setter is not a plain write (e.g.
+				// createReducer) emit their full factory call instead.
+				factory = s.FactoryJS
+			}
 			b.WriteString("const [")
 			b.WriteString(s.Name)
 			b.WriteString(",")
 			b.WriteString(s.SetterName)
-			b.WriteString("]=createSignal(")
-			b.WriteString(val)
-			b.WriteString(");\n")
+			b.WriteString("]=")
+			b.WriteString(factory)
+			b.WriteString(";\n")
 		}
 
 		// Extra variables (must come before effects/memos that may reference them)

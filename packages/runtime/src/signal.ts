@@ -376,6 +376,22 @@ export function createMemo<T>(fn: () => T): () => T {
   return get;
 }
 
+/**
+ * Reducer state primitive: a `createSignal` whose setter applies a reducer.
+ * Returns `[getter, dispatch]` — the getter contract matches `createSignal`, so
+ * compiler slot bindings read it as `getter()` and hydration treats it like any
+ * other signal. Used both directly and as the lowering target for React's
+ * `useReducer`.
+ */
+export function createReducer<S, A>(
+  reducer: (state: S, action: A) => S,
+  initial: S,
+): [() => S, (action: A) => void] {
+  const [get, set] = createSignal<S>(initial);
+  const dispatch = (action: A): void => set((prev) => reducer(prev, action));
+  return [get, dispatch];
+}
+
 /** A mutable ref object. `current` starts as `initial` and is assigned the
  * DOM element when passed as `ref={refObj}` on an element. */
 export interface RefObject<T> {

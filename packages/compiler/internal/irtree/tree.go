@@ -262,6 +262,11 @@ type SignalDecl struct {
 	// When non-empty it takes precedence over Initial/IsString so the client
 	// evaluates the real expression instead of a dropped/undefined value.
 	RawInit string
+	// FactoryJS is a complete JS factory call (`createReducer(…, …)`) emitted
+	// verbatim in place of `createSignal(...)`. Used for reactive primitives
+	// whose setter is not a plain createSignal write (e.g. createReducer's
+	// reducer dispatch). Empty for ordinary signals.
+	FactoryJS string
 }
 
 // ─── ComponentNode — a single component instance in the tree ───────────────

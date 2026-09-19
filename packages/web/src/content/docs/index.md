@@ -90,3 +90,4 @@ hydration bundle registers an effect that updates just that text node when
 | Every CLI command | [CLI Reference](/docs/cli/) |
 | Signals and effects | [Reactivity](/docs/core-concepts/reactivity/) |
 | Routing and layouts | [Routing & Layouts](/docs/core-concepts/routing/) |
+| Coming from React | [React Compatibility](/docs/guides/react-compatibility/) |

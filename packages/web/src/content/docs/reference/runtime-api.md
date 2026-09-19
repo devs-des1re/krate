@@ -92,6 +92,18 @@ const [t, setT]     = createCSSChoice('a', { as: 'tabs', aria: false }) // opt o
 
 See [CSS Signals](/docs/core-concepts/reactivity/#css-signals).
 
+### `createReducer`
+
+A `createSignal` whose setter applies a reducer. Returns `[getter, dispatch]`,
+so the getter reads like any other signal (and hydrates identically). This is
+also the target of React's `useReducer`.
+
+```typescript
+const [count, dispatch] = createReducer((state, action) => state + action, 0)
+count()          // read current state
+dispatch(1)      // reduces: state = reducer(state, action)
+```
+
 ### `createEffect`
 
 ```typescript
@@ -248,6 +260,24 @@ user.state      // 'unresolved' | 'loading' | 'ready' | 'error' | 'refreshing'
 mutate(prev => ({ ...prev, name: 'new' }))  // optimistic update
 refetch()       // trigger re-fetch
 ```
+
+## React compatibility
+
+The compiler rewrites React hooks and `React.*` calls to the primitives above at
+build time, so React source runs unchanged (no React runtime is shipped). In
+particular:
+
+- `useState` → `createSignal`, `useEffect` → `createEffect`,
+  `useMemo` → `createMemo`, `useReducer` → `createReducer`.
+- `useRef` → `{ current: initial }`, `useCallback` → the function,
+  `useContext` → `Context.useContext()`.
+- `memo`/`lazy` → identity, `createElement` → `h`,
+  `<Fragment>` → a JSX fragment.
+- `useId` → a stable per-instance build-time literal.
+- Bare reads (`{count}`) are auto-called (`count()`).
+
+See the [React Compatibility guide](/docs/guides/react-compatibility/) for the
+full list and the intentionally unsupported cases.
 
 ## Type exports
 

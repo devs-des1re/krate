@@ -17,11 +17,15 @@ var reactNames = map[string]string{
 	"useLayoutEffect":    "createEffect",
 	"useInsertionEffect": "createEffect",
 	"useMemo":            "createMemo",
+	"useReducer":         "createReducer",
 	"useRef":             "useRef",
 	"useCallback":        "useCallback",
 	"forwardRef":         "forwardRef",
 	"createContext":      "createContext",
 	"createElement":      "h",
+	// useId is lowered by the IR builder to a per-instance build-time literal;
+	// the marker identifier is resolved there (it has the instance context).
+	"useId": "__krate_useId",
 }
 
 // structuralReactAPIs are React APIs lowered structurally (identity/passthrough
@@ -38,8 +42,9 @@ var structuralReactAPIs = map[string]bool{
 // reactiveFactories are React APIs whose first destructured binding is a value
 // getter in Krate terms. Bare reads of those bindings become calls.
 var reactiveFactories = map[string]bool{
-	"useState": true,
-	"useMemo":  true,
+	"useState":   true,
+	"useMemo":    true,
+	"useReducer": true,
 }
 
 // reactAPI reports whether name is a known React API (rename or structural).
@@ -95,6 +100,10 @@ func (s *scope) isGetter(name string) bool {
 type reactCtx struct {
 	imports map[string]string // local name -> React API name
 	alias   string            // namespace/default alias for `React`
+	// fragmentNames holds local bindings (including the React alias) that
+	// resolve to `React.Fragment`, so `<Fragment>` / `<React.Fragment>` can be
+	// lowered to a real JSX fragment.
+	fragmentNames map[string]bool
 }
 
 // localAPI resolves an identifier bound by a React named import to its React
@@ -141,7 +150,7 @@ func (c *reactCtx) callAPI(callee ast.Expr) (string, bool) {
 // existing krate runtime primitives, and bare reads of hook values are
 // auto-called so unmodified React (`{count}`, `count + 1`) behaves correctly.
 func RewriteReact(prog *ast.Program) {
-	ctx := &reactCtx{imports: map[string]string{}}
+	ctx := &reactCtx{imports: map[string]string{}, fragmentNames: map[string]bool{}}
 	var toRemove []int
 
 	for i, stmt := range prog.Body {
@@ -173,7 +182,13 @@ func RewriteReact(prog *ast.Program) {
 			if reactAPI(named.Remote) {
 				ctx.imports[local] = named.Remote
 			}
+			if named.Remote == "Fragment" {
+				ctx.fragmentNames[local] = true
+			}
 		}
+	}
+	if ctx.alias != "" {
+		ctx.fragmentNames[ctx.alias] = true
 	}
 
 	for i := len(toRemove) - 1; i >= 0; i-- {
@@ -331,7 +346,10 @@ func (c *reactCtx) isReactiveFactory(init ast.Expr) bool {
 		return reactiveFactories[api]
 	}
 	if id, ok := call.Callee.(*ast.Identifier); ok {
-		return id.Name == "createSignal" || id.Name == "createMemo"
+		switch id.Name {
+		case "createSignal", "createMemo", "createReducer":
+			return true
+		}
 	}
 	return false
 }
@@ -405,6 +423,9 @@ func (c *reactCtx) rewriteExprCtx(expr ast.Expr, sc *scope, valuePos bool) ast.E
 	case *ast.DynamicImport:
 		e.Arg = c.rewriteExpr(e.Arg, sc)
 	case *ast.JSXElement:
+		if c.isFragmentTag(e.Opening.Name) {
+			return c.lowerFragment(e, sc)
+		}
 		c.rewriteJSXElement(e, sc)
 	case *ast.JSXFragment:
 		for i, child := range e.Children {
@@ -481,6 +502,30 @@ func (c *reactCtx) rewriteCall(e *ast.CallExpr, sc *scope) ast.Expr {
 		e.Args[i] = c.rewriteExpr(arg, sc)
 	}
 	return e
+}
+
+// isFragmentTag reports whether a JSX tag name resolves to React.Fragment:
+// either a `<Fragment>` named import or `<React.Fragment>` (and any aliased
+// namespace). Plain `<>...</>` is already a JSXFragment and never reaches here.
+func (c *reactCtx) isFragmentTag(name string) bool {
+	if c.fragmentNames[name] {
+		return true
+	}
+	if i := strings.LastIndex(name, "."); i >= 0 {
+		obj := name[:i]
+		prop := name[i+1:]
+		return prop == "Fragment" && c.fragmentNames[obj]
+	}
+	return false
+}
+
+// lowerFragment converts `<Fragment>...</Fragment>` / `<React.Fragment>` into a
+// real JSX fragment, which the existing fragment pipeline already handles.
+func (c *reactCtx) lowerFragment(el *ast.JSXElement, sc *scope) ast.Expr {
+	for i, child := range el.Children {
+		el.Children[i] = c.rewriteJSXChild(child, sc)
+	}
+	return &ast.JSXFragment{Position: el.Position, Children: el.Children}
 }
 
 func (c *reactCtx) rewriteJSXElement(el *ast.JSXElement, sc *scope) {

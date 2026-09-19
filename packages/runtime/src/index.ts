@@ -1,4 +1,4 @@
-export { createSignal, createCSSChoice, createCSSToggle, createCSSFlags, createCSSGroup, createCSSRange, createCSSStack, createEffect, createMemo, onCleanup, onMount, forwardRef, useRef, disposeAll } from './signal.js';
+export { createSignal, createReducer, createCSSChoice, createCSSToggle, createCSSFlags, createCSSGroup, createCSSRange, createCSSStack, createEffect, createMemo, onCleanup, onMount, forwardRef, useRef, disposeAll } from './signal.js';
 export type { CSSARIAOptions, CSSVars, CSSPrimitiveOptions, CSSStackActions } from './signal.js';
 export { h, mount, hydrate, insert, clearNodes, disposeNode } from './dom.js';
 export { Fragment, jsx, jsxs } from './jsx-runtime.js';

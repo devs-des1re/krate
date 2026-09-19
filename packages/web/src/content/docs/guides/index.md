@@ -22,6 +22,7 @@ Practical, end-to-end walkthroughs.
 | [Error Handling](/docs/guides/error-handling/) | Handle build, render, and client errors |
 | [Troubleshooting](/docs/guides/troubleshooting/) | Fix common errors |
 | [Migrating from Next.js](/docs/guides/migrating-from-nextjs/) | Move an existing site to Krate |
+| [React Compatibility](/docs/guides/react-compatibility/) | Transpile React hooks and JSX to Krate |
 | [Testing](/docs/guides/testing/) | Test logic, components, and pages |
 | [TypeScript Setup](/docs/guides/typescript-setup/) | Configure tsconfig and typed routes |
 | [Upgrading](/docs/guides/upgrading/) | Keep packages in sync and upgrade safely |
