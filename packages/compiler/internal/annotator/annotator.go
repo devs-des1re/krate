@@ -559,6 +559,16 @@ func MergeModuleFunctions(ann *irtree.Annotations, modules []ModuleSource) {
 	for _, mod := range modules {
 		if mod.Program != nil {
 			collectFunctionsWithSource(mod.Program.Body, ann.Functions, ann.ComponentSources, ann.ComponentRaw, mod.Path, mod.RawSource)
+			// Merge module-level cva factories so variant calls in the entry
+			// module can fold against factories defined in imported modules.
+			if ann.CVAFactories == nil {
+				ann.CVAFactories = make(map[string]*irtree.CVASpec)
+			}
+			for name, spec := range irtree.CollectCVAFactories(mod.Program) {
+				if _, exists := ann.CVAFactories[name]; !exists {
+					ann.CVAFactories[name] = spec
+				}
+			}
 		}
 	}
 	// Re-walk used components to pick up newly discovered functions. The used

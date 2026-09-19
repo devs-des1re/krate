@@ -151,6 +151,54 @@ camelCase keys to kebab-case and adding `px` to dimension values:
 `onDoubleClick` is translated to the DOM `dblclick` event. `key` and
 `suppressHydrationWarning` are compiler-only and never appear in the output.
 
+## shadcn/ui
+
+shadcn/ui copies component source into your project, so its components compile
+like any other Krate source — no config, no islands. The patterns shadcn relies
+on are handled by the compiler:
+
+- **`cva` (class-variance-authority)** — a literal `const x = cva(base, config)`
+  and calls like `x({ variant, size })` fold to a static class string at build
+  time, including `defaultVariants` and `compoundVariants`.
+- **`cn` / `clsx` / `tailwind-merge`** — imported from `@krate/runtime`; a call
+  with statically-known arguments folds to a literal class string (no hydration
+  binding).
+- **Rest-spread props** — `{...props}` on an intrinsic element expands to the
+  call-site attributes, and `children` forwards through it.
+- **Defaults** — `const Comp = asChild ? Slot : "button"` resolves at build time
+  from the parameter default.
+- **`asChild` / `Slot`** — a `<Slot>` (or a tag aliased to it) renders its single
+  child element with the Slot's props (including `className`) merged onto it.
+- **Attributes** — `data-*`, `aria-*`, and camelCase aliases pass through.
+
+```tsx
+// A copy of the shadcn/ui Button compiles to static HTML.
+import { Slot, cva, cn } from '@krate/runtime';
+
+const buttonVariants = cva('inline-flex items-center rounded-md', {
+  variants: {
+    variant: { default: 'bg-blue-600 text-white', destructive: 'bg-red-600 text-white' },
+    size: { default: 'h-9 px-4', lg: 'h-10 px-8' },
+  },
+  defaultVariants: { variant: 'default', size: 'default' },
+});
+
+export function Button({ className, variant, size, asChild = false, ...props }: any) {
+  const Comp = asChild ? Slot : 'button';
+  return <Comp className={cn(buttonVariants({ variant, size }), className)} {...props} />;
+}
+```
+
+`<Button variant="destructive" size="lg">Delete</Button>` renders
+`<button class="… bg-red-600 text-white h-10 px-8">Delete</button>`, and
+`<Button asChild><a href="/docs">Docs</a></Button>` renders the `<a>` with the
+button classes merged on — all zero client JS.
+
+The `cn`/`clsx`/`cva`/`twMerge`/`Slot`/`cloneElement` helpers ship in
+`@krate/runtime`, so component libraries that normally depend on
+`class-variance-authority`, `clsx`, `tailwind-merge`, or `@radix-ui/react-slot`
+can import them from `@krate/runtime` instead.
+
 ## What is not supported
 
 Krate transpiles React **syntax**, it does not run the React runtime. The

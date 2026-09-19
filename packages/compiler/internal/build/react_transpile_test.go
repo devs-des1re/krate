@@ -157,6 +157,100 @@ func TestReactFragmentBuild(t *testing.T) {
 	}
 }
 
+// buildShadcnButton writes a shadcn-style Button component plus a page and
+// returns the built HTML. It exercises cva, cn, rest-spread props, defaults,
+// the dynamic `asChild ? Slot : "button"` tag, and Slot class merging.
+func buildShadcnButton(t *testing.T, pageSrc string) string {
+	t.Helper()
+	root := t.TempDir()
+	pagesDir := filepath.Join(root, "src", "pages")
+	uiDir := filepath.Join(root, "src", "components", "ui")
+	for _, d := range []string{pagesDir, uiDir} {
+		if err := os.MkdirAll(d, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	button := `
+		import { Slot, cva, cn } from '@krate/runtime';
+
+		const buttonVariants = cva('inline-flex items-center rounded-md', {
+			variants: {
+				variant: { default: 'bg-blue-600 text-white', destructive: 'bg-red-600 text-white' },
+				size: { default: 'h-9 px-4', lg: 'h-10 px-8' },
+			},
+			defaultVariants: { variant: 'default', size: 'default' },
+		});
+
+		export function Button({ className, variant, size, asChild = false, ...props }: any) {
+			const Comp = asChild ? Slot : 'button';
+			return <Comp className={cn(buttonVariants({ variant, size }), className)} {...props} />;
+		}
+	`
+	if err := os.WriteFile(filepath.Join(uiDir, "button.tsx"), []byte(button), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pagesDir, "index.tsx"), []byte(pageSrc), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default()
+	cfg.PagesDir = pagesDir
+	cfg.OutDir = filepath.Join(root, "dist")
+	cfg.Minify = false
+	if err := New(root, cfg).BuildAll(); err != nil {
+		t.Fatalf("BuildAll: %v", err)
+	}
+	html, err := os.ReadFile(filepath.Join(cfg.OutDir, "index.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(html)
+}
+
+func TestShadcnButtonFoldsVariantsAndSpread(t *testing.T) {
+	html := buildShadcnButton(t, `
+		import { Button } from '../components/ui/button';
+		export default function Page() {
+			return <div>
+				<Button>Default</Button>
+				<Button variant="destructive" size="lg" disabled>Delete</Button>
+			</div>;
+		}
+	`)
+	// Defaults fold.
+	if !strings.Contains(html, "h-9 px-4 bg-blue-600 text-white") {
+		t.Errorf("default variant classes missing:\n%.600s", html)
+	}
+	if !strings.Contains(html, ">Default<") {
+		t.Errorf("children should render:\n%.600s", html)
+	}
+	// Explicit selection folds and spread props reach the element.
+	if !strings.Contains(html, "h-10 px-8 bg-red-600 text-white") {
+		t.Errorf("destructive/lg classes missing:\n%.600s", html)
+	}
+	if !strings.Contains(html, "disabled") {
+		t.Errorf("spread `disabled` should reach the button:\n%.600s", html)
+	}
+}
+
+func TestShadcnButtonAsChildMergesOntoChild(t *testing.T) {
+	html := buildShadcnButton(t, `
+		import { Button } from '../components/ui/button';
+		export default function Page() {
+			return <Button asChild><a href="/docs">Docs</a></Button>;
+		}
+	`)
+	if !strings.Contains(html, `<a href="/docs"`) && !strings.Contains(html, `<a href=/docs`) {
+		t.Errorf("asChild should render the anchor, not a wrapping button:\n%.600s", html)
+	}
+	if strings.Contains(html, "<button") {
+		t.Errorf("asChild must not emit a button wrapper:\n%.600s", html)
+	}
+	if !strings.Contains(html, "inline-flex items-center rounded-md") {
+		t.Errorf("Slot classes should merge onto the anchor:\n%.600s", html)
+	}
+}
+
 // TestReactStyleObjectBuild verifies a literal style object folds to CSS.
 func TestReactStyleObjectBuild(t *testing.T) {
 	page := `
