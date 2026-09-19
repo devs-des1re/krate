@@ -402,6 +402,28 @@ func TestJSXTextQuotesAfterValues(t *testing.T) {
 	}
 }
 
+func TestJSXTextLeadingSlash(t *testing.T) {
+	// Regression: a JSX text child that begins with `/` (e.g. `<code>/about</code>`)
+	// must not be lexed as a regex literal, which swallowed the closing tags and
+	// produced "expected ), got EOF".
+	src := `const el = <p><code>/about</code> and <code>x/y</code></p>;`
+	prog, errs := parse(t, src)
+	if len(errs) > 0 {
+		t.Fatalf("unexpected errors: %v", errs)
+	}
+	decl := firstVarDecl(t, prog)
+	jsx, ok := decl.Init.(*ast.JSXElement)
+	if !ok {
+		t.Fatalf("expected JSXElement, got %T", decl.Init)
+	}
+	if jsx.Opening.Name != "p" {
+		t.Errorf("expected element name 'p', got %q", jsx.Opening.Name)
+	}
+	if len(jsx.Children) == 0 {
+		t.Fatal("expected children on <p>")
+	}
+}
+
 func TestArrowFunction(t *testing.T) {
 	prog, errs := parse(t, "const fn = () => 42;")
 	if len(errs) > 0 {

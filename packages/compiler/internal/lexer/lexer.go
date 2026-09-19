@@ -228,11 +228,42 @@ type Lexer struct {
 	start    int
 	tokens   []Token
 	lastKind Kind
+	// lastSignificant is the most recent non-whitespace token kind. It is used
+	// to tell an expression-position `<` (which may open JSX) from a comparison
+	// `<`, since whitespace before `<` would otherwise erase the context.
+	lastSignificant Kind
 	// tmplBraceStack tracks brace depth inside each open template
 	// interpolation (`${ ... }`). One entry per open `${`. A value of 0
 	// means we're at the top level of that interpolation, so the next
 	// `}` closes it and we resume reading template-string text.
 	tmplBraceStack []int
+	// jsxStack tracks the lexer's JSX context. Inside JSX text, `/`, `/*`,
+	// `//`, quotes and backticks are literal characters rather than division,
+	// comments, string/regex/template delimiters — otherwise a JSX text child
+	// like `<code>/api/*</code>` or `<code>/about</code>` would swallow the
+	// rest of the line. An empty stack means plain JavaScript.
+	jsxStack []jsxFrame
+}
+
+// jsxFrameKind identifies one lexical JSX context.
+type jsxFrameKind int
+
+const (
+	// jsxTag is inside an opening/closing tag, between `<name` and its `>`/`/>`.
+	jsxTag jsxFrameKind = iota
+	// jsxChildren is an element's children region: literal text plus nested
+	// elements and `{ ... }` expression containers.
+	jsxChildren
+	// jsxBrace is a `{ ... }` expression container inside JSX.
+	jsxBrace
+)
+
+type jsxFrame struct {
+	kind jsxFrameKind
+	// closing is set for jsxTag frames opened by `</`.
+	closing bool
+	// brace counts nested `{` inside a jsxBrace frame.
+	brace int
 }
 
 func New(src string) *Lexer {
@@ -256,6 +287,11 @@ func (l *Lexer) Tokenize() []Token {
 		switch ch {
 		case '{':
 			l.incTemplateBrace()
+			// A `{` inside JSX opens an expression container; nested `{` inside
+			// it (an object literal) only deepens that container.
+			if l.inJSXChildren() || l.inJSXTag() || l.inJSXBrace() {
+				l.openJSXBrace()
+			}
 			l.emit(LBRACE)
 		case '}':
 			// If this closes an open template interpolation (`${ ... }`),
@@ -265,6 +301,7 @@ func (l *Lexer) Tokenize() []Token {
 				l.emit(RBRACE)
 				l.readTemplate()
 			} else {
+				l.closeJSXBrace()
 				l.emit(RBRACE)
 			}
 		case '(':
@@ -294,27 +331,40 @@ func (l *Lexer) Tokenize() []Token {
 		case '@':
 			l.emit(AT)
 		case '\'':
-			if isValueEnd(l.lastKind) {
+			// Quotes are literal characters in JSX text (e.g. "doesn't"), and a
+			// quote directly after a value elsewhere (5" screen) is too.
+			if l.inJSXChildren() || isValueEnd(l.lastKind) {
 				l.emit(Apostrophe)
 			} else {
 				l.readString('\'')
 			}
 		case '"':
-			if isValueEnd(l.lastKind) {
+			if l.inJSXChildren() || isValueEnd(l.lastKind) {
 				l.emit(Apostrophe)
 			} else {
 				l.readString('"')
 			}
 		case '`':
-			// A backtick either opens a template literal or closes one we're
-			// already reading. readTemplate consumes the closing backtick.
-			l.readTemplate()
+			// A backtick is literal text in JSX; otherwise it opens (or closes)
+			// a template literal, and readTemplate consumes the closing backtick.
+			if l.inJSXChildren() {
+				l.emit(Apostrophe)
+			} else {
+				l.readTemplate()
+			}
 		case '/':
-			if l.peek() == '=' {
+			if l.inJSXChildren() {
+				// JSX text: `/`, `//` and `/*` are literal, never comments,
+				// division or regex starts.
+				l.emit(DIV)
+			} else if l.peek() == '=' {
 				l.next()
 				l.emit(DIV_ASSIGN)
 			} else if l.peek() == '>' {
 				l.next()
+				if l.inJSXTag() {
+					l.closeJSXSelfClosing()
+				}
 				l.emit(SLASH_GT)
 			} else if l.peek() == '/' {
 				l.readLineComment()
@@ -334,8 +384,11 @@ func (l *Lexer) Tokenize() []Token {
 				l.emit(DOT)
 			}
 		case '<':
-			if l.peek() == '/' {
+			if l.peek() == '/' && l.inJSXChildren() {
+				// Closing tag `</name>` or fragment `</>`; only meaningful
+				// inside an element's children region.
 				l.next()
+				l.openJSXTag(true)
 				l.emit(LT_SLASH)
 			} else if l.peek() == '=' {
 				l.next()
@@ -348,6 +401,9 @@ func (l *Lexer) Tokenize() []Token {
 				} else {
 					l.emit(SHL)
 				}
+			} else if l.atJSXTagStart() {
+				l.openJSXTag(false)
+				l.emit(LT)
 			} else {
 				l.emit(LT)
 			}
@@ -367,6 +423,9 @@ func (l *Lexer) Tokenize() []Token {
 					l.emit(SHR)
 				}
 			} else {
+				if l.inJSXTag() {
+					l.closeJSXTag()
+				}
 				l.emit(GT)
 			}
 		case '=':
@@ -497,6 +556,152 @@ func (l *Lexer) emit(kind Kind) {
 		Col:   l.col,
 	})
 	l.lastKind = kind
+	if kind != Whitespace {
+		l.lastSignificant = kind
+	}
+}
+
+// ─── JSX context helpers ─────────────────────────────────────────────────────
+
+func (l *Lexer) jsxTop() (jsxFrame, bool) {
+	n := len(l.jsxStack)
+	if n == 0 {
+		return jsxFrame{}, false
+	}
+	return l.jsxStack[n-1], true
+}
+
+func (l *Lexer) inJSXChildren() bool {
+	top, ok := l.jsxTop()
+	return ok && top.kind == jsxChildren
+}
+
+func (l *Lexer) inJSXTag() bool {
+	top, ok := l.jsxTop()
+	return ok && top.kind == jsxTag
+}
+
+func (l *Lexer) inJSXBrace() bool {
+	top, ok := l.jsxTop()
+	return ok && top.kind == jsxBrace
+}
+
+// atJSXTagStart reports whether a `<` at the current point opens a JSX element
+// or fragment. Inside an element's children region every `<` starts a tag
+// (a literal `<` in JSX text is invalid and must be escaped). Otherwise `<`
+// only starts JSX in an expression position — a value on the left (identifier,
+// literal, `)`, `]`, `}`, template end, …) makes it a comparison instead.
+//
+// Angle-bracket type assertions (`<string>foo`) are also ruled out: the parser
+// treats `<` followed by a primitive type keyword as a cast, never JSX, so the
+// lexer must not open a tag frame for them (doing so would leak JSX-text state
+// into the rest of the file).
+func (l *Lexer) atJSXTagStart() bool {
+	if !isTagNameStart(l.peek()) && l.peek() != '>' {
+		return false
+	}
+	if l.inJSXChildren() {
+		// Inside children every `<` starts a tag; `<string>` is a JSX element
+		// there, not a cast (the parser's JSX child path has no assertion rule).
+		return true
+	}
+	// Outside children, `<` only starts JSX in an expression position — and
+	// never for a primitive type name, which the parser reads as a cast.
+	if isPrimitiveTypeName(l.peekWord()) {
+		return false
+	}
+	return !isValueEnd(l.lastSignificant)
+}
+
+// isTagNameStart reports whether ch can begin a JSX tag name.
+func isTagNameStart(ch rune) bool {
+	return unicode.IsLetter(ch) || ch == '_' || ch == '$'
+}
+
+// isPrimitiveTypeName reports whether name is a TypeScript primitive type
+// keyword — the names that turn `<name>expr` into a type assertion rather than
+// a JSX element. Mirrors the parser's isPrimitiveTypeKeyword.
+func isPrimitiveTypeName(name string) bool {
+	switch name {
+	case "string", "number", "boolean", "any", "unknown", "never", "symbol", "void":
+		return true
+	}
+	return false
+}
+
+// peekWord returns the identifier-like word starting at the current position,
+// without consuming it.
+func (l *Lexer) peekWord() string {
+	i := l.pos
+	for i < len(l.src) {
+		ch := l.src[i]
+		if unicode.IsLetter(ch) || unicode.IsDigit(ch) || ch == '_' || ch == '$' {
+			i++
+			continue
+		}
+		break
+	}
+	return string(l.src[l.pos:i])
+}
+
+// openJSXTag pushes a tag context for an opening (`closing=false`) or closing
+// (`closing=true`) tag.
+func (l *Lexer) openJSXTag(closing bool) {
+	l.jsxStack = append(l.jsxStack, jsxFrame{kind: jsxTag, closing: closing})
+}
+
+// closeJSXTag handles the `>` that terminates a JSX tag. An opening tag turns
+// into the element's children region; a closing tag is popped together with the
+// children region it closes.
+func (l *Lexer) closeJSXTag() {
+	n := len(l.jsxStack)
+	if n == 0 {
+		return
+	}
+	top := l.jsxStack[n-1]
+	if top.kind != jsxTag {
+		return
+	}
+	if top.closing {
+		l.jsxStack = l.jsxStack[:n-1]
+		if m := len(l.jsxStack); m > 0 && l.jsxStack[m-1].kind == jsxChildren {
+			l.jsxStack = l.jsxStack[:m-1]
+		}
+		return
+	}
+	l.jsxStack[n-1].kind = jsxChildren
+}
+
+// closeJSXSelfClosing pops a tag context after a `/>`.
+func (l *Lexer) closeJSXSelfClosing() {
+	if l.inJSXTag() {
+		l.jsxStack = l.jsxStack[:len(l.jsxStack)-1]
+	}
+}
+
+// openJSXBrace pushes a `{ ... }` expression-container context. A `{` inside an
+// existing brace context (an object literal) only deepens that frame.
+func (l *Lexer) openJSXBrace() {
+	if l.inJSXBrace() {
+		l.jsxStack[len(l.jsxStack)-1].brace++
+		return
+	}
+	l.jsxStack = append(l.jsxStack, jsxFrame{kind: jsxBrace})
+}
+
+// closeJSXBrace handles a `}` while inside a JSX expression container. It
+// returns true when the frame was popped (the container ended).
+func (l *Lexer) closeJSXBrace() bool {
+	if !l.inJSXBrace() {
+		return false
+	}
+	n := len(l.jsxStack)
+	if l.jsxStack[n-1].brace > 0 {
+		l.jsxStack[n-1].brace--
+		return false
+	}
+	l.jsxStack = l.jsxStack[:n-1]
+	return true
 }
 
 func (l *Lexer) readString(quote rune) {
@@ -634,6 +839,7 @@ func (l *Lexer) readIdentifier() {
 	}
 	l.tokens = append(l.tokens, Token{Kind: kind, Value: val, Line: l.line, Col: l.col})
 	l.lastKind = kind
+	l.lastSignificant = kind
 }
 
 func (l *Lexer) readNumber() {
@@ -741,8 +947,10 @@ func IsKeyword(s string) bool {
 }
 
 func (l *Lexer) regexContext() bool {
-	// LT is excluded to avoid confusing </tagname> in JSX with regex
-	switch l.lastKind {
+	// LT is excluded to avoid confusing </tagname> in JSX with a regex; JSX text
+	// is handled by the JSX state machine before this is reached. Whitespace is
+	// skipped via lastSignificant so `return /re/` still sees a regex context.
+	switch l.lastSignificant {
 	case 0, Error, LBRACE, LPAREN, LBRACKET, COMMA, SEMI, COLON, ARROW, QUEST,
 		ASSIGN, ADD_ASSIGN, SUB_ASSIGN, MUL_ASSIGN, DIV_ASSIGN, MOD_ASSIGN,
 		PLUS, MINUS, STAR, DIV, MOD, NOT, INC, DEC, AND, OR, GT,
