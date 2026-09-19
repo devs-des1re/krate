@@ -84,6 +84,18 @@ func TestPrintPrecedence(t *testing.T) {
 	}
 }
 
+func TestPrintStringEscapesRoundTrip(t *testing.T) {
+	// Decoded values must be re-escaped so the printed source reparses to the
+	// same runtime string (backslash, quote, newline, tab).
+	out := roundTrip(t, `const s = "a\\b \"q\" \n\tend";`)
+	if !strings.Contains(out, `\\`) {
+		t.Errorf("expected escaped backslash in output: %q", out)
+	}
+	if !strings.Contains(out, `\n`) || !strings.Contains(out, `\t`) {
+		t.Errorf("expected escaped newline/tab in output: %q", out)
+	}
+}
+
 func TestDroppedTypesCounter(t *testing.T) {
 	p := parser.New(lexer.New(`interface Foo { a: number }
 type Bar = string;

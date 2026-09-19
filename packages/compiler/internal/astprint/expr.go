@@ -274,6 +274,9 @@ func (p *printer) call(c *ast.CallExpr) string {
 	for _, a := range c.Args {
 		args = append(args, p.expr(a))
 	}
+	if c.Optional {
+		return callee + "?.(" + strings.Join(args, ", ") + ")"
+	}
 	return callee + "(" + strings.Join(args, ", ") + ")"
 }
 
@@ -372,34 +375,27 @@ func isSafeJSXString(s string) bool {
 	return !strings.ContainsAny(s, `"'<>{}\n\t`) && s == strings.TrimSpace(s)
 }
 
-// quoteString re-emits a string literal value. The parser strips only the
-// delimiter quotes and keeps escape sequences verbatim, so the value is the
-// original source text between the quotes. We wrap it in double quotes and
-// backslash-escape any unescaped `"` (and raw line breaks) so the emitted
-// source reparses to the same runtime string.
+// quoteString re-emits a string literal value. The parser decodes escape
+// sequences at parse time (see parser.decodeStringToken), so the value is the
+// literal runtime string. We wrap it in double quotes and escape every
+// character that would otherwise change meaning or break the literal, so the
+// emitted source reparses to the same string.
 func quoteString(s string) string {
 	var b strings.Builder
 	b.WriteByte('"')
-	backslashes := 0
 	for _, r := range s {
-		switch {
-		case r == '\\':
-			backslashes++
-			b.WriteRune(r)
-		case r == '"':
-			if backslashes%2 == 0 {
-				b.WriteByte('\\')
-			}
-			backslashes = 0
-			b.WriteRune(r)
-		case r == '\n':
+		switch r {
+		case '\\':
+			b.WriteString(`\\`)
+		case '"':
+			b.WriteString(`\"`)
+		case '\n':
 			b.WriteString(`\n`)
-			backslashes = 0
-		case r == '\r':
+		case '\r':
 			b.WriteString(`\r`)
-			backslashes = 0
+		case '\t':
+			b.WriteString(`\t`)
 		default:
-			backslashes = 0
 			b.WriteRune(r)
 		}
 	}

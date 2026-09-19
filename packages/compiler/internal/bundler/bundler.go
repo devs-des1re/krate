@@ -335,6 +335,9 @@ func (b *Bundler) resolveModule(path string, isEntry bool) error {
 		p := parser.New(tokens)
 		p.Filename = path
 		prog := p.ParseProgram()
+		if errs := p.Errors(); len(errs) > 0 {
+			return fmt.Errorf("%s: %s", path, parser.FormatDiagnostics(errs))
+		}
 
 		if b.emitReact {
 			RewriteReact(prog)

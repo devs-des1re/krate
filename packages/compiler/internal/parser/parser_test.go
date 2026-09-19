@@ -528,6 +528,28 @@ func TestStatementLevelObjectDestructuring(t *testing.T) {
 	}
 }
 
+// TestMalformedInputDiagnostics locks in that malformed input surfaces a
+// diagnostic rather than being silently accepted or dropped.
+func TestMalformedInputDiagnostics(t *testing.T) {
+	cases := []struct{ name, src string }{
+		{"unterminated-jsx", "const el = <div>hello"},
+		{"unterminated-jsx-fragment", "const el = <>hello"},
+		{"unterminated-jsx-tag", "const el = <div class=\"x\" "},
+		{"missing-rparen", "const x = (1 + 2;"},
+		{"missing-rbrace", "function f() { return 1;"},
+	}
+	for _, tt := range cases {
+		t.Run(tt.name, func(t *testing.T) {
+			p := New(lexer.New(tt.src).Tokenize())
+			p.Filename = "test.tsx"
+			p.ParseProgram()
+			if len(p.Errors()) == 0 {
+				t.Errorf("expected a diagnostic for %q", tt.src)
+			}
+		})
+	}
+}
+
 func TestErrorFileName(t *testing.T) {
 	l := lexer.New("const x = (")
 	tokens := l.Tokenize()

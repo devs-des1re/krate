@@ -302,6 +302,29 @@ func TestAngleBracketCastDoesNotLeakJSXState(t *testing.T) {
 	}
 }
 
+func TestLeadingDotNumber(t *testing.T) {
+	toks := tokens(".5 + 1")
+	kind(t, toks[0], Number)
+	value(t, toks[0], ".5")
+	kind(t, toks[1], PLUS)
+	kind(t, toks[2], Number)
+}
+
+func TestGenericArrowNotJSXTag(t *testing.T) {
+	// `<T,>(x) => x` is a generic arrow, not a JSX element; treating `<T,>` as
+	// a tag would desync the JSX stack and mangle a following regex.
+	toks := tokens("const f = <T,>(x) => x;\nconst re = /foo/g;")
+	var sawRegexp bool
+	for _, tok := range toks {
+		if tok.Kind == Regexp {
+			sawRegexp = true
+		}
+	}
+	if !sawRegexp {
+		t.Error("regex after generic arrow was not lexed as Regexp (JSX desync)")
+	}
+}
+
 func TestLineComment(t *testing.T) {
 	toks := tokens("// comment\n42")
 	kind(t, toks[0], Number)

@@ -2923,7 +2923,7 @@ func memberASTOf(binding ast.Expr, prop ast.Expr) ast.Expr {
 	if id, ok := prop.(*ast.Identifier); ok {
 		propName = id.Name
 	} else if lit, ok := prop.(*ast.Literal); ok {
-		propName = unescapeStringValue(lit.Value)
+		propName = lit.Value
 	}
 	if propName == "" {
 		return nil
@@ -4963,7 +4963,7 @@ func evalConst(expr ast.Expr) string {
 	case *ast.Literal:
 		switch e.Kind {
 		case ast.StringLit:
-			return unescapeStringValue(e.Value)
+			return e.Value
 		case ast.NumberLit:
 			return e.Value
 		case ast.BoolLit:
@@ -5057,7 +5057,7 @@ func constExprToJS(expr ast.Expr) string {
 	case *ast.Literal:
 		switch e.Kind {
 		case ast.StringLit:
-			return "'" + escape.JSString(unescapeStringValue(e.Value)) + "'"
+			return "'" + escape.JSString(e.Value) + "'"
 		case ast.NullLit:
 			return "null"
 		default:
@@ -5109,7 +5109,7 @@ func evalConstWithSignals(expr ast.Expr, signals map[string]ast.Expr, props map[
 			return ""
 		}
 		if e.Kind == ast.StringLit {
-			return unescapeStringValue(e.Value)
+			return e.Value
 		}
 		return e.Value
 	case *ast.CallExpr:
@@ -5955,7 +5955,7 @@ func constLength(expr ast.Expr) (int, bool) {
 		return len(e.Elements), true
 	case *ast.Literal:
 		if e.Kind == ast.StringLit {
-			return len([]rune(unescapeStringValue(e.Value))), true
+			return len([]rune(e.Value)), true
 		}
 	}
 	return 0, false

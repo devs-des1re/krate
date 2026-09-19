@@ -53,6 +53,8 @@ type CallExpr struct {
 	Position Pos
 	Callee   Expr
 	Args     []Expr
+	// Optional marks an optional call `fn?.()`, emitted as `callee?.(...)`.
+	Optional bool
 }
 
 func (c *CallExpr) node()    {}

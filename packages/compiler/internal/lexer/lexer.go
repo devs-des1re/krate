@@ -380,6 +380,10 @@ func (l *Lexer) Tokenize() []Token {
 				l.next()
 				l.next()
 				l.emit(SPREAD)
+			} else if unicode.IsDigit(l.peek()) {
+				// Leading-dot number literal (`.5`, `.25e3`). Consume the
+				// fraction so it lexes as a single Number, not DOT + Number.
+				l.readNumber()
 			} else {
 				l.emit(DOT)
 			}
@@ -610,7 +614,46 @@ func (l *Lexer) atJSXTagStart() bool {
 	if isPrimitiveTypeName(l.peekWord()) {
 		return false
 	}
+	// A generic type-parameter list (`<T,>`, `<T extends X>`) is not a JSX tag.
+	// Treating it as one would desync the JSX stack for the rest of the file.
+	if l.looksLikeTypeParams() {
+		return false
+	}
 	return !isValueEnd(l.lastSignificant)
+}
+
+// looksLikeTypeParams reports whether the `<` at l.pos-1 opens a generic
+// type-parameter list rather than a JSX element. The signal is a `,` or
+// `extends` after the first identifier and before the matching `>` — neither
+// can appear in a JSX opening tag. In `.tsx` TypeScript only accepts these
+// unambiguous forms (bare `<T>(...)` is JSX), so the heuristic is safe.
+func (l *Lexer) looksLikeTypeParams() bool {
+	i := l.pos
+	// First type-parameter name (or an empty `<>`, which is a fragment).
+	if i >= len(l.src) || !isTagNameStart(l.src[i]) {
+		return false
+	}
+	for i < len(l.src) && (unicode.IsLetter(l.src[i]) || unicode.IsDigit(l.src[i]) || l.src[i] == '_' || l.src[i] == '$') {
+		i++
+	}
+	for i < len(l.src) && (l.src[i] == ' ' || l.src[i] == '\t' || l.src[i] == '\n' || l.src[i] == '\r') {
+		i++
+	}
+	if i >= len(l.src) {
+		return false
+	}
+	if l.src[i] == ',' {
+		return true
+	}
+	// `extends` keyword after the parameter name.
+	const ext = "extends"
+	if i+len(ext) <= len(l.src) && string(l.src[i:i+len(ext)]) == ext {
+		after := i + len(ext)
+		if after >= len(l.src) || !unicode.IsLetter(l.src[after]) && !unicode.IsDigit(l.src[after]) && l.src[after] != '_' && l.src[after] != '$' {
+			return true
+		}
+	}
+	return false
 }
 
 // isTagNameStart reports whether ch can begin a JSX tag name.
