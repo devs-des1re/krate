@@ -22,3 +22,4 @@ Practical, end-to-end walkthroughs.
 | [Error Handling](/docs/guides/error-handling/) | Handle build, render, and client errors |
 | [Troubleshooting](/docs/guides/troubleshooting/) | Fix common errors |
 | [Migrating from Next.js](/docs/guides/migrating-from-nextjs/) | Move an existing site to Krate |
+| [Testing](/docs/guides/testing/) | Test logic, components, and pages |
