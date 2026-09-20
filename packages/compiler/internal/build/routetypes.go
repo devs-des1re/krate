@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/kratejs/krate/packages/compiler/internal/config"
+	"github.com/kratejs/krate/packages/compiler/internal/fsutil"
 	"github.com/kratejs/krate/packages/compiler/internal/routetypes"
 )
 
@@ -90,7 +91,7 @@ func (b *Builder) writeRouteTypes(results []*PageResult) error {
 	}
 
 	routesDTS := filepath.Join(typesDir, "routes.d.ts")
-	if err := os.WriteFile(routesDTS, []byte(routetypes.Generate(routes)+"\n"), 0644); err != nil {
+	if err := fsutil.WriteFileIfChanged(routesDTS, []byte(routetypes.Generate(routes)+"\n"), 0644); err != nil {
 		return fmt.Errorf("writing routes.d.ts: %w", err)
 	}
 
@@ -104,7 +105,7 @@ func (b *Builder) writeRouteTypes(results []*PageResult) error {
 	}
 	bridge := routetypes.Bridge(routesSpec, contentSpec)
 	bridge += b.contentModuleDTS
-	if err := os.WriteFile(bridgePath, []byte(bridge), 0644); err != nil {
+	if err := fsutil.WriteFileIfChanged(bridgePath, []byte(bridge), 0644); err != nil {
 		return fmt.Errorf("writing %s: %w", bridgePath, err)
 	}
 

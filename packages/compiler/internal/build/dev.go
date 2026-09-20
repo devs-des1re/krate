@@ -9,8 +9,6 @@ import (
 	"time"
 
 	"github.com/fsnotify/fsnotify"
-
-	"github.com/kratejs/krate/packages/compiler/internal/config"
 )
 
 // ReloadEvent is sent on the dev reload channel after each rebuild: the routes
@@ -21,16 +19,36 @@ type ReloadEvent struct {
 	Errors []string `json:"errors,omitempty"`
 }
 
-// Watch watches root for filesystem changes using native OS events (inotify,
-// FSEvents, kqueue, ReadDirectoryChangesW via fsnotify).
+// Watch watches the builder's project root for filesystem changes using native
+// OS events (inotify, FSEvents, kqueue, ReadDirectoryChangesW via fsnotify).
+//
+// It takes the Builder that ran the initial build rather than constructing a
+// fresh one: page builds populate the dependency graph on the builder (see
+// recordDeps), and a brand-new Builder would start with an empty graph, so
+// every save would miss partial tracking and fall through to a full rebuild.
 // Each debounced batch of changes is fed through the dependency graph to
 // rebuild only the affected pages/APIs, and the rebuilt routes are sent on
 // reload. debounceDelay is the coalescing window: a single save (or an
 // atomic-rename editor) can emit many events in a burst, so only one rebuild
 // runs per burst. It returns an error only if the watcher fails to start.
-func Watch(root string, cfg *config.Config, debounceDelay time.Duration, reload chan<- ReloadEvent) error {
-	b := New(root, cfg)
-	b.DevMode = reload != nil
+func Watch(b *Builder, debounceDelay time.Duration, reload chan<- ReloadEvent) error {
+	if reload != nil {
+		b.DevMode = true
+	}
+	root := b.Root
+	cfg := b.Cfg
+
+	// Safety net: if the builder has no dependency graph yet (no initial
+	// BuildAll ran), do one now so partial rebuilds work instead of every
+	// change taking the full-rebuild fallback in processChanges.
+	b.depMu.Lock()
+	needsInitialBuild := len(b.depGraph) == 0
+	b.depMu.Unlock()
+	if needsInitialBuild {
+		if err := b.BuildAll(); err != nil {
+			return fmt.Errorf("initial build: %w", err)
+		}
+	}
 
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
@@ -82,7 +100,7 @@ func Watch(root string, cfg *config.Config, debounceDelay time.Duration, reload 
 		}
 		changed := uniqueStrings(pending)
 		pending = nil
-		b.processChanges(changed, cfg, reload)
+		b.processChanges(changed, reload)
 		fmt.Printf("%s  Watching %s for changes...%s\n", cBlue, root, cReset)
 	}
 
@@ -102,7 +120,7 @@ func Watch(root string, cfg *config.Config, debounceDelay time.Duration, reload 
 			// next to their originals so relative imports resolve; ignoring
 			// them here prevents those rewrites from re-triggering the watcher
 			// in an infinite loop.
-			if internalName(ev.Name) {
+			if (internalName(ev.Name) && !layoutOrLoadingFile(ev.Name)) || generatedDeclaration(ev.Name) {
 				continue
 			}
 			// Keep the recursive watch in sync as directories are created,
@@ -147,7 +165,7 @@ func Watch(root string, cfg *config.Config, debounceDelay time.Duration, reload 
 // processChanges routes a batch of changed files through the dependency graph
 // and rebuilds exactly what depends on them, falling back to a full rebuild when
 // nothing matches dependency tracking. Rebuilt routes are sent to reload.
-func (b *Builder) processChanges(changed []string, cfg *config.Config, reload chan<- ReloadEvent) {
+func (b *Builder) processChanges(changed []string, reload chan<- ReloadEvent) {
 	// Go files outside src/api/ are not krate-managed; ignore them so they
 	// don't trigger a full rebuild.
 	var filtered []string
@@ -193,12 +211,25 @@ func (b *Builder) processChanges(changed []string, cfg *config.Config, reload ch
 	apiToBuild = uniqueStrings(apiToBuild)
 	pagesToBuild = uniqueStrings(pagesToBuild)
 
+	// Server bundles (SSR/ISR/streaming) and runtime component bundles are
+	// aggregate, site-wide artifacts that only BuildAll regenerates. A partial
+	// rebuild would refresh a page's static shell while leaving the sidecar's
+	// bundle stale, so once the build has produced any of them, changes that
+	// affect pages must take the full path. Pure-SSG projects still get fast
+	// partial rebuilds.
+	if b.hasServerArtifacts && (len(pagesToBuild) > 0 || len(apiToBuild) > 0 || goAPIChanged) {
+		fmt.Printf("  %sServer-rendered site; rebuilding all...%s\n", cYellow, cReset)
+		pagesToBuild = nil
+		apiToBuild = nil
+		goAPIChanged = false
+	}
+
 	var routes []string
 	var buildErrors []string
 
 	if len(pagesToBuild) > 0 {
 		for _, p := range pagesToBuild {
-			route := pageToOutput(p, cfg.PagesDir)
+			route := pageToOutput(p, b.Cfg.PagesDir)
 			if route == "." {
 				route = "/"
 			} else {
@@ -301,6 +332,36 @@ func managedPath(path string, outDir string) bool {
 func internalName(path string) bool {
 	base := filepath.Base(path)
 	return strings.HasPrefix(base, "_") || strings.HasPrefix(base, ".")
+}
+
+// layoutOrLoadingFile reports whether path is a `_layout.*` or `loading.*`
+// file. These are the only leading-underscore source files a user edits that
+// affect a built page; every other `_`-prefixed name is a private/internal
+// artifact the watcher must ignore (notably the SSR bundler's transient
+// `_tmp_*` sources). Without this exemption, editing _layout.tsx would never
+// rebuild the pages it wraps.
+func layoutOrLoadingFile(path string) bool {
+	base := filepath.Base(path)
+	if strings.HasPrefix(base, "loading.") {
+		return trackedFile(path)
+	}
+	for _, name := range layoutNames {
+		if base == name {
+			return true
+		}
+	}
+	return false
+}
+
+// generatedDeclaration reports whether path is a declaration file krate writes
+// into the source tree during a full build (`krate-env.d.ts`,
+// `krate-content.d.ts`, and any other *.d.ts it emits). A full build rewrites
+// these beside user source, so unless they are ignored the watcher sees its own
+// output and rebuilds forever. User-authored .d.ts files never need a rebuild
+// on their own either: they are consumed through the imports of tracked source,
+// which will trigger a rebuild when they change.
+func generatedDeclaration(path string) bool {
+	return strings.HasSuffix(strings.ToLower(filepath.Base(path)), ".d.ts")
 }
 
 // skippedDir reports whether path lies within an ignored directory

@@ -136,6 +136,12 @@ type Builder struct {
 	// whose params are closed, so the manifest and server can 404 unknown params.
 	staticOnlyRoutes []string
 	staticOnlyMu     sync.Mutex
+
+	// hasServerArtifacts is set by BuildAll when it produced SSR server bundles
+	// or runtime component bundles. Those are aggregate, site-wide outputs that
+	// BuildPages (the partial-rebuild path) does not regenerate, so dev mode
+	// must fall back to a full rebuild once they exist to keep them in sync.
+	hasServerArtifacts bool
 }
 
 func New(root string, cfg *config.Config) *Builder {
@@ -222,6 +228,16 @@ func (b *Builder) BuildPages(pages []string) error {
 
 	b.Cfg.Markdown.Root = b.Root
 
+	// A dynamic-route template (e.g. video/[id].tsx) is not the page that gets
+	// served: its concrete URLs are the generateStaticParams expansions. Rebuild
+	// those too, or a partial rebuild would leave every /video/abc123 variant
+	// pointing at stale HTML while the [id] template itself is refreshed.
+	concrete, gspErr := b.resolveStaticParamsPages(pages)
+	if gspErr != nil {
+		fmt.Fprintf(os.Stderr, "  %s✗ Error:%s %v\n", cRed, cReset, gspErr)
+		errorCount++
+	}
+
 	type pageBuildResult struct {
 		result *PageResult
 		rawCSS string
@@ -229,7 +245,7 @@ func (b *Builder) BuildPages(pages []string) error {
 		page   string
 	}
 
-	resultsCh := make(chan pageBuildResult, len(pages))
+	resultsCh := make(chan pageBuildResult, len(pages)+len(concrete))
 	var wg sync.WaitGroup
 	pool := newWorkerPool(buildWorkerLimit())
 
@@ -243,6 +259,18 @@ func (b *Builder) BuildPages(pages []string) error {
 			result, rawCSS, err := b.buildPage(p)
 			resultsCh <- pageBuildResult{result, rawCSS, err, p}
 		}(page)
+	}
+
+	for _, spp := range concrete {
+		wg.Add(1)
+		go func(s staticParamsPage) {
+			defer wg.Done()
+			pool.acquire()
+			defer pool.release()
+			fmt.Printf("  %s▶%s %s\n", cCyan, cReset, s.OutPath)
+			result, rawCSS, err := b.buildStaticParamsPage(s)
+			resultsCh <- pageBuildResult{result, rawCSS, err, s.OutPath}
+		}(spp)
 	}
 
 	go func() {
@@ -637,6 +665,8 @@ func (b *Builder) BuildAll() error {
 		fmt.Printf("  %s⚡%s Compiled %d runtime components\n", cCyan, cReset, len(runtimeCompBundles))
 	}
 	manifest.SetRuntimeComponents(runtimeCompBundles)
+
+	b.hasServerArtifacts = len(serverBundles) > 0 || len(runtimeCompBundles) > 0
 
 	if err := WriteManifest(manifest, b.Cfg.OutDir, serverBundles); err != nil {
 		fmt.Fprintf(os.Stderr, "  %sWarning: failed to write manifest:%s %v\n", cYellow, cReset, err)
@@ -1131,7 +1161,8 @@ func (b *Builder) buildPage(page string) (*PageResult, string, error) {
 		emitResult.HTML = "<!--suspense:page-->" + emitResult.HTML + "<!--/suspense:page-->"
 	}
 
-	bundle.CSS += b.applyLayoutStack(page, emitResult)
+	layoutCSS, layoutFiles := b.applyLayoutStack(page, emitResult)
+	bundle.CSS += layoutCSS
 	// Generated CSS signal rules land in the page's own hashed stylesheet, after
 	// layout CSS so author styles can override the defaults.
 	if choiceCSS != "" {
@@ -1141,6 +1172,14 @@ func (b *Builder) buildPage(page string) (*PageResult, string, error) {
 	// tiny inline synchroniser. Every other CSS-signal page stays zero-JS.
 	if tree.NeedsCSSARIA {
 		emitResult.ScriptHTML += "<script>" + renderer.CSSARIAJS + "</script>"
+	}
+
+	// Layouts wrap the page and are not part of its module graph, so record
+	// them explicitly: editing _layout.tsx must rebuild every page it wraps.
+	deps = append(deps, layoutFiles...)
+	// The loading.tsx fallback is also a file the user edits directly.
+	if lp := findLoading(page, b.Cfg.PagesDir); lp != "" {
+		deps = append(deps, lp)
 	}
 
 	b.recordDeps(page, deps)
@@ -1605,9 +1644,11 @@ func findLayoutStack(pagePath, pagesDir string) []string {
 // is merged after the inner content so an outer layout's own head/style lands
 // after (and thus after the nested section's). A layout that fails to build is
 // skipped so the page still emits unwrapped. Returns the CSS contributed by the
-// applied layouts.
-func (b *Builder) applyLayoutStack(page string, emitResult *renderer.EmitResult) string {
+// applied layouts and the layout paths used, so the caller can record them as
+// page dependencies (a layout edit must rebuild every page it wraps).
+func (b *Builder) applyLayoutStack(page string, emitResult *renderer.EmitResult) (string, []string) {
 	var css string
+	var used []string
 	for _, layoutPath := range findLayoutStack(page, b.Cfg.PagesDir) {
 		layoutRes, layoutCSS, err := b.executeLayoutPipeline(layoutPath, emitResult.HTML, nil)
 		if err != nil {
@@ -1618,8 +1659,9 @@ func (b *Builder) applyLayoutStack(page string, emitResult *renderer.EmitResult)
 		emitResult.ScriptHTML = emitResult.ScriptHTML + layoutRes.ScriptHTML
 		emitResult.StyleHTML = emitResult.StyleHTML + layoutRes.StyleHTML
 		css += layoutCSS
+		used = append(used, layoutPath)
 	}
-	return css
+	return css, used
 }
 
 var (

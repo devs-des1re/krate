@@ -196,7 +196,7 @@ func runBuild(flags cliFlags, args []string) {
 		reload := make(chan build.ReloadEvent, 1)
 		errc := make(chan error, 1)
 		go func() {
-			if err := build.Watch(root, cfg, 500*time.Millisecond, reload); err != nil {
+			if err := build.Watch(builder, 500*time.Millisecond, reload); err != nil {
 				errc <- err
 			}
 		}()
@@ -241,7 +241,7 @@ func runDev(flags cliFlags, args []string) {
 	}()
 
 	go func() {
-		if err := build.Watch(root, cfg, 500*time.Millisecond, reload); err != nil {
+		if err := build.Watch(builder, 500*time.Millisecond, reload); err != nil {
 			errc <- err
 		}
 	}()
