@@ -63,6 +63,8 @@ func main() {
 		runTypes(flags, args)
 	case "check":
 		runCheck(flags, args)
+	case "clean":
+		runClean(flags, args)
 	case "plugin":
 		runPlugin(flags, args)
 	case "mcp":
@@ -86,6 +88,7 @@ func printUsage(w io.Writer) {
 	fmt.Fprintf(w, "  serve     Build, then serve for preview\n")
 	fmt.Fprintf(w, "  types     Generate route/content TypeScript declarations\n")
 	fmt.Fprintf(w, "  check     Run compiler-enforced quality gates (a11y/SEO/perf)\n")
+	fmt.Fprintf(w, "  clean     Remove build output (dist) and the compiler cache (.krate/cache)\n")
 	fmt.Fprintf(w, "  plugin    Manage plugins (add <pkg>)\n")
 	fmt.Fprintf(w, "  mcp       Run the MCP server (Model Context Protocol)\n")
 	fmt.Fprintf(w, "  version   Print the version\n")
@@ -335,6 +338,33 @@ func runCheck(flags cliFlags, args []string) {
 	}
 
 	fmt.Printf("\n%s%s  ⚠ Passed with warnings (failOn=%s).%s\n", cBold, cYellow, checkCfg.FailOn, cReset)
+}
+
+// runClean removes generated output (the build output directory and the
+// compiler cache) so the next build starts from scratch. Only those paths are
+// touched — generated types and sidecar manifests under .krate are left in
+// place, since they are regenerated on demand.
+func runClean(flags cliFlags, args []string) {
+	root, cfg := resolveConfig(flags, args)
+	fmt.Printf("%s%s  Cleaning %s%s\n", cBold, cCyan, root, cReset)
+
+	result, err := build.Clean(root, cfg)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%sClean error:%s %v\n", cRed, cReset, err)
+		os.Exit(1)
+	}
+
+	if len(result.Removed) == 0 {
+		fmt.Printf("%s%s  Nothing to clean.%s\n", cBold, cGreen, cReset)
+		return
+	}
+	for _, dir := range result.Removed {
+		rel, relErr := filepath.Rel(root, dir)
+		if relErr != nil {
+			rel = dir
+		}
+		fmt.Printf("  %s✓%s Removed %s\n", cGreen, cReset, filepath.ToSlash(rel))
+	}
 }
 
 // runMCP starts the agent-native MCP server. It speaks JSON-RPC 2.0 over

@@ -328,9 +328,21 @@ packages:
     os: [darwin]
     hasBin: true
 
+  '@krate/core-darwin-x64@0.4.0-beta.2':
+    resolution: {integrity: sha512-bq62SH1oOf0WVMqMbiVJFXm+vnLZz/ho6dbjbgVdb8CvD9FY3x9sHCCSdtKWq4G+vL8lrte9pdY54wqB4DEfig==}
+    cpu: [x64]
+    os: [darwin]
+    hasBin: true
+
   '@krate/core-linux-arm64@0.4.0-beta.2':
     resolution: {integrity: sha512-1Z/x+qOkgXI2rQNpWwJh1VOpK1VfEwL+0Lb5OuMcF2ylNAP50pB8H5EVZce+wFI3K5MSoXbqoWjU0HrX8KOyYw==}
     cpu: [arm64]
+    os: [linux]
+    hasBin: true
+
+  '@krate/core-linux-x64-musl@0.4.0-beta.2':
+    resolution: {integrity: sha512-K8ui6gvbHM3UyHKTFMxUZyASWwgm/mtMCt19vV40NIJKzlJ0AUFWFFyrXMNwL4e4stth/qcrmRujPQgVYq2HsA==}
+    cpu: [x64]
     os: [linux]
     hasBin: true
 
@@ -1522,7 +1534,13 @@ snapshots:
   '@krate/core-darwin-arm64@0.4.0-beta.2':
     optional: true
 
+  '@krate/core-darwin-x64@0.4.0-beta.2':
+    optional: true
+
   '@krate/core-linux-arm64@0.4.0-beta.2':
+    optional: true
+
+  '@krate/core-linux-x64-musl@0.4.0-beta.2':
     optional: true
 
   '@krate/core-linux-x64@0.4.0-beta.2':
@@ -1539,8 +1557,10 @@ snapshots:
       '@krate/plugin': 0.4.0-beta.2
     optionalDependencies:
       '@krate/core-darwin-arm64': 0.4.0-beta.2
+      '@krate/core-darwin-x64': 0.4.0-beta.2
       '@krate/core-linux-arm64': 0.4.0-beta.2
       '@krate/core-linux-x64': 0.4.0-beta.2
+      '@krate/core-linux-x64-musl': 0.4.0-beta.2
       '@krate/core-win32-arm64': 0.4.0-beta.2
       '@krate/core-win32-x64': 0.4.0-beta.2
 

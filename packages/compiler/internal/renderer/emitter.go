@@ -87,6 +87,10 @@ type Emitter struct {
 	// with real JS semantics instead of Go approximations.
 	EvalJS func(code string) (string, error)
 
+	// cvaFactories holds module-wide `const X = cva(...)` specs so variant calls
+	// in prop-driven components fold to static class strings during SSREval.
+	cvaFactories map[string]*irtree.CVASpec
+
 	// errs collects diagnostics for unsupported constructs encountered during
 	// emit (unknown IR slots, or SSR-evaluated expressions the evaluator could
 	// not handle). They surface on EmitResult.Errors so the build fails instead
@@ -112,6 +116,7 @@ func NewEmitter() *Emitter {
 // Emit walks the ComponentTree and produces an EmitResult.
 func (e *Emitter) Emit(tree *irtree.ComponentTree) *EmitResult {
 	e.functions = tree.Functions
+	e.cvaFactories = tree.CVAFactories
 	output := e.emitNode(tree.Root)
 
 	// Merge subtree-local metadata and orphans collected during emit.
@@ -292,6 +297,12 @@ func (e *Emitter) emitSSREvaluated(node *irtree.ComponentNode) SlotOutput {
 	eval := NewSSREval(e.functions)
 	if e.EvalJS != nil {
 		eval.SetEvalJS(e.EvalJS)
+	}
+	if e.cvaFactories != nil {
+		eval.SetCVAFactories(e.cvaFactories)
+	}
+	if node.RestProps != nil && node.RestPropsName != "" {
+		eval.SetRestProps(map[string]map[string]ast.Expr{node.RestPropsName: node.RestProps})
 	}
 	if node.SSREvalBindings != nil {
 		eval.SetBindings(node.SSREvalBindings)

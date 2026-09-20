@@ -404,6 +404,65 @@ func (p *Parser) parseInterfaceDecl() ast.Stmt {
 	if isIdentifierToken(p.peek().Kind) {
 		p.next()
 	}
+	// Skip generic type parameters (`interface A<T, U extends V> ...`) so the
+	// heritage clause and body are reached.
+	if p.peek().Kind == lexer.LT {
+		depth := 0
+		for p.peek().Kind != lexer.EOF {
+			switch p.peek().Kind {
+			case lexer.LT:
+				depth++
+			case lexer.GT:
+				depth--
+				if depth == 0 {
+					p.next()
+					goto heritage
+				}
+			case lexer.SHR: // `>>` closes two levels
+				depth -= 2
+				p.next()
+				if depth <= 0 {
+					goto heritage
+				}
+				continue
+			}
+			p.next()
+		}
+	}
+heritage:
+	// `interface X extends A, B<C> ...` — skip the heritage clause up to the
+	// body brace. Without this the `extends` clause is parsed as an expression
+	// statement and the interface body's `?:` members error.
+	if p.match(lexer.Extends_) {
+		angle, paren, bracket := 0, 0, 0
+		for p.peek().Kind != lexer.EOF {
+			k := p.peek().Kind
+			if k == lexer.LBRACE && angle == 0 && paren == 0 && bracket == 0 {
+				break
+			}
+			switch k {
+			case lexer.LT:
+				angle++
+			case lexer.GT:
+				if angle > 0 {
+					angle--
+				}
+			case lexer.LPAREN:
+				paren++
+			case lexer.RPAREN:
+				if paren > 0 {
+					paren--
+				}
+			case lexer.LBRACKET:
+				bracket++
+			case lexer.RBRACKET:
+				if bracket > 0 {
+					bracket--
+				}
+			}
+			p.next()
+		}
+	}
 	if p.peek().Kind == lexer.LBRACE {
 		p.next()
 		depth := 1
@@ -508,6 +567,19 @@ func (p *Parser) parseNamedImports(named *[]ast.NamedImport) {
 	for {
 		if p.peek().Kind == lexer.RBRACE || p.peek().Kind == lexer.EOF {
 			break
+		}
+		// Skip an inline `type` modifier (`import { type Foo }`). Type-only
+		// specifiers carry no runtime binding, so the whole entry is dropped.
+		if isIdentifierToken(p.peek().Kind) && p.peek().Value == "type" && isIdentifierToken(p.peekN(1)) {
+			p.next() // consume `type`
+			p.next() // consume the type name
+			if p.match(lexer.As) && isIdentifierToken(p.peek().Kind) {
+				p.next()
+			}
+			if !p.match(lexer.COMMA) {
+				break
+			}
+			continue
 		}
 		if isIdentifierToken(p.peek().Kind) {
 			remote := p.next().Value
@@ -754,9 +826,15 @@ func (p *Parser) parseExport() ast.Stmt {
 	case lexer.Type_:
 		exp.Declaration = p.parseTypeAliasDecl()
 	case lexer.STAR:
-		// export * from 'source'
+		// export * from 'source'   or   export * as Name from 'source'
 		p.next()
 		exp.StarReexport = true
+		if p.match(lexer.As) && isIdentifierToken(p.peek().Kind) {
+			// `export * as Name from 'x'` — a namespace re-export. Record the
+			// namespace binding so downstream alias resolution can address
+			// `Name.<Export>` (mirrors `import * as Name`).
+			exp.Namespace = p.next().Value
+		}
 		if p.match(lexer.From) {
 			if p.peek().Kind == lexer.String {
 				exp.ReexportSource = p.next().Value
@@ -1820,6 +1898,13 @@ func (p *Parser) parseInfix(left ast.Expr) ast.Expr {
 func (p *Parser) parseFnExpr() ast.Expr {
 	p.next()
 	fn := &ast.ArrowFn{Async: false}
+	// A function expression may carry a name (`function Foo() {}`). It is only
+	// visible inside the body, so it is consumed and ignored — matching how the
+	// compiler treats unnamed function expressions. Compiled library output
+	// (e.g. Radix UI's `__name(function Foo() {...}, "Foo")`) relies on this.
+	if isIdentifierToken(p.peek().Kind) {
+		p.next()
+	}
 	p.expect(lexer.LPAREN)
 	fn.Params = p.parseParamList()
 	p.expect(lexer.RPAREN)

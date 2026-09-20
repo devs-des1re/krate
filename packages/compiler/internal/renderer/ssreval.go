@@ -2,6 +2,7 @@ package renderer
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -68,6 +69,73 @@ type SSREval struct {
 	// emitting empty/wrong output, the emitter surfaces these so the build
 	// fails with a clear message.
 	errs []error
+
+	// cvaFactories maps module-level `const X = cva(...)` bindings to their
+	// resolved specs so `X({ variant })` calls in a prop-driven component fold
+	// to a static class string during SSR.
+	cvaFactories map[string]*irtree.CVASpec
+
+	// restProps maps a rest-parameter name (e.g. `props` in `{ a, ...props }`)
+	// to the call-site attrs it collects, so `{...props}` spreads on intrinsic
+	// elements expand during SSREval.
+	restProps map[string]map[string]ast.Expr
+
+	// tagAliases maps a local `const X = <tag expr>` binding to its tag
+	// expression, so `<X/>` resolves to the concrete tag when it folds.
+	tagAliases map[string]ast.Expr
+}
+
+// SetCVAFactories installs the module-wide cva factory table.
+func (e *SSREval) SetCVAFactories(factories map[string]*irtree.CVASpec) {
+	e.cvaFactories = factories
+}
+
+// SetRestProps installs the rest-parameter attribute map for spread expansion.
+func (e *SSREval) SetRestProps(rest map[string]map[string]ast.Expr) {
+	e.restProps = rest
+}
+
+// expandSSRSpreadAttrs expands `{...name}` spreads resolving to a known rest
+// parameter; explicit attributes win over spread-provided ones.
+func (e *SSREval) expandSSRSpreadAttrs(attrs []*ast.JSXAttr) (out []*ast.JSXAttr, expanded bool) {
+	if e.restProps == nil {
+		return attrs, false
+	}
+	explicit := make(map[string]bool)
+	for _, attr := range attrs {
+		if !attr.Spread {
+			explicit[attr.Name] = true
+		}
+	}
+	for _, attr := range attrs {
+		if !attr.Spread || attr.Value == nil {
+			out = append(out, attr)
+			continue
+		}
+		id, ok := attr.Value.(*ast.Identifier)
+		if !ok {
+			out = append(out, attr)
+			continue
+		}
+		rest, ok := e.restProps[id.Name]
+		if !ok {
+			out = append(out, attr)
+			continue
+		}
+		expanded = true
+		names := make([]string, 0, len(rest))
+		for name := range rest {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			if explicit[name] {
+				continue
+			}
+			out = append(out, &ast.JSXAttr{Position: attr.Position, Name: name, Value: rest[name]})
+		}
+	}
+	return out, expanded
 }
 
 // addErr records an unsupported-construct diagnostic during evaluation.
@@ -108,6 +176,9 @@ func (e *SSREval) SetBindings(bindings map[string]string) {
 // Also evaluates for-loops that build arrays via `.push(<JSX/>)` so
 // components like OTPField render their statically-built element lists.
 func (e *SSREval) BindLocalVars(body []ast.Stmt) {
+	if e.tagAliases == nil {
+		e.tagAliases = make(map[string]ast.Expr)
+	}
 	for _, stmt := range body {
 		switch s := stmt.(type) {
 		case *ast.VarStmt:
@@ -120,6 +191,11 @@ func (e *SSREval) BindLocalVars(body []ast.Stmt) {
 						}
 						e.arrays[decl.Name] = elems
 						continue
+					}
+					// Record tag aliases (`const Comp = cond ? Slot : "button"`)
+					// so `<Comp/>` can resolve to the concrete tag.
+					if isTagExpr(decl.Init) {
+						e.tagAliases[decl.Name] = decl.Init
 					}
 					e.bindings[decl.Name] = e.eval(decl.Init)
 				}
@@ -144,6 +220,231 @@ func (e *SSREval) BindLocalVars(body []ast.Stmt) {
 			}
 		}
 	}
+}
+
+// evalSlot renders `<Slot attrs>{child}</Slot>` by merging the Slot's
+// attributes onto the single child element (the shadcn/radix `asChild`
+// contract). Returns ok=false when there is not exactly one element child.
+func (e *SSREval) evalSlot(el *ast.JSXElement) (string, bool) {
+	var child *ast.JSXElement
+	for _, c := range el.Children {
+		switch ch := c.(type) {
+		case *ast.JSXElementChild:
+			if child != nil {
+				return "", false
+			}
+			child = ch.Element
+		case *ast.JSXText:
+			if strings.TrimSpace(ch.Value) != "" {
+				return "", false
+			}
+		case *ast.JSXExprContainer:
+			// `{children}` / `{props.children}` forwards the call-site child,
+			// which arrives via the frame's `children` binding.
+			if !isChildrenRef(ch.Expression) {
+				return "", false
+			}
+		}
+	}
+	if child == nil {
+		// The child may have arrived via the frame's `children` binding (e.g.
+		// a forwarded rest spread or `{children}`). Merge the Slot's attributes
+		// into the rendered child HTML.
+		if raw, ok := e.bindings["children"]; ok && raw != "" {
+			if merged, ok := e.mergeSlotChildrenHTML(el, raw); ok {
+				return merged, true
+			}
+		}
+		return "", false
+	}
+	// Merge the Slot's explicit attributes under the child's own (child wins
+	// for duplicates, matching cloneElement where later props override).
+	merged := make([]*ast.JSXAttr, 0, len(el.Opening.Attributes)+len(child.Opening.Attributes))
+	childAttrs := make(map[string]bool, len(child.Opening.Attributes))
+	for _, a := range child.Opening.Attributes {
+		if !a.Spread {
+			childAttrs[a.Name] = true
+		}
+	}
+	for _, a := range el.Opening.Attributes {
+		if a.Spread {
+			continue
+		}
+		if a.Name == "key" || a.Name == "ref" || isSlotOnlyAttr(a.Name) {
+			continue
+		}
+		if childAttrs[a.Name] {
+			continue
+		}
+		if a.Name == "class" || a.Name == "className" {
+			merged = append(merged, mergeClassAttr(child, a))
+			continue
+		}
+		merged = append(merged, a)
+	}
+	merged = append(merged, child.Opening.Attributes...)
+
+	cloned := *child
+	opening := *child.Opening
+	opening.Attributes = e.expandSlotSpread(merged)
+	cloned.Opening = &opening
+	return e.evalJSX(&cloned), true
+}
+
+// mergeSlotChildrenHTML merges the Slot's attributes into the opening tag of
+// already-rendered children HTML (the forwarded `children` binding case). It
+// injects the class and any other simple attributes into the first element.
+func (e *SSREval) mergeSlotChildrenHTML(slot *ast.JSXElement, html string) (string, bool) {
+	start := strings.IndexByte(html, '<')
+	if start < 0 {
+		return "", false
+	}
+	// Skip closing tags / comments / doctype.
+	if start+1 >= len(html) {
+		return "", false
+	}
+	switch html[start+1] {
+	case '/', '!':
+		return "", false
+	}
+	end := strings.IndexByte(html[start:], '>')
+	if end < 0 {
+		return "", false
+	}
+	end += start
+
+	cls := ""
+	for _, a := range slot.Opening.Attributes {
+		if a.Spread || isSlotOnlyAttr(a.Name) {
+			continue
+		}
+		if a.Name == "class" || a.Name == "className" {
+			cls = e.eval(a.Value)
+		}
+	}
+	if cls == "" {
+		return html, true
+	}
+	// Merge into an existing class attribute if present, else add one.
+	openTag := html[start : end+1]
+	if idx := indexClassAttr(openTag); idx >= 0 {
+		// Insert the Slot's classes after `class="`.
+		insertAt := start + idx
+		return html[:insertAt] + cls + " " + html[insertAt:], true
+	}
+	return html[:end] + ` class="` + escape.HTML(cls) + `"` + html[end:], true
+}
+
+// indexClassAttr returns the offset just after the opening quote of a
+// class="..." attribute in an opening tag, or -1.
+func indexClassAttr(tag string) int {
+	for _, key := range []string{` class="`, ` class='`} {
+		if i := strings.Index(tag, key); i >= 0 {
+			return i + len(key)
+		}
+	}
+	return -1
+}
+
+// isSlotOnlyAttr reports attributes consumed by Slot itself, not forwarded.
+func isSlotOnlyAttr(name string) bool {
+	switch name {
+	case "asChild", "children", "suppressHydrationWarning":
+		return true
+	}
+	return false
+}
+
+// mergeClassAttr combines a Slot-provided class with the child's existing class
+// attribute value (Slot class first, then child class), as a `a + " " + b`
+// binary expression that the evaluator folds.
+func mergeClassAttr(child *ast.JSXElement, slotAttr *ast.JSXAttr) *ast.JSXAttr {
+	for _, ca := range child.Opening.Attributes {
+		if ca.Name != "class" && ca.Name != "className" {
+			continue
+		}
+		combined := &ast.BinaryExpr{
+			Op: "+",
+			Left: &ast.BinaryExpr{
+				Op:    "+",
+				Left:  slotAttr.Value,
+				Right: &ast.Literal{Kind: ast.StringLit, Value: " "},
+			},
+			Right: ca.Value,
+		}
+		return &ast.JSXAttr{Position: slotAttr.Position, Name: "class", Value: combined}
+	}
+	return slotAttr
+}
+
+// expandSlotSpread drops unresolved spreads (Slot spread handling is limited to
+// explicit attributes in this lowering).
+func (e *SSREval) expandSlotSpread(attrs []*ast.JSXAttr) []*ast.JSXAttr {
+	out := make([]*ast.JSXAttr, 0, len(attrs))
+	for _, a := range attrs {
+		if a.Spread {
+			continue
+		}
+		out = append(out, a)
+	}
+	return out
+}
+
+// isTagExpr reports whether an initializer could be a JSX tag alias: a string
+// literal, a component identifier, or a conditional/type-assertion of those.
+func isTagExpr(expr ast.Expr) bool {
+	switch e := expr.(type) {
+	case *ast.Literal:
+		return e.Kind == ast.StringLit
+	case *ast.Identifier:
+		return len(e.Name) > 0
+	case *ast.ConditionalExpr:
+		return isTagExpr(e.Consequent) || isTagExpr(e.Alternate)
+	case *ast.TypeAssertion:
+		return isTagExpr(e.Expr)
+	}
+	return false
+}
+
+// resolveTagAlias resolves a JSX tag bound to a local `const X = ...` to its
+// concrete tag name when the binding folds against the current bindings.
+func (e *SSREval) resolveTagAlias(name string) string {
+	// Only uppercase tags are component references; lowercase tags are always
+	// intrinsic and must never alias a same-named local.
+	if len(name) == 0 || name[0] < 'A' || name[0] > 'Z' {
+		return ""
+	}
+	if e.tagAliases == nil {
+		return ""
+	}
+	expr, ok := e.tagAliases[name]
+	if !ok {
+		return ""
+	}
+	return e.foldTagExpr(expr)
+}
+
+func (e *SSREval) foldTagExpr(expr ast.Expr) string {
+	switch t := expr.(type) {
+	case *ast.Literal:
+		if t.Kind == ast.StringLit {
+			return t.Value
+		}
+		return ""
+	case *ast.Identifier:
+		return t.Name
+	case *ast.ConditionalExpr:
+		if !e.isStaticExpr(t.Test) {
+			return ""
+		}
+		if isSSRTruthy(e.eval(t.Test)) {
+			return e.foldTagExpr(t.Consequent)
+		}
+		return e.foldTagExpr(t.Alternate)
+	case *ast.TypeAssertion:
+		return e.foldTagExpr(t.Expr)
+	}
+	return ""
 }
 
 // evalForLoop statically evaluates a `for` loop whose body pushes JSX onto an
@@ -512,6 +813,21 @@ func (e *SSREval) evalCallExpr(expr *ast.CallExpr) string {
 			return strings.ToLower(e.eval(mem.Object))
 		}
 	}
+	// Class helpers (cn/clsx) fold to a literal class string when every
+	// argument is statically known, so a prop-driven component's
+	// `className={cn("base", className)}` renders real classes at build time.
+	if id, ok := expr.Callee.(*ast.Identifier); ok && (id.Name == "cn" || id.Name == "clsx") {
+		if v, ok := e.evalClassCall(expr.Args); ok {
+			return v
+		}
+	}
+	// A known cva factory call (`buttonVariants({ variant, size })`) folds to
+	// its class string when the selection is statically known.
+	if id, ok := expr.Callee.(*ast.Identifier); ok && e.cvaFactories != nil {
+		if spec, ok := e.cvaFactories[id.Name]; ok {
+			return e.evalCVACall(spec, expr.Args)
+		}
+	}
 	// IIFE
 	if arrow, ok := expr.Callee.(*ast.ArrowFn); ok {
 		body := arrowBodyExpr(arrow)
@@ -525,6 +841,160 @@ func (e *SSREval) evalCallExpr(expr *ast.CallExpr) string {
 		return e.delegateJS(expr)
 	}
 	return ""
+}
+
+// evalCVACall resolves a cva factory call to its class string using the current
+// bindings for the variant selection.
+func (e *SSREval) evalCVACall(spec *irtree.CVASpec, args []ast.Expr) string {
+	selection := map[string]string{}
+	extra := ""
+	if len(args) >= 1 {
+		if obj, ok := args[0].(*ast.ObjectExpr); ok {
+			for _, prop := range obj.Properties {
+				if prop == nil || prop.Spread || prop.Key == "" || !e.isStaticExpr(prop.Value) {
+					continue
+				}
+				v := e.eval(prop.Value)
+				if v == "" || v == "undefined" || v == "null" {
+					continue
+				}
+				if prop.Key == "class" || prop.Key == "className" {
+					extra = v
+					continue
+				}
+				selection[prop.Key] = v
+			}
+		}
+	}
+	return spec.Fold(selection, extra)
+}
+
+// evalClassCall folds cn/clsx arguments against the current SSREval bindings.
+// It returns ok=false when any argument cannot be statically resolved.
+func (e *SSREval) evalClassCall(args []ast.Expr) (string, bool) {
+	var tokens []string
+	for _, arg := range args {
+		toks, ok := e.evalClassValue(arg)
+		if !ok {
+			return "", false
+		}
+		tokens = append(tokens, toks...)
+	}
+	return strings.Join(tokens, " "), true
+}
+
+func (e *SSREval) evalClassValue(expr ast.Expr) ([]string, bool) {
+	switch ex := expr.(type) {
+	case *ast.Literal:
+		switch ex.Kind {
+		case ast.StringLit:
+			if ex.Value == "" {
+				return nil, true
+			}
+			return []string{ex.Value}, true
+		case ast.NumberLit:
+			return []string{ex.Value}, true
+		default:
+			return nil, true
+		}
+	case *ast.Identifier:
+		if isChildrenRef(expr) {
+			return nil, false
+		}
+		if v, ok := e.bindings[ex.Name]; ok {
+			if v == "" || v == "undefined" || v == "null" || v == "false" {
+				return nil, true
+			}
+			return []string{v}, true
+		}
+		if _, ok := e.arrays[ex.Name]; ok {
+			return nil, false
+		}
+		// An unbound identifier is not statically known.
+		return nil, false
+	case *ast.CallExpr:
+		// Nested class helpers behave like their result string.
+		if id, ok := ex.Callee.(*ast.Identifier); ok && (id.Name == "cn" || id.Name == "clsx") {
+			v, ok := e.evalClassCall(ex.Args)
+			if !ok {
+				return nil, false
+			}
+			if v == "" {
+				return nil, true
+			}
+			return []string{v}, true
+		}
+		if id, ok := ex.Callee.(*ast.Identifier); ok && e.cvaFactories != nil {
+			if spec, ok := e.cvaFactories[id.Name]; ok {
+				v := e.evalCVACall(spec, ex.Args)
+				if v == "" {
+					return nil, true
+				}
+				return []string{v}, true
+			}
+		}
+		return nil, false
+	case *ast.TemplateExpr:
+		for _, part := range ex.Parts {
+			if !e.isStaticExpr(part) {
+				return nil, false
+			}
+		}
+		v := e.eval(expr)
+		if v == "" {
+			return nil, true
+		}
+		return []string{v}, true
+	case *ast.ArrayExpr:
+		var out []string
+		for _, el := range ex.Elements {
+			if el == nil {
+				continue
+			}
+			toks, ok := e.evalClassValue(el)
+			if !ok {
+				return nil, false
+			}
+			out = append(out, toks...)
+		}
+		return out, true
+	case *ast.ObjectExpr:
+		var out []string
+		for _, prop := range ex.Properties {
+			if prop == nil || prop.Spread || prop.Key == "" {
+				return nil, false
+			}
+			if !e.isStaticExpr(prop.Value) {
+				return nil, false
+			}
+			v := e.eval(prop.Value)
+			if isSSRTruthy(v) {
+				out = append(out, prop.Key)
+			}
+		}
+		return out, true
+	case *ast.BinaryExpr:
+		if ex.Op == "&&" {
+			if !e.isStaticExpr(ex.Left) {
+				return nil, false
+			}
+			if !isSSRTruthy(e.eval(ex.Left)) {
+				return nil, true
+			}
+			return e.evalClassValue(ex.Right)
+		}
+		return nil, false
+	case *ast.ConditionalExpr:
+		if !e.isStaticExpr(ex.Test) {
+			return nil, false
+		}
+		if isSSRTruthy(e.eval(ex.Test)) {
+			return e.evalClassValue(ex.Consequent)
+		}
+		return e.evalClassValue(ex.Alternate)
+	default:
+		return nil, false
+	}
 }
 
 // ─── Template ──────────────────────────────────────────────────────────────
@@ -686,6 +1156,16 @@ func (e *SSREval) evalJSX(el *ast.JSXElement) string {
 
 	name := el.Opening.Name
 
+	// A tag bound to a local `const X = cond ? Tag : "tag"` resolves through the
+	// eval bindings when the condition folds (the shadcn `asChild` pattern).
+	if alias := e.resolveTagAlias(name); alias != "" && alias != name {
+		cloned := *el
+		opening := *el.Opening
+		opening.Name = alias
+		cloned.Opening = &opening
+		return e.evalJSX(&cloned)
+	}
+
 	// Special components: capture their content into meta fields so signal-less
 	// wrappers (layouts, doc shells) still inject <Head>/<Script>/<Style>.
 	switch name {
@@ -722,6 +1202,16 @@ func (e *SSREval) evalJSX(el *ast.JSXElement) string {
 		return e.evalPlainCodeBlock(el)
 	}
 
+	// <Slot> (the `asChild` primitive): render its single child element with
+	// the Slot's own attributes merged onto it, instead of wrapping.
+	if name == "Slot" {
+		if html, ok := e.evalSlot(el); ok {
+			return html
+		}
+		// No single element child — render children alone.
+		return e.evalChildren(el.Children)
+	}
+
 	// Uppercase = component — resolve and evaluate recursively
 	if len(name) > 0 && name[0] >= 'A' && name[0] <= 'Z' {
 		if e.interactiveEmit != nil {
@@ -744,9 +1234,10 @@ func (e *SSREval) evalJSX(el *ast.JSXElement) string {
 
 	// dangerouslySetInnerHTML={{__html: "..."}} injects raw, pre-rendered HTML
 	// (e.g. build-time markdown). It is never emitted as an attribute.
+	attrs, expanded := e.expandSSRSpreadAttrs(el.Opening.Attributes)
 	var rawInnerHTML string
 	hasRawInnerHTML := false
-	for _, attr := range el.Opening.Attributes {
+	for _, attr := range attrs {
 		if attr.Spread || attr.Name != "dangerouslySetInnerHTML" || attr.Value == nil {
 			continue
 		}
@@ -756,7 +1247,7 @@ func (e *SSREval) evalJSX(el *ast.JSXElement) string {
 		}
 	}
 
-	for _, attr := range el.Opening.Attributes {
+	for _, attr := range attrs {
 		if attr.Spread || attr.Name == "dangerouslySetInnerHTML" {
 			continue
 		}
@@ -766,6 +1257,11 @@ func (e *SSREval) evalJSX(el *ast.JSXElement) string {
 		} else {
 			// Bare attribute like <input disabled /> — boolean true
 			val = "true"
+		}
+		// A prop that resolved to undefined/null is omitted entirely (React
+		// drops undefined attributes).
+		if val == "undefined" || val == "null" {
+			continue
 		}
 		// Boolean attributes must not be emitted with empty/"false" values:
 		// their mere presence (even ="") makes them truthy in HTML.
@@ -792,6 +1288,20 @@ func (e *SSREval) evalJSX(el *ast.JSXElement) string {
 	}
 
 	if el.Opening.SelfClosing && !hasRawInnerHTML {
+		// A self-closing element may still receive children through a forwarded
+		// rest spread (`<Comp {...props}/>`), since React's props object carries
+		// `children`. Inject the frame's children when a spread was expanded and
+		// they are present.
+		if expanded {
+			if ch, ok := e.bindings["children"]; ok && ch != "" {
+				b.WriteByte('>')
+				b.WriteString(ch)
+				b.WriteString("</")
+				b.WriteString(name)
+				b.WriteByte('>')
+				return b.String()
+			}
+		}
 		if isVoidElement(el.Opening.Name) {
 			b.WriteString(" />")
 		} else {
@@ -808,7 +1318,21 @@ func (e *SSREval) evalJSX(el *ast.JSXElement) string {
 		// it verbatim, ignoring children.
 		b.WriteString(rawInnerHTML)
 	} else {
-		for _, child := range el.Children {
+		children := el.Children
+		// React's props object carries `children`, so `<Comp {...props}/>`
+		// forwards the call-site children. When this element has no explicit
+		// children but a rest spread was expanded, inject the component
+		// frame's children binding.
+		if len(children) == 0 && expanded {
+			if ch, ok := e.bindings["children"]; ok && ch != "" {
+				b.WriteString(ch)
+				b.WriteString("</")
+				b.WriteString(name)
+				b.WriteByte('>')
+				return b.String()
+			}
+		}
+		for _, child := range children {
 			switch c := child.(type) {
 			case *ast.JSXText:
 				b.WriteString(c.Value)

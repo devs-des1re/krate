@@ -3,6 +3,8 @@ export type { CSSARIAOptions, CSSVars, CSSPrimitiveOptions, CSSStackActions } fr
 export { h, mount, hydrate, insert, clearNodes, disposeNode } from './dom.js';
 export { Fragment, jsx, jsxs } from './jsx-runtime.js';
 export { initRouter, reinitRouter } from './router.js';
+export { clsx, cn, cva, twMerge, Slot, cloneElement } from './class-helpers.js';
+export type { ClassValue, CVAConfig } from './class-helpers.js';
 export { createContext, resetContexts } from './context.js';
 export { createResource } from './resource.js';
 export type { Context } from './context.js';

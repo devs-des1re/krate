@@ -261,6 +261,26 @@ mutate(prev => ({ ...prev, name: 'new' }))  // optimistic update
 refetch()       // trigger re-fetch
 ```
 
+### Class helpers & `Slot`
+
+Dependency-free implementations of the helpers shadcn/ui-style components use.
+Literal `cn`/`clsx`/`cva` calls are folded by the compiler; these runtime
+versions cover dynamic cases.
+
+```typescript
+import { cn, clsx, cva, twMerge, Slot, cloneElement } from '@krate/runtime'
+
+cn('p-4', 'px-2')                       // 'px-2 p-4' (later utilities win)
+clsx('a', cond && 'b', { c: true })     // 'a c'
+const b = cva('base', { variants: { size: { sm: 'h-8', lg: 'h-10' } } })
+b({ size: 'lg' })                       // 'base h-10'
+Slot({ children })                      // merges props onto a single child
+cloneElement(node, { class: 'x' })      // apply props to an existing node
+```
+
+`Slot` implements the `asChild` mechanic: it renders its single child element
+instead of wrapping it, merging the Slot's props (including `class`) onto it.
+
 ## React compatibility
 
 The compiler rewrites React hooks and `React.*` calls to the primitives above at

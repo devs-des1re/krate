@@ -344,7 +344,9 @@ func (b *Bundler) resolveModule(path string, isEntry bool) error {
 	}
 
 	if !strings.HasSuffix(path, ".tsx") && !strings.HasSuffix(path, ".ts") &&
-		!strings.HasSuffix(path, ".jsx") && !strings.HasSuffix(path, ".js") {
+		!strings.HasSuffix(path, ".mts") && !strings.HasSuffix(path, ".jsx") &&
+		!strings.HasSuffix(path, ".js") && !strings.HasSuffix(path, ".mjs") &&
+		!strings.HasSuffix(path, ".cjs") {
 		if assetExtensions[strings.ToLower(filepath.Ext(path))] {
 			data, err := os.ReadFile(abs)
 			if err != nil {
@@ -436,7 +438,8 @@ func (b *Bundler) collectImports(prog *ast.Program, mod *Module) {
 			}
 		}
 		if exp, ok := stmt.(*ast.ExportStmt); ok {
-			if exp.StarReexport && exp.ReexportSource != "" {
+			// A star or namespace re-export depends on its source module.
+			if (exp.StarReexport || exp.Namespace != "") && exp.ReexportSource != "" {
 				src := strings.Trim(exp.ReexportSource, "\"'")
 				mod.Imports = append(mod.Imports, src)
 			}
@@ -509,7 +512,7 @@ func resolveImport(importer, imp string) string {
 		if fileExists(resolved) {
 			info, err := os.Stat(resolved)
 			if err == nil && info.IsDir() {
-				for _, index := range []string{"index.tsx", "index.ts", "index.jsx", "index.js", "index.md", "index.mdx"} {
+				for _, index := range []string{"index.tsx", "index.ts", "index.mts", "index.jsx", "index.js", "index.mjs", "index.cjs", "index.md", "index.mdx"} {
 					candidate := filepath.Join(resolved, index)
 					if fileExists(candidate) {
 						return candidate
@@ -519,7 +522,7 @@ func resolveImport(importer, imp string) string {
 			return resolved
 		}
 
-		extensions := []string{".tsx", ".ts", ".jsx", ".js", ".md", ".mdx", ".css", ".json"}
+		extensions := []string{".tsx", ".ts", ".mts", ".jsx", ".js", ".mjs", ".cjs", ".md", ".mdx", ".css", ".json"}
 		for _, ext := range extensions {
 			candidate := resolved + ext
 			if fileExists(candidate) {
@@ -572,7 +575,7 @@ func resolvePathAlias(imp string, aliases []pathAlias, tsBaseDir string) string 
 					}
 
 					// Try with extensions
-					extensions := []string{".tsx", ".ts", ".jsx", ".js", ".css", ".json"}
+					extensions := []string{".tsx", ".ts", ".mts", ".jsx", ".js", ".mjs", ".cjs", ".css", ".json"}
 					for _, ext := range extensions {
 						candidate := targetPath + ext
 						if fileExists(candidate) {

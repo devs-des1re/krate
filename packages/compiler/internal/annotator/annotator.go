@@ -559,6 +559,16 @@ func MergeModuleFunctions(ann *irtree.Annotations, modules []ModuleSource) {
 	for _, mod := range modules {
 		if mod.Program != nil {
 			collectFunctionsWithSource(mod.Program.Body, ann.Functions, ann.ComponentSources, ann.ComponentRaw, mod.Path, mod.RawSource)
+			// Merge module-level cva factories so variant calls in the entry
+			// module can fold against factories defined in imported modules.
+			if ann.CVAFactories == nil {
+				ann.CVAFactories = make(map[string]*irtree.CVASpec)
+			}
+			for name, spec := range irtree.CollectCVAFactories(mod.Program) {
+				if _, exists := ann.CVAFactories[name]; !exists {
+					ann.CVAFactories[name] = spec
+				}
+			}
 		}
 	}
 	// Re-walk used components to pick up newly discovered functions. The used
@@ -630,6 +640,15 @@ func BuildImportAliases(modules []ModuleSource) map[string]string {
 			continue
 		}
 		for _, stmt := range m.Program.Body {
+			// Namespace re-export (`export * as Card from './card'`): address
+			// every function of the target module as `Card.<Name>`.
+			if exp, ok := stmt.(*ast.ExportStmt); ok && exp.Namespace != "" && exp.ReexportSource != "" {
+				target := bundler.ResolveImport(m.Path, strings.Trim(exp.ReexportSource, "\"'"))
+				if tprog := byPath[target]; tprog != nil {
+					addNamespaceAliases(aliases, exp.Namespace, tprog.Body)
+				}
+				continue
+			}
 			imp, ok := stmt.(*ast.ImportStmt)
 			if !ok || imp.Source == "" {
 				continue
@@ -648,10 +667,59 @@ func BuildImportAliases(modules []ModuleSource) map[string]string {
 				if n.Local != "" && n.Remote != "" && n.Local != n.Remote {
 					aliases[n.Local] = n.Remote
 				}
+				// The target module may re-export a namespace under this name
+				// (`export * as Card from './card'`), so `import { Card }` then
+				// `<Card.Root>` resolves to the deeper module's `Root`. Expand
+				// the named import into namespace aliases keyed by the LOCAL
+				// binding so the import site's dotted tag resolves.
+				if nsBody, ok := namespaceReexportBody(tprog.Body, n.Remote, m.Path, byPath); ok {
+					addNamespaceAliases(aliases, n.Local, nsBody)
+				}
+			}
+			// Namespace import (`import * as Card from './card'`): every
+			// function exported by the target module becomes addressable as
+			// `Card.<Name>`, so dotted JSX tags like `<Card.Root>` resolve to
+			// the declared `Root` function.
+			if imp.Namespace != "" {
+				addNamespaceAliases(aliases, imp.Namespace, tprog.Body)
 			}
 		}
 	}
 	return aliases
+}
+
+// namespaceReexportBody returns the target module's body when `exportName` in
+// the given module is a namespace re-export (`export * as exportName from '...'`).
+// This lets a named import of that binding expand into dotted aliases.
+func namespaceReexportBody(body []ast.Stmt, exportName, modulePath string, byPath map[string]*ast.Program) ([]ast.Stmt, bool) {
+	for _, stmt := range body {
+		exp, ok := stmt.(*ast.ExportStmt)
+		if !ok || exp.Namespace != exportName || exp.ReexportSource == "" {
+			continue
+		}
+		target := bundler.ResolveImport(modulePath, strings.Trim(exp.ReexportSource, "\"'"))
+		if tprog := byPath[target]; tprog != nil {
+			return tprog.Body, true
+		}
+	}
+	return nil, false
+}
+
+// addNamespaceAliases maps `ns.<Fn>` to the declared function name for every
+// function declaration in a module body, so dotted JSX tags resolve.
+func addNamespaceAliases(aliases map[string]string, ns string, body []ast.Stmt) {
+	for _, stmt := range body {
+		switch d := stmt.(type) {
+		case *ast.FnDecl:
+			if d.Name != "" {
+				aliases[ns+"."+d.Name] = d.Name
+			}
+		case *ast.ExportStmt:
+			if d2, ok := d.Declaration.(*ast.FnDecl); ok && d2.Name != "" {
+				aliases[ns+"."+d2.Name] = d2.Name
+			}
+		}
+	}
 }
 
 // ReclassifyTiers re-runs tier classification for all used components.

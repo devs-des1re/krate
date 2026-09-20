@@ -71,6 +71,10 @@ type Annotations struct {
 	// ComponentRaw maps each used function name to the raw source text of the
 	// module it was defined in, for directive detection per module.
 	ComponentRaw map[string]string
+	// CVAFactories maps a module-level `const X = cva(base, config)` binding to
+	// its resolved spec, across the entry and all imported modules. Used to fold
+	// shadcn/ui variant calls to static class strings.
+	CVAFactories map[string]*CVASpec
 }
 
 // ─── SlotNode interface ────────────────────────────────────────────────────
@@ -321,6 +325,12 @@ type ComponentNode struct {
 	// The emitter uses SSREval to render these at build time.
 	IsSSREval       bool
 	SSREvalBindings map[string]string
+	// RestProps holds the call-site attributes collected by the component's
+	// rest parameter (e.g. `{ className, ...props }`), so SSREval can expand a
+	// `{...props}` spread on an intrinsic element. RestPropsName is that
+	// parameter's local name.
+	RestProps     map[string]ast.Expr
+	RestPropsName string
 
 	// CallSiteChildren stores the raw JSX children from the call site.
 	// For SSREval components, the emitter evaluates these via SSREval and
@@ -354,6 +364,9 @@ type ComponentTree struct {
 	Pages        map[string]*ComponentNode
 	RuntimeStore *RuntimePropStore
 	Functions    map[string]*ast.FnDecl
+	// CVAFactories holds module-wide `const X = cva(...)` specs so the emitter
+	// can fold variant calls in prop-driven (SSREval) components.
+	CVAFactories map[string]*CVASpec
 
 	// CSSSignalsCSS is the generated stylesheet for every CSS signal scope
 	// compiled into this tree (empty when none). The build appends it to the
