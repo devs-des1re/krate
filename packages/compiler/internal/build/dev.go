@@ -211,19 +211,6 @@ func (b *Builder) processChanges(changed []string, reload chan<- ReloadEvent) {
 	apiToBuild = uniqueStrings(apiToBuild)
 	pagesToBuild = uniqueStrings(pagesToBuild)
 
-	// Server bundles (SSR/ISR/streaming) and runtime component bundles are
-	// aggregate, site-wide artifacts that only BuildAll regenerates. A partial
-	// rebuild would refresh a page's static shell while leaving the sidecar's
-	// bundle stale, so once the build has produced any of them, changes that
-	// affect pages must take the full path. Pure-SSG projects still get fast
-	// partial rebuilds.
-	if b.hasServerArtifacts && (len(pagesToBuild) > 0 || len(apiToBuild) > 0 || goAPIChanged) {
-		fmt.Printf("  %sServer-rendered site; rebuilding all...%s\n", cYellow, cReset)
-		pagesToBuild = nil
-		apiToBuild = nil
-		goAPIChanged = false
-	}
-
 	var routes []string
 	var buildErrors []string
 
@@ -238,7 +225,7 @@ func (b *Builder) processChanges(changed []string, reload chan<- ReloadEvent) {
 			routes = append(routes, route)
 		}
 		fmt.Printf("  %sAffected pages:%s %v\n", cBlue, cReset, routes)
-		if err := b.BuildPages(pagesToBuild); err != nil {
+		if _, err := b.BuildPages(pagesToBuild); err != nil {
 			fmt.Fprintf(os.Stderr, "  %sUI Compilation Error: %v%s\n", cRed, err, cReset)
 			buildErrors = append(buildErrors, "UI: "+err.Error())
 		}

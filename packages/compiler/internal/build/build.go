@@ -136,12 +136,6 @@ type Builder struct {
 	// whose params are closed, so the manifest and server can 404 unknown params.
 	staticOnlyRoutes []string
 	staticOnlyMu     sync.Mutex
-
-	// hasServerArtifacts is set by BuildAll when it produced SSR server bundles
-	// or runtime component bundles. Those are aggregate, site-wide outputs that
-	// BuildPages (the partial-rebuild path) does not regenerate, so dev mode
-	// must fall back to a full rebuild once they exist to keep them in sync.
-	hasServerArtifacts bool
 }
 
 func New(root string, cfg *config.Config) *Builder {
@@ -219,9 +213,9 @@ func (b *Builder) printReactiveDiags(diags []reactive.Diagnostic) {
 
 // BuildPages rebuilds only the specified pages (by source path).
 // Unlike BuildAll, it does NOT clean the output directory.
-func (b *Builder) BuildPages(pages []string) error {
+func (b *Builder) BuildPages(pages []string) ([]*PageResult, error) {
 	if len(pages) == 0 {
-		return nil
+		return nil, nil
 	}
 
 	errorCount := 0
@@ -313,7 +307,7 @@ func (b *Builder) BuildPages(pages []string) error {
 	}
 
 	if len(results) == 0 {
-		return fmt.Errorf("no pages built successfully")
+		return nil, fmt.Errorf("no pages built successfully")
 	}
 
 	// Write shared runtime chunk (extracted from per-page bundles)
@@ -334,11 +328,17 @@ func (b *Builder) BuildPages(pages []string) error {
 	// In-memory HTML generation + string swap + single disk write per page
 	b.writeHTMLPages(results, globalCSS, runtimeJS)
 
+	// Refresh the sidecar artifacts this subset of pages owns: an SSR/streaming
+	// page's server bundle, and any runtime components it references. Done here
+	// (rather than by rebuilding the whole site) so a dev-mode edit stays a
+	// single-page rebuild even on a server-rendered site.
+	b.refreshPageServerArtifacts(results, runtimeJS, globalCSS)
+
 	if perrs := b.drainPluginErrs(); len(perrs) > 0 {
-		return fmt.Errorf("build failed: %d plugin error(s):\n  %s", len(perrs), strings.Join(perrs, "\n  "))
+		return results, fmt.Errorf("build failed: %d plugin error(s):\n  %s", len(perrs), strings.Join(perrs, "\n  "))
 	}
 
-	return nil
+	return results, nil
 }
 
 func (b *Builder) BuildAll() error {
@@ -665,8 +665,6 @@ func (b *Builder) BuildAll() error {
 		fmt.Printf("  %s⚡%s Compiled %d runtime components\n", cCyan, cReset, len(runtimeCompBundles))
 	}
 	manifest.SetRuntimeComponents(runtimeCompBundles)
-
-	b.hasServerArtifacts = len(serverBundles) > 0 || len(runtimeCompBundles) > 0
 
 	if err := WriteManifest(manifest, b.Cfg.OutDir, serverBundles); err != nil {
 		fmt.Fprintf(os.Stderr, "  %sWarning: failed to write manifest:%s %v\n", cYellow, cReset, err)
