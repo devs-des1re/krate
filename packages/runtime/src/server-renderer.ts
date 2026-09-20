@@ -669,6 +669,12 @@ const server = http.createServer(async (req, res) => {
         moduleCache.delete(key);
         console.log(`[krate-ssr] Invalidated cache for ${targetRoute} (${key})`);
       }
+      // Runtime component bundles are recompiled in place on a dev rebuild, but
+      // their render functions are cached for the process lifetime. Clear them
+      // so the next region render picks up the new code. Bundles are tiny and
+      // re-read on demand, so clearing all of them is cheap and avoids tracking
+      // which component maps to which route here.
+      runtimeBundleCache.clear();
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true }));
     } catch (err: any) {

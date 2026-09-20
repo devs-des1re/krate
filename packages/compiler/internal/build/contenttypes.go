@@ -9,6 +9,7 @@ import (
 	"github.com/kratejs/krate/packages/compiler/internal/content"
 	"github.com/kratejs/krate/packages/compiler/internal/docs"
 	"github.com/kratejs/krate/packages/compiler/internal/frontmatter"
+	"github.com/kratejs/krate/packages/compiler/internal/fsutil"
 	"github.com/kratejs/krate/packages/compiler/internal/markdown"
 	"github.com/kratejs/krate/packages/compiler/internal/plugin"
 )
@@ -81,12 +82,12 @@ func (b *Builder) prepareContent() contentTypeResult {
 		res.Warnings = append(res.Warnings, fmt.Errorf("creating types dir: %w", err))
 		return res
 	}
-	if err := os.WriteFile(filepath.Join(typesDir, "content.d.ts"), []byte(content.Generate(cfg, entries)), 0644); err != nil {
+	if err := fsutil.WriteFileIfChanged(filepath.Join(typesDir, "content.d.ts"), []byte(content.Generate(cfg, entries)), 0644); err != nil {
 		res.Warnings = append(res.Warnings, fmt.Errorf("writing content.d.ts: %w", err))
 	}
 	// Ambient module declaration, placed beside the source so the project's
 	// tsconfig include picks it up (it has no imports, so it is a script).
-	if err := os.WriteFile(b.contentAmbientPath(), []byte(content.GenerateModuleDTS(cfg)), 0644); err != nil {
+	if err := fsutil.WriteFileIfChanged(b.contentAmbientPath(), []byte(content.GenerateModuleDTS(cfg)), 0644); err != nil {
 		res.Warnings = append(res.Warnings, fmt.Errorf("writing content ambient types: %w", err))
 	}
 
@@ -95,7 +96,7 @@ func (b *Builder) prepareContent() contentTypeResult {
 		res.Warnings = append(res.Warnings, fmt.Errorf("creating gen dir: %w", err))
 		return res
 	}
-	if err := os.WriteFile(b.contentModulePath(), []byte(content.GenerateModule(cfg, entries)), 0644); err != nil {
+	if err := fsutil.WriteFileIfChanged(b.contentModulePath(), []byte(content.GenerateModule(cfg, entries)), 0644); err != nil {
 		res.Warnings = append(res.Warnings, fmt.Errorf("writing content module: %w", err))
 	}
 
