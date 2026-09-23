@@ -116,8 +116,8 @@ func Minify(css string) string {
 
 	minified := strings.TrimSpace(b.String())
 
-	minified = shortenHexColors(minified)
 	minified = rgbaToHex(minified)
+	minified = shortenHexColors(minified)
 	minified = removeZeroUnits(minified)
 	minified = simplifyCalc(minified)
 	minified = removeTrailingSemicolons(minified)
@@ -182,7 +182,9 @@ func removeEmptyRules(css string) string {
 	return emptyRuleRe.ReplaceAllString(css, "")
 }
 
-// rgbaToHex converts rgba(r,g,b,1) and rgb(r,g,b) to #hex.
+// rgbaToHex converts opaque color functions to #hex. Both the legacy
+// comma-separated syntax (rgba(r,g,b,1), rgb(r,g,b)) and the modern
+// space-separated syntax (rgb(r g b), rgb(r g b / 1)) are handled.
 func rgbaToHex(css string) string {
 	css = rgbaRe.ReplaceAllStringFunc(css, func(match string) string {
 		parts := rgbaRe.FindStringSubmatch(match)
@@ -193,20 +195,24 @@ func rgbaToHex(css string) string {
 		if a != "1" && a != "1.0" && a != "1.00" {
 			return match
 		}
-		r := parseByte(parts[1])
-		g := parseByte(parts[2])
-		b := parseByte(parts[3])
-		return fmt.Sprintf("#%02x%02x%02x", r, g, b)
+		return fmt.Sprintf("#%02x%02x%02x", parseByte(parts[1]), parseByte(parts[2]), parseByte(parts[3]))
 	})
 	css = rgbRe.ReplaceAllStringFunc(css, func(match string) string {
 		parts := rgbRe.FindStringSubmatch(match)
 		if len(parts) < 4 {
 			return match
 		}
-		r := parseByte(parts[1])
-		g := parseByte(parts[2])
-		b := parseByte(parts[3])
-		return fmt.Sprintf("#%02x%02x%02x", r, g, b)
+		return fmt.Sprintf("#%02x%02x%02x", parseByte(parts[1]), parseByte(parts[2]), parseByte(parts[3]))
+	})
+	css = rgbSpaceRe.ReplaceAllStringFunc(css, func(match string) string {
+		parts := rgbSpaceRe.FindStringSubmatch(match)
+		if len(parts) < 5 {
+			return match
+		}
+		if a := strings.TrimSpace(parts[4]); a != "" && a != "1" && a != "1.0" {
+			return match
+		}
+		return fmt.Sprintf("#%02x%02x%02x", parseByte(parts[1]), parseByte(parts[2]), parseByte(parts[3]))
 	})
 	return css
 }
@@ -224,42 +230,65 @@ func parseByte(s string) uint8 {
 	return uint8(n)
 }
 
-// simplifyCalc simplifies calc() expressions: calc(0 + X) → X, calc(X + 0) → X, calc(X * 1) → X, etc.
+// simplifyCalc simplifies calc() expressions: calc(0 + X) → X, calc(X + 0) → X,
+// calc(X * 1) → X, calc(X * 0) → 0, etc. Whitespace around operators is
+// optional for `*` and tolerated around `+`/`-`, since minified input may be
+// space-free. Substitutions are re-applied until a fixed point so nested
+// simplifications fully collapse.
 func simplifyCalc(css string) string {
-	return calcRe.ReplaceAllStringFunc(css, func(match string) string {
-		parts := calcRe.FindStringSubmatch(match)
-		if len(parts) < 2 {
-			return match
+	for {
+		next := calcRe.ReplaceAllStringFunc(css, simplifyOneCalc)
+		if next == css {
+			return css
 		}
-		expr := strings.TrimSpace(parts[1])
-		lower := strings.ToLower(expr)
-		// calc(0 + X) → X
-		if strings.HasPrefix(lower, "0 + ") {
-			return strings.TrimSpace(expr[4:])
-		}
-		// calc(X + 0) → X
-		if strings.HasSuffix(lower, " + 0") {
-			return strings.TrimSpace(expr[:len(expr)-4])
-		}
-		// calc(0 - X) → -X
-		if strings.HasPrefix(lower, "0 - ") {
-			return "-" + strings.TrimSpace(expr[4:])
-		}
-		// calc(X * 1) → X
-		if strings.HasSuffix(lower, " * 1") {
-			return strings.TrimSpace(expr[:len(expr)-4])
-		}
-		// calc(X * 0) → 0
-		if strings.HasSuffix(lower, " * 0") {
-			return "0"
-		}
-		// calc(1 * X) → X
-		if strings.HasPrefix(lower, "1 * ") {
-			return strings.TrimSpace(expr[4:])
-		}
-		return match
-	})
+		css = next
+	}
 }
+
+func simplifyOneCalc(match string) string {
+	parts := calcRe.FindStringSubmatch(match)
+	if len(parts) < 2 {
+		return match
+	}
+	expr := strings.TrimSpace(parts[1])
+	if simplified, ok := simplifyCalcExpr(expr); ok {
+		return simplified
+	}
+	return match
+}
+
+// simplifyCalcExpr applies the identity rules to a single calc() body.
+func simplifyCalcExpr(expr string) (string, bool) {
+	type rule struct {
+		re *regexp.Regexp
+		fn func(m []string) string
+	}
+	rules := []rule{
+		// Multiplicative identities (whitespace optional).
+		{calcMulOneLeftRe, func(m []string) string { return m[1] }},
+		{calcMulOneRightRe, func(m []string) string { return m[1] }},
+		{calcMulZeroRe, func([]string) string { return "0" }},
+		// Additive identities (Tailwind emits spaces; tolerate their absence).
+		{calcAddZeroLeftRe, func(m []string) string { return m[1] }},
+		{calcAddZeroRightRe, func(m []string) string { return m[1] }},
+		{calcSubZeroLeftRe, func(m []string) string { return "-" + m[1] }},
+	}
+	for _, r := range rules {
+		if m := r.re.FindStringSubmatch(expr); m != nil {
+			return strings.TrimSpace(r.fn(m)), true
+		}
+	}
+	return "", false
+}
+
+var (
+	calcMulOneLeftRe   = regexp.MustCompile(`^1\s*\*\s*(.+)$`)
+	calcMulOneRightRe  = regexp.MustCompile(`^(.+?)\s*\*\s*1$`)
+	calcMulZeroRe      = regexp.MustCompile(`^(?:0\s*\*\s*.+|.+?\s*\*\s*0)$`)
+	calcAddZeroLeftRe  = regexp.MustCompile(`^0\s*\+\s*(.+)$`)
+	calcAddZeroRightRe = regexp.MustCompile(`^(.+?)\s*\+\s*0$`)
+	calcSubZeroLeftRe  = regexp.MustCompile(`^0\s*-\s*(.+)$`)
+)
 
 // removeTrailingSemicolons removes semicolons right before closing braces.
 func removeTrailingSemicolons(css string) string {
@@ -326,31 +355,64 @@ func matchBrace(css string, open int) (closeBrace int, deep bool) {
 	return -1, deep
 }
 
+// deduplicateBody removes duplicate declarations within a rule, keeping the
+// last value for each property. Two cases must be preserved verbatim:
+//
+//   - Vendor-prefixed fallbacks: `display:-webkit-box;display:flex` keeps both,
+//     because dropping the prefixed value breaks older browsers.
+//   - Custom-property names: `--Foo` and `--foo` are distinct (custom
+//     properties are case-sensitive), so only standard properties are folded.
 func deduplicateBody(body string) string {
-	props := make(map[string]string)
-	var order []string
+	type entry struct{ prop, val string }
+	var entries []entry
+	index := make(map[string]int) // key → position in entries
+
 	for _, raw := range splitDecls(body) {
 		prop, val, hasColon := parseDecl(raw)
 		if !hasColon {
 			continue
 		}
-		lowerProp := strings.ToLower(prop)
-		if _, exists := props[lowerProp]; !exists {
-			order = append(order, lowerProp)
+		key := prop
+		if !strings.HasPrefix(prop, "--") {
+			key = strings.ToLower(prop)
 		}
-		props[lowerProp] = val
+		pos, exists := index[key]
+		if !exists {
+			index[key] = len(entries)
+			entries = append(entries, entry{key, val})
+			continue
+		}
+		// Keep a vendor-prefixed earlier value when the new value differs, so
+		// the prefixed fallback survives.
+		if isVendorPrefixedValue(entries[pos].val) && entries[pos].val != val {
+			index[key] = len(entries)
+			entries = append(entries, entry{key, val})
+			continue
+		}
+		entries[pos].val = val
 	}
 
 	var b strings.Builder
-	for i, prop := range order {
+	for i, e := range entries {
 		if i > 0 {
 			b.WriteByte(';')
 		}
-		b.WriteString(prop)
+		b.WriteString(e.prop)
 		b.WriteByte(':')
-		b.WriteString(props[prop])
+		b.WriteString(e.val)
 	}
 	return b.String()
+}
+
+// isVendorPrefixedValue reports whether a declaration value begins with a
+// vendor prefix (e.g. `-webkit-box`, `-moz-fit-content`).
+func isVendorPrefixedValue(val string) bool {
+	for _, p := range []string{"-webkit-", "-moz-", "-ms-", "-o-"} {
+		if strings.HasPrefix(val, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // splitDecls splits a rule body into declaration strings at top-level ';'
@@ -427,7 +489,8 @@ var zeroUnitRe = regexp.MustCompile(`\b0(px|em|rem|vh|vw|vmin|vmax|%|pt|pc|in|cm
 var emptyRuleRe = regexp.MustCompile(`[^}]*\{\s*\}`)
 var rgbaRe = regexp.MustCompile(`rgba\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(0?\.?\d+|1\.0*)\s*\)`)
 var rgbRe = regexp.MustCompile(`rgb\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)`)
-var calcRe = regexp.MustCompile(`calc\(([^)]+)\)`)
+var rgbSpaceRe = regexp.MustCompile(`rgb\(\s*(\d{1,3})\s+(\d{1,3})\s+(\d{1,3})\s*(?:/\s*([0-9.]+)\s*)?\)`)
+var calcRe = regexp.MustCompile(`calc\(([^()]*(?:\([^()]*\)[^()]*)*)\)`)
 var trailingSemiRe = regexp.MustCompile(`;\s*\}`)
 var blockCommentRe = regexp.MustCompile(`/\*[\s\S]*?\*/`)
 

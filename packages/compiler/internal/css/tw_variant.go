@@ -74,10 +74,42 @@ func resolveVariant(v string, theme TailwindTheme) (variant, bool) {
 	if bp, ok := theme.Screens[v]; ok {
 		return variant{kind: "media", at: "(min-width: " + bp + ")"}, true
 	}
+	if rest, ok := strings.CutPrefix(v, "min-"); ok {
+		if bp, ok := theme.Screens[rest]; ok {
+			return variant{kind: "media", at: "(min-width: " + bp + ")"}, true
+		}
+	}
 	if rest, ok := strings.CutPrefix(v, "max-"); ok {
 		if bp, ok := theme.Screens[rest]; ok {
 			return variant{kind: "media", at: "(max-width: calc(" + bp + " - 0.02px))"}, true
 		}
+	}
+
+	// Container-query variants: @sm:, @md: (min-width), @max-sm:, @container.
+	if strings.HasPrefix(v, "@") {
+		return resolveContainerVariant(v, theme)
+	}
+
+	// not-* variant negates a pseudo/media/supports variant.
+	if rest, ok := strings.CutPrefix(v, "not-"); ok {
+		if inner, ok := resolveVariant(rest, theme); ok {
+			switch inner.kind {
+			case "pseudo":
+				return variant{kind: "pseudo", sel: ":not(" + inner.sel + ")"}, true
+			case "media":
+				return variant{kind: "media", at: "not " + inner.at}, true
+			case "supports":
+				return variant{kind: "supports", at: "not " + inner.at}, true
+			}
+		}
+	}
+
+	// Child variants (Tailwind v4): `*:` selects direct children, `**:` all.
+	if v == "*" {
+		return variant{kind: "ancestor", sel: "PLACEHOLDER > *"}, true
+	}
+	if v == "**" {
+		return variant{kind: "ancestor", sel: "PLACEHOLDER *"}, true
 	}
 
 	// Dark mode: strategy from config (default media).
@@ -115,13 +147,88 @@ func resolveVariant(v string, theme TailwindTheme) (variant, bool) {
 	if sel, ok := pseudoVariants[v]; ok {
 		return variant{kind: "pseudo", sel: sel}, true
 	}
+	if sel, ok := nthVariants(v); ok {
+		return variant{kind: "pseudo", sel: sel}, true
+	}
 	if at, ok := mediaVariants[v]; ok {
 		return variant{kind: "media", at: at}, true
+	}
+	// inert: / starting: attribute-style variants.
+	if v == "inert" {
+		return variant{kind: "ancestor", sel: "[inert] PLACEHOLDER"}, true
+	}
+	if v == "starting" {
+		return variant{kind: "ancestor", sel: "[data-starting] PLACEHOLDER"}, true
+	}
+	// Generic supports-[...].
+	if rest, ok := strings.CutPrefix(v, "supports-"); ok {
+		if inner, ok := unwrapArbitrary(rest); ok {
+			return variant{kind: "supports", at: "(" + inner + ")"}, true
+		}
 	}
 	if at, ok := supportsVariants[v]; ok {
 		return variant{kind: "supports", at: at}, true
 	}
 	return variant{}, false
+}
+
+// nthVariants resolves the positional pseudo-class variants (nth-*, first-line,
+// first-letter) to their CSS selector form.
+func nthVariants(v string) (string, bool) {
+	switch v {
+	case "first-line":
+		return "::first-line", true
+	case "first-letter":
+		return "::first-letter", true
+	}
+	type nthKind struct{ prefix, fn string }
+	for _, k := range []nthKind{
+		{"nth-of-type-", ":nth-of-type"},
+		{"nth-last-of-type-", ":nth-last-of-type"},
+		{"nth-last-", ":nth-last-child"},
+		{"nth-", ":nth-child"},
+	} {
+		if rest, ok := strings.CutPrefix(v, k.prefix); ok && rest != "" {
+			return k.fn + "(" + rest + ")", true
+		}
+	}
+	return "", false
+}
+
+// containerScreens are container-query widths keyed by the `@<name>` suffix.
+var containerScreens = map[string]string{
+	"3xs": "16rem", "2xs": "18rem", "xs": "20rem", "sm": "24rem", "md": "28rem",
+	"lg": "32rem", "xl": "36rem", "2xl": "42rem", "3xl": "48rem", "4xl": "56rem",
+	"5xl": "64rem", "6xl": "72rem", "7xl": "80rem",
+}
+
+// resolveContainerVariant resolves Tailwind v4 container-query variants:
+// `@sm`, `@max-sm`, and arbitrary `@[400px]`.
+func resolveContainerVariant(v string, theme TailwindTheme) (variant, bool) {
+	rest := v[1:] // drop '@'
+	if rest == "" {
+		return variant{}, false
+	}
+	minMax := "min"
+	if after, ok := strings.CutPrefix(rest, "max-"); ok {
+		minMax = "max"
+		rest = after
+	}
+	var width string
+	if inner, ok := unwrapArbitrary(rest); ok {
+		width = inner
+	} else if w, ok := containerScreens[rest]; ok {
+		width = w
+	} else if w, ok := theme.Screens[rest]; ok {
+		width = w
+	}
+	if width == "" {
+		return variant{}, false
+	}
+	if minMax == "max" {
+		return variant{kind: "media", at: "(max-width: calc(" + width + " - 0.1px))"}, true
+	}
+	return variant{kind: "media", at: "(min-width: " + width + ")"}, true
 }
 
 // parseGroupPeer recognizes group-<state>/peer-<state> and the named forms
@@ -197,14 +304,22 @@ var pseudoVariants = map[string]string{
 
 // mediaVariants maps mode variants to their media condition.
 var mediaVariants = map[string]string{
-	"motion-safe":   "(prefers-reduced-motion: no-preference)",
-	"motion-reduce": "(prefers-reduced-motion: reduce)",
-	"contrast-more": "(prefers-contrast: more)",
-	"contrast-less": "(prefers-contrast: less)",
-	"print":         "print",
-	"portrait":      "(orientation: portrait)",
-	"landscape":     "(orientation: landscape)",
-	"forced-colors": "(forced-colors: active)",
+	"motion-safe":        "(prefers-reduced-motion: no-preference)",
+	"motion-reduce":      "(prefers-reduced-motion: reduce)",
+	"contrast-more":      "(prefers-contrast: more)",
+	"contrast-less":      "(prefers-contrast: less)",
+	"print":              "print",
+	"portrait":           "(orientation: portrait)",
+	"landscape":          "(orientation: landscape)",
+	"forced-colors":      "(forced-colors: active)",
+	"pointer-fine":       "(pointer: fine)",
+	"pointer-coarse":     "(pointer: coarse)",
+	"pointer-none":       "(pointer: none)",
+	"any-pointer-fine":   "(any-pointer: fine)",
+	"any-pointer-coarse": "(any-pointer: coarse)",
+	"any-pointer-none":   "(any-pointer: none)",
+	"noscript":           "scripting: none",
+	"inverted-colors":    "(inverted-colors: inverted)",
 }
 
 // supportsVariants maps a variant to a @supports condition.

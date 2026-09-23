@@ -42,24 +42,19 @@ func TailwindPreflight(theme TailwindTheme) string {
 
 	// Transform + space composition defaults.
 	b.WriteString("*,::before,::after{" +
-		transformComposeDefaults() +
 		"--tw-border-spacing-x:0;--tw-border-spacing-y:0;" +
-		"--tw-translate-x:0;--tw-translate-y:0;--tw-rotate:0;--tw-skew-x:0;--tw-skew-y:0;" +
-		"--tw-scale-x:1;--tw-scale-y:1;" +
+		"--tw-translate-x:0;--tw-translate-y:0;--tw-translate-z:0;" +
+		"--tw-rotate:0;--tw-rotate-x:0;--tw-rotate-y:0;--tw-rotate-z:0;" +
+		"--tw-skew-x:0;--tw-skew-y:0;" +
+		"--tw-scale-x:1;--tw-scale-y:1;--tw-scale-z:1;" +
 		"--tw-space-x-reverse:0;--tw-space-y-reverse:0;" +
+		"--tw-divide-x-reverse:0;--tw-divide-y-reverse:0;" +
 		"--tw-shadow:0 0 #0000;--tw-ring-color:rgb(59 130 246 / 0.5);" +
 		"--tw-ring-offset-width:0px;--tw-ring-offset-color:#fff;--tw-ring-inset:;" +
 		"}\n")
 
-	// Reduced motion resets animations where applicable.
-	b.WriteString("@media (prefers-reduced-motion: no-preference){:root{scroll-behavior:smooth}}\n")
-
 	return b.String()
 }
-
-// transformComposeDefaults is empty for now; transform defaults are set inline
-// in the preflight `*` rule above so this stays a hook for future expansion.
-func transformComposeDefaults() string { return "" }
 
 // fontOrDefault returns the configured font stack for a family key, falling back
 // to Tailwind's default.
