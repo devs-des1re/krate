@@ -764,7 +764,7 @@ a:hover {
 
 .toc-link:hover {
     color: var(--color-fg);
-    background: var(--color-muted-bg);
+    font-weight: 600;
 }
 
 .toc-link.in-view {
