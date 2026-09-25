@@ -66,12 +66,23 @@ tailwind: {
 
 Supported features:
 
-- Variants: state (`hover:`, `focus:`, `active:`, `disabled:`, …),
-  `group-*`/`peer-*`, `data-*`/`aria-*`, responsive breakpoints from
-  `theme.screens` (`sm:`, `md:`, …, plus `max-*`), `dark:`, `motion-safe:`/
-  `motion-reduce:`, `print:`, and arbitrary variants (`[&:nth-child(3)]:`).
-- Arbitrary values: `w-[100px]`, `bg-[#ff0000]`, `text-[14px]`.
-- Negatives (`-mt-4`) and color opacity modifiers (`bg-blue-500/50`).
+- **Variants:** state (`hover:`, `focus:`, `active:`, `disabled:`, …),
+  `group-*`/`peer-*` (incl. named), `data-*`/`aria-*`/`has-*`, responsive
+  breakpoints from `theme.screens` (`sm:`, `md:`, …, plus `min-*`/`max-*`),
+  `dark:`, `motion-safe:`/`motion-reduce:`, `print:`, capability queries
+  (`pointer-coarse:`, `noscript:`, `forced-colors:`, …), positional
+  (`nth-*`, `first-line:`), `not-*`, child (`*:`, `**:`), container queries
+  (`@sm:`, `@[400px]:`), and arbitrary variants (`[&:nth-child(3)]:`).
+- **Arbitrary values** for nearly every property, with type disambiguation
+  (`w-[100px]`, `bg-[url(/a.png)]`, `bg-[length:8px]`, `text-[14px]` →
+  font-size vs `text-[#fff]` → color, `grid-cols-[repeat(3,_1fr)]`), including
+  typed hints (`text-[color:var(--fg)]`).
+- Negatives (`-mt-4`), color opacity modifiers (`bg-blue-500/50`,
+  `from-indigo-400/50`), and arbitrary spacing multiples (`p-13`, `p-13.5`).
+- **Filters** (`blur-*`, `brightness-*`, `grayscale`, `hue-rotate-*`, `invert`,
+  `saturate-*`, `sepia`, `drop-shadow-*`, and `backdrop-*`), **animation**
+  (`animate-*`), **blend modes**, plus layout, typography, interactivity,
+  3D-transform, border, and background families.
 - Preflight: opt in with `tailwind.preflight: true`.
 
 ### Differences from Tailwind
@@ -91,14 +102,11 @@ rule level, and written as a single hashed `styles.<hash>.css`.
 1. **Collect** CSS from all pages.
 2. **Merge** with deduplication (rule-level).
 3. **Inline `@import`** recursively (circular-safe, depth limit 10).
-4. **Minify** — 7 transforms:
-   - Comment stripping
-   - Whitespace collapsing
-   - Hex color shortening
-   - `rgba()` → hex
-   - Zero-unit removal
-   - `calc()` simplification
-   - Duplicate declaration removal
+4. **Minify** — comment stripping, whitespace collapsing, `rgba()`/`rgb()`
+   (both comma and space syntax) → hex, hex shortening, zero-unit removal,
+   `calc()` simplification, and duplicate-declaration removal. The minifier
+   preserves vendor-prefixed fallbacks (e.g. `display:-webkit-box` before
+   `display:flex`) and case-sensitive custom properties.
 5. **Hash-based filename** — `styles.<hash>.css`.
 
 ## Custom properties & theming

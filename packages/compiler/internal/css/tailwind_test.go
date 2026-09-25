@@ -231,10 +231,13 @@ func TestDeterministicOutput(t *testing.T) {
 
 func TestArbitraryValues(t *testing.T) {
 	tests := map[string]string{
-		"w-[100px]":    "width: 100px;",
-		"bg-[#ff0000]": "background-color: #ff0000;",
-		"text-[14px]":  "color: 14px;",
-		"p-[1.5rem]":   "padding: 1.5rem;",
+		"w-[100px]":       "width: 100px;",
+		"bg-[#ff0000]":    "background-color: #ff0000;",
+		"text-[14px]":     "font-size: 14px;",
+		"text-[#fff]":     "color: #fff;",
+		"p-[1.5rem]":      "padding: 1.5rem;",
+		"bg-[url(/a)]":    "background-image: url(/a);",
+		"bg-[length:8px]": "background-size: 8px;",
 	}
 	for cls, want := range tests {
 		got := gen(t, cls)
