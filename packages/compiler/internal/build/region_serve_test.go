@@ -65,7 +65,7 @@ func (s *fakeRegionsSidecar) serve() {
 					break
 				}
 				if strings.HasPrefix(line, "Content-Length:") {
-					fmt.Sscanf(line, "Content-Length: %d", &contentLength)
+					_, _ = fmt.Sscanf(line, "Content-Length: %d", &contentLength)
 				}
 			}
 			if contentLength > 0 {
@@ -76,9 +76,9 @@ func (s *fakeRegionsSidecar) serve() {
 				s.mu.Unlock()
 			}
 			resp := "HTTP/1.1 200 OK\r\nContent-Type: application/x-ndjson; charset=utf-8\r\nConnection: close\r\n\r\n"
-			c.Write([]byte(resp))
+			_, _ = c.Write([]byte(resp))
 			for _, f := range s.frames {
-				c.Write([]byte(f + "\n"))
+				_, _ = c.Write([]byte(f + "\n"))
 			}
 		}(conn)
 	}
@@ -110,7 +110,7 @@ func TestStreamRegionPageSplicesFrames(t *testing.T) {
 	route := "/live"
 
 	// Static shell with one suspense boundary whose baked fallback is the
-	// loading text — matches what the compiler emits for a runtime primary.
+	// loading text - matches what the compiler emits for a runtime primary.
 	shell := `<!DOCTYPE html><html><body><div id=root>` +
 		`<!--suspense:1-1--><span>loading</span><!--/suspense:1-1-->` +
 		`</div></body></html>`
@@ -129,7 +129,7 @@ func TestStreamRegionPageSplicesFrames(t *testing.T) {
 	})
 
 	rec := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
-	rr := streamRegionPage(rec, rec, absOut, route, sidecar.port, nil, nil, nil)
+	rr := streamRegionPage(rec, rec, newRegionShellCache(), absOut, route, sidecar.port, nil, nil, nil, nil, nil, false, 0, "")
 	if !rr.served {
 		t.Fatal("streamRegionPage returned served=false for a shell with suspense markers")
 	}
@@ -149,6 +149,49 @@ func TestStreamRegionPageSplicesFrames(t *testing.T) {
 	}
 	if !strings.Contains(sidecar.requestBody(), `"route":"/live"`) {
 		t.Errorf("sidecar request body missing route:\n%s", sidecar.requestBody())
+	}
+}
+
+func TestStreamRegionPageOutOfOrderSiblingFrames(t *testing.T) {
+	absOut := t.TempDir()
+	route := "/stream"
+	shell := "<!DOCTYPE html><html><body><div id=root>" +
+		"<!--suspense:A--><span>loading A</span><!--/suspense:A-->" +
+		"<!--suspense:B--><span>loading B</span><!--/suspense:B-->" +
+		"</div><script src=/app.js></script></body></html>"
+	rel := filepath.Join(absOut, "stream", "index.html")
+	if err := os.MkdirAll(filepath.Dir(rel), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rel, []byte(shell), 0644); err != nil {
+		t.Fatal(err)
+	}
+	// B resolves first even though A appears first in the document.
+	sidecar := newFakeRegionsSidecar(t, []string{
+		`{"type":"region","id":"B","status":200,"html":"<p>B ready</p>"}`,
+		`{"type":"region","id":"A","status":200,"html":"<p>A ready</p>"}`,
+		`{"type":"end","count":2}`,
+	})
+	rec := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
+	rr := streamRegionPageMode(rec, rec, newRegionShellCache(), absOut, route, sidecar.port, nil, nil, nil, nil, nil, false, 0, "", true)
+	if !rr.served {
+		t.Fatal("streamRegionPageMode returned served=false")
+	}
+	out := rec.Body.String()
+	bAt := strings.Index(out, `var id="B"`)
+	aAt := strings.Index(out, `var id="A"`)
+	if bAt < 0 || aAt < 0 {
+		t.Fatalf("missing streamed region scripts:\n%s", out)
+	}
+	if bAt > aAt {
+		t.Fatalf("frames must be emitted in completion order (B before A):\n%s", out)
+	}
+	appAt := strings.Index(out, `<script src=/app.js>`)
+	if appAt < 0 || appAt < aAt {
+		t.Fatalf("page scripts must be deferred until after region chunks:\n%s", out)
+	}
+	if !strings.Contains(out, "loading A") || !strings.Contains(out, "loading B") {
+		t.Fatalf("shell fallbacks should be streamed before replacements:\n%s", out)
 	}
 }
 
@@ -183,15 +226,15 @@ func TestStreamRegionPageCoarsePageRegion(t *testing.T) {
 	rec := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
 	rec.Code = 200
 	rec.Header().Set("Content-Type", "text/html; charset=utf-8")
-	rr := streamRegionPage(rec, rec, absOut, route, sidecar.port, map[string]string{"id": "abc"}, nil, nil)
+	rr := streamRegionPage(rec, rec, newRegionShellCache(), absOut, route, sidecar.port, map[string]string{"id": "abc"}, nil, nil, nil, nil, false, 0, "")
 	if !rr.served {
 		t.Fatal("streamRegionPage returned served=false for a shell with a page marker")
 	}
 	if rr.isISR != true || rr.cacheStatus != "miss" {
 		t.Errorf("expected isISR+cacheStatus miss from page region frame, got isISR=%v status=%q", rr.isISR, rr.cacheStatus)
 	}
-	if rr.titleOverride != "Video: abc" {
-		t.Errorf("expected title override, got %q", rr.titleOverride)
+	if rr.frameHead["page"].title != "Video: abc" {
+		t.Errorf("expected the page frame's title, got %+v", rr.frameHead)
 	}
 	// Request must carry the CANONICAL route (for the sidecar's findPage), the
 	// params (for the ISR variant cache key), and the regions list with kind page.
@@ -237,7 +280,7 @@ func TestStreamRegionPagePageRegionErrorKeepsBakedBody(t *testing.T) {
 	rec := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
 	rec.Code = 200
 	rec.Header().Set("Content-Type", "text/html; charset=utf-8")
-	rr := streamRegionPage(rec, rec, absOut, route, sidecar.port, nil, nil, nil)
+	rr := streamRegionPage(rec, rec, newRegionShellCache(), absOut, route, sidecar.port, nil, nil, nil, nil, nil, false, 0, "")
 	if !rr.served {
 		t.Fatal("streamRegionPage returned served=false for a shell with a page marker")
 	}
@@ -261,7 +304,7 @@ func TestStreamRegionPageNoMarkersReturnsFalse(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	rr := streamRegionPage(rec, nil, absOut, "/plain", 1, nil, nil, nil)
+	rr := streamRegionPage(rec, nil, newRegionShellCache(), absOut, "/plain", 1, nil, nil, nil, nil, nil, false, 0, "")
 	if rr.served {
 		t.Error("streamRegionPage should return served=false when the shell has no suspense markers")
 	}
@@ -281,14 +324,14 @@ func TestStreamRegionPageKeepsFallbackOnError(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Sidecar reports a region error frame — the baked fallback must remain.
+	// Sidecar reports a region error frame - the baked fallback must remain.
 	sidecar := newFakeRegionsSidecar(t, []string{
 		`{"type":"error","id":"9-1","status":500,"error":"boom"}`,
 		`{"type":"end","count":1}`,
 	})
 
 	rec := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
-	rr := streamRegionPage(rec, rec, absOut, route, sidecar.port, nil, nil, nil)
+	rr := streamRegionPage(rec, rec, newRegionShellCache(), absOut, route, sidecar.port, nil, nil, nil, nil, nil, false, 0, "")
 	if !rr.served {
 		t.Fatal("streamRegionPage returned served=false")
 	}
@@ -321,7 +364,7 @@ func TestStreamRegionPageMultipleRegions(t *testing.T) {
 	})
 
 	rec := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
-	rr := streamRegionPage(rec, rec, absOut, route, sidecar.port, nil, nil, nil)
+	rr := streamRegionPage(rec, rec, newRegionShellCache(), absOut, route, sidecar.port, nil, nil, nil, nil, nil, false, 0, "")
 	if !rr.served {
 		t.Fatal("streamRegionPage returned served=false")
 	}
@@ -360,7 +403,7 @@ func TestStreamRegionPageStandaloneRegionMarker(t *testing.T) {
 	})
 
 	rec := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
-	rr := streamRegionPage(rec, rec, absOut, route, sidecar.port, nil, nil, nil)
+	rr := streamRegionPage(rec, rec, newRegionShellCache(), absOut, route, sidecar.port, nil, nil, nil, nil, nil, false, 0, "")
 	if !rr.served {
 		t.Fatal("streamRegionPage returned served=false for a shell with region markers")
 	}
@@ -370,6 +413,129 @@ func TestStreamRegionPageStandaloneRegionMarker(t *testing.T) {
 	}
 	if !strings.Contains(got, `<!--region:region-1.Widget_c0-->`) || !strings.Contains(got, `<!--/region:region-1.Widget_c0-->`) {
 		t.Errorf("expected standalone region markers preserved, got:\n%s", got)
+	}
+}
+
+// TestStreamRegionPageNestedRegionSkipped covers an SSR/ISR page region with a
+// runtime component nested inside its baked body: the coarse page region render
+// replaces the whole body, so the nested (dead) marker must be skipped rather
+// than spliced (which would previously panic or duplicate content).
+func TestStreamRegionPageNestedRegionSkipped(t *testing.T) {
+	absOut := t.TempDir()
+	route := "/nested"
+	shell := `<div id=root>` +
+		`<!--suspense:page--><main>BAKED<!--region:region-1.Clock_c0--><!--/region:region-1.Clock_c0--></main><!--/suspense:page-->` +
+		`</div>`
+	rel := filepath.Join(absOut, "nested", "index.html")
+	if err := os.MkdirAll(filepath.Dir(rel), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rel, []byte(shell), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	sidecar := newFakeRegionsSidecar(t, []string{
+		`{"type":"region","id":"page","kind":"page","status":200,"html":"<main>FRESH</main>"}`,
+		`{"type":"end","count":1}`,
+	})
+	goRenders := map[string]goRenderRegion{
+		"region-1.Clock_c0": {ID: "region-1.Clock_c0", Name: "Clock", Props: "{}"},
+	}
+	renderGo := func(rs []goRenderRegion) (map[string]string, error) {
+		out := make(map[string]string, len(rs))
+		for _, r := range rs {
+			out[r.ID] = "<time>UTC</time>"
+		}
+		return out, nil
+	}
+
+	rec := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
+	rr := streamRegionPage(rec, rec, newRegionShellCache(), absOut, route, sidecar.port, nil, nil, nil, goRenders, renderGo, false, 0, "")
+	if !rr.served {
+		t.Fatal("streamRegionPage returned served=false")
+	}
+	got := rec.Body.String()
+	if !strings.Contains(got, "<main>FRESH</main>") {
+		t.Errorf("expected page region HTML spliced, got:\n%s", got)
+	}
+	if strings.Contains(got, "BAKED") {
+		t.Errorf("baked body should be replaced by the page region, got:\n%s", got)
+	}
+	if strings.Contains(got, "<time>UTC</time>") {
+		t.Errorf("nested region under a spliced page region must be skipped, got:\n%s", got)
+	}
+}
+
+// TestStreamRegionPageNestedRegionSplicedWhenParentKept covers the other half
+// of nesting: when a suspense region keeps its baked fallback (no render for the
+// parent), a runtime marker nested inside must still be spliced into it.
+func TestStreamRegionPageNestedRegionSplicedWhenParentKept(t *testing.T) {
+	absOut := t.TempDir()
+	route := "/nested-kept"
+	shell := `<!--suspense:b1--><div class=wrap><!--region:region-1.Widget_c0--><!--/region:region-1.Widget_c0--></div><!--/suspense:b1-->`
+	rel := filepath.Join(absOut, "nested-kept", "index.html")
+	if err := os.MkdirAll(filepath.Dir(rel), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rel, []byte(shell), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Only the nested runtime region has a frame; the suspense parent does not,
+	// so its baked wrapper is kept.
+	sidecar := newFakeRegionsSidecar(t, []string{
+		`{"type":"region","id":"region-1.Widget_c0","status":200,"html":"<p>LIVE</p>"}`,
+		`{"type":"end","count":1}`,
+	})
+
+	rec := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
+	rr := streamRegionPage(rec, rec, newRegionShellCache(), absOut, route, sidecar.port, nil, nil, nil, nil, nil, false, 0, "")
+	if !rr.served {
+		t.Fatal("streamRegionPage returned served=false")
+	}
+	got := rec.Body.String()
+	if !strings.Contains(got, "<div class=wrap>") || !strings.Contains(got, "<p>LIVE</p>") {
+		t.Errorf("expected nested region spliced into kept wrapper, got:\n%s", got)
+	}
+	if !strings.Contains(got, "<!--suspense:b1-->") || !strings.Contains(got, "<!--/suspense:b1-->") {
+		t.Errorf("expected suspense markers preserved, got:\n%s", got)
+	}
+}
+
+// TestStreamRegionPageGoOnlyNoSidecar verifies a page whose regions are all Go
+// is served with no Node sidecar: streamRegionPage must not dial (ssrPort 0),
+// and the Go host's HTML is spliced in.
+func TestStreamRegionPageGoOnlyNoSidecar(t *testing.T) {
+	absOut := t.TempDir()
+	route := "/go-only"
+	shell := `<div id=root><!--region:region-1.Widget_c0--><!--/region:region-1.Widget_c0--></div>`
+	rel := filepath.Join(absOut, "go-only", "index.html")
+	if err := os.MkdirAll(filepath.Dir(rel), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rel, []byte(shell), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	goRenders := map[string]goRenderRegion{
+		"region-1.Widget_c0": {ID: "region-1.Widget_c0", Name: "Widget", Props: "{}"},
+	}
+	renderGo := func(rs []goRenderRegion) (map[string]string, error) {
+		out := make(map[string]string, len(rs))
+		for _, r := range rs {
+			out[r.ID] = "<p>go rendered</p>"
+		}
+		return out, nil
+	}
+
+	rec := &flushRecorder{ResponseRecorder: httptest.NewRecorder()}
+	// ssrPort 0 == no Node renderer; the call must not attempt to dial it.
+	rr := streamRegionPage(rec, rec, newRegionShellCache(), absOut, route, 0, nil, nil, nil, goRenders, renderGo, false, 0, "")
+	if !rr.served {
+		t.Fatal("streamRegionPage should serve a Go-only page")
+	}
+	if got := rec.Body.String(); !strings.Contains(got, "<p>go rendered</p>") {
+		t.Errorf("expected Go host HTML spliced, got:\n%s", got)
 	}
 }
 

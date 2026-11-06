@@ -1,10 +1,12 @@
 package check
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 
@@ -17,10 +19,86 @@ import (
 // module's namespace.
 const customRuleGlobal = "__krateCheckRule"
 
+// customRuleDriverJS defines __krateCheck(global, pageJSON, astJSON, metaJSON),
+// evaluated once per VM. The page, its AST and the metadata arrive as JSON
+// strings and are parsed with JSON.parse, so a call no longer makes QuickJS
+// lex and compile the page HTML as JavaScript source. The AST is parsed on
+// first access only: most rules never read it.
+const customRuleDriverJS = `
+globalThis.__krateCheck = function(g, pageJSON, astJSON, metaJSON) {
+  try {
+    if (!(g in globalThis)) throw new ReferenceError(g + ' is not defined');
+    var mod = globalThis[g] || {};
+    var fn = (mod.default && (typeof mod.default === 'function' ? mod.default : mod.default.check)) || mod.check;
+    if (typeof fn !== 'function') return JSON.stringify({ skip: true });
+    var page = JSON.parse(pageJSON);
+    if (astJSON !== 'null') {
+      Object.defineProperty(page, 'ast', { configurable: true, enumerable: true, get: function() {
+        var v = JSON.parse(JSON.parse(astJSON));
+        Object.defineProperty(page, 'ast', { value: v, configurable: true, enumerable: true, writable: true });
+        return v;
+      } });
+    }
+    var out = fn(page, { root: JSON.parse(metaJSON).root });
+    if (out && typeof out.then === 'function') return JSON.stringify({ error: 'async check rules are not supported' });
+    return JSON.stringify({ findings: out || [] });
+  } catch (e) {
+    return JSON.stringify({ error: (e && e.message) || String(e) });
+  }
+};
+`
+
 // customBundleCache memoizes the esbuild-bundled IIFE for each custom rule
-// module path (bundling happens once per file; a fresh VM runs per invocation
-// so concurrent checks are safe).
+// module path (bundling happens once per file).
 var customBundleCache sync.Map // absPath -> string or error
+
+// customBytecodeEntry is the compiled bytecode of one rule bundle, keyed with
+// the bundle source so a refreshed bundle recompiles.
+type customBytecodeEntry struct {
+	bundle string
+	bc     []byte
+	err    error
+}
+
+// customBytecodeCache memoizes compiled rule bytecode by module path. QuickJS
+// serialized bytecode is portable across VMs, so all workers share one parse.
+var customBytecodeCache sync.Map // absPath -> customBytecodeEntry
+
+// checkVMPool holds idle QuickJS VMs for custom rule evaluation, bounded to
+// GOMAXPROCS. Creating a VM and injecting polyfills dominates a rule call.
+var checkVMPool = make(chan *jsruntime.Runtime, max(1, runtime.GOMAXPROCS(0)))
+
+func acquireCheckVM() (*jsruntime.Runtime, error) {
+	select {
+	case rt := <-checkVMPool:
+		return rt, nil
+	default:
+	}
+	rt, err := jsruntime.New()
+	if err != nil {
+		return nil, err
+	}
+	if _, err := rt.Execute(customRuleDriverJS); err != nil {
+		_ = rt.Close()
+		return nil, fmt.Errorf("installing check rule driver: %w", err)
+	}
+	return rt, nil
+}
+
+func releaseCheckVM(rt *jsruntime.Runtime, healthy bool) {
+	if rt == nil {
+		return
+	}
+	if !healthy {
+		_ = rt.Close()
+		return
+	}
+	select {
+	case checkVMPool <- rt:
+	default:
+		_ = rt.Close()
+	}
+}
 
 // runCustomRules executes every custom rule module configured in
 // `checks.custom` against each page. A custom module exports either:
@@ -28,49 +106,111 @@ var customBundleCache sync.Map // absPath -> string or error
 //	export default function check(page, krate) { return [ ...findings ] }
 //	export function check(page, krate) { ... }
 //
-// where page is { route, source, html, jsBytes, ast } and a finding is
+// where page is { route, source, html, jsBytes, hydrationBytes, islandBytes,
+// cssBytes, ast } and a finding is
 // { rule, message, severity?, line?, col?, hint? }. Rules run in the embedded
-// QuickJS runtime — no Node, no subprocess.
+// QuickJS runtime - no Node, no subprocess. Each rule bundle is compiled once
+// and the (rule, page) work is spread across a pool of VMs.
 func runCustomRules(cfg Config, pages []Page) ([]Finding, error) {
 	mods := cfg.customModules()
 	if len(mods) == 0 {
 		return nil, nil
 	}
 
-	var out []Finding
-	for _, mod := range mods {
-		bundle, err := bundleCustomRule(mod)
+	bundles := make([]string, len(mods))
+	for i, mod := range mods {
+		b, err := bundleCustomRule(mod)
 		if err != nil {
-			return out, err
+			return nil, err
 		}
-		for i := range pages {
-			fs, err := runCustomRule(bundle, mod, cfg, &pages[i])
-			if err != nil {
-				return out, fmt.Errorf("custom check rule %s: %w", filepath.Base(mod), err)
-			}
-			out = append(out, fs...)
+		bundles[i] = b
+	}
+
+	type task struct{ rule, page int }
+	tasks := make([]task, 0, len(mods)*len(pages))
+	for r := range mods {
+		for p := range pages {
+			tasks = append(tasks, task{rule: r, page: p})
 		}
 	}
-	return out, nil
+	results := make([][]Finding, len(tasks))
+
+	workers := runtime.GOMAXPROCS(0)
+	if workers > len(tasks) {
+		workers = len(tasks)
+	}
+	if workers < 1 {
+		workers = 1
+	}
+
+	taskCh := make(chan int)
+	var (
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		firstErr error
+	)
+	record := func(err error) {
+		mu.Lock()
+		if firstErr == nil {
+			firstErr = err
+		}
+		mu.Unlock()
+	}
+	for w := 0; w < workers; w++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			rt, err := acquireCheckVM()
+			if err != nil {
+				record(err)
+				return
+			}
+			healthy := false
+			defer func() { releaseCheckVM(rt, healthy) }()
+			if len(cfg.Env) > 0 {
+				_ = rt.SetEnv(cfg.Env)
+			}
+			ok := true
+			for ti := range taskCh {
+				t := tasks[ti]
+				mod := mods[t.rule]
+				rt.SetLogPrefix("[check:" + filepath.Base(mod) + "]")
+				fs, err := runCustomRule(rt, mod, bundles[t.rule], cfg, &pages[t.page])
+				if err != nil {
+					record(fmt.Errorf("custom check rule %s: %w", filepath.Base(mod), err))
+					ok = false
+					continue
+				}
+				results[ti] = fs
+			}
+			healthy = ok
+		}()
+	}
+	for i := range tasks {
+		taskCh <- i
+	}
+	close(taskCh)
+	wg.Wait()
+
+	var out []Finding
+	for _, fs := range results {
+		out = append(out, fs...)
+	}
+	return out, firstErr
 }
 
-// runCustomRule evaluates one module's check function against a single page.
-func runCustomRule(bundle, mod string, cfg Config, p *Page) ([]Finding, error) {
-	rt, err := jsruntime.New()
+// runCustomRule evaluates one module's check function against a single page
+// using an already-acquired VM. The rule's bytecode is compiled once and shared.
+func runCustomRule(rt *jsruntime.Runtime, mod, bundle string, cfg Config, p *Page) ([]Finding, error) {
+	bc, err := customRuleBytecode(rt, mod, bundle)
 	if err != nil {
 		return nil, err
 	}
-	defer rt.Close()
-	if len(cfg.Env) > 0 {
-		rt.SetEnv(cfg.Env)
-	}
-	rt.SetLogPrefix("[check:" + filepath.Base(mod) + "]")
-
-	if _, err := rt.Execute(bundle); err != nil {
+	if _, err := rt.EvalBytecode(bc); err != nil {
 		return nil, fmt.Errorf("loading rule bundle: %w", err)
 	}
 
-	pageJSON, err := marshalCheckPage(p)
+	pageJSON, astJSON, err := marshalCheckPage(p)
 	if err != nil {
 		return nil, err
 	}
@@ -82,22 +222,7 @@ func runCustomRule(bundle, mod string, cfg Config, p *Page) ([]Finding, error) {
 		return nil, err
 	}
 
-	call := fmt.Sprintf(`
-(function() {
-  try {
-    var mod = %[1]s || {};
-    var fn = (mod.default && (typeof mod.default === 'function' ? mod.default : mod.default.check)) || mod.check;
-    if (typeof fn !== 'function') return JSON.stringify({ skip: true });
-    var out = fn(%[2]s, { root: %[3]s.root });
-    if (out && typeof out.then === 'function') return JSON.stringify({ error: 'async check rules are not supported' });
-    return JSON.stringify({ findings: out || [] });
-  } catch (e) {
-    return JSON.stringify({ error: (e && e.message) || String(e) });
-  }
-})()
-`, customRuleGlobal, string(pageJSON), string(metaJSON))
-
-	res, err := rt.Execute(call)
+	res, err := rt.Call("__krateCheck", customRuleGlobal, string(pageJSON), string(astJSON), string(metaJSON))
 	if err != nil {
 		return nil, err
 	}
@@ -160,22 +285,38 @@ func runCustomRule(bundle, mod string, cfg Config, p *Page) ([]Finding, error) {
 }
 
 // marshalCheckPage serializes the page surface a custom rule sees. The AST is
-// the kind-tagged astjson document so rule authors get a stable shape.
-func marshalCheckPage(p *Page) ([]byte, error) {
-	doc := map[string]any{
-		"route":   p.Route,
-		"source":  p.RelSource,
-		"html":    p.HTML,
-		"jsBytes": p.JSBytes,
+// the kind-tagged astjson document so rule authors get a stable shape; it is
+// returned separately as a JSON string (a quoted copy of the compact AST) so
+// the VM parses it lazily.
+func marshalCheckPage(p *Page) (page, astSrc []byte, err error) {
+	page, err = json.Marshal(map[string]any{
+		"route":          p.Route,
+		"source":         p.RelSource,
+		"html":           p.HTML,
+		"jsBytes":        p.JSBytes,
+		"hydrationBytes": p.HydrationBytes,
+		"islandBytes":    p.IslandBytes,
+		"cssBytes":       p.CSSBytes,
+	})
+	if err != nil {
+		return nil, nil, err
 	}
-	if p.Program != nil {
-		enc, err := astjson.EncodeProgram(p.Program)
-		if err != nil {
-			return nil, err
-		}
-		doc["ast"] = json.RawMessage(enc)
+	if p.Program == nil {
+		return page, []byte("null"), nil
 	}
-	return json.Marshal(doc)
+	enc, err := astjson.EncodeProgram(p.Program)
+	if err != nil {
+		return nil, nil, err
+	}
+	var compact bytes.Buffer
+	if err := json.Compact(&compact, enc); err != nil {
+		return nil, nil, err
+	}
+	astSrc, err = json.Marshal(compact.String())
+	if err != nil {
+		return nil, nil, err
+	}
+	return page, astSrc, nil
 }
 
 // bundleCustomRule bundles a custom rule module into a self-contained IIFE that
@@ -229,4 +370,18 @@ func bundleCustomRule(module string) (string, error) {
 	bundle := string(result.OutputFiles[0].Contents)
 	customBundleCache.Store(absPath, bundle)
 	return bundle, nil
+}
+
+// customRuleBytecode compiles a rule bundle once and shares the bytecode across
+// pooled VMs. QuickJS serialized bytecode is portable across VMs of the same
+// library version, so every page reuses one parse.
+func customRuleBytecode(rt *jsruntime.Runtime, mod, bundle string) ([]byte, error) {
+	if v, ok := customBytecodeCache.Load(mod); ok {
+		if e, isEntry := v.(customBytecodeEntry); isEntry && e.bundle == bundle {
+			return e.bc, e.err
+		}
+	}
+	bc, err := rt.Compile(bundle, jsruntime.EvalGlobal)
+	customBytecodeCache.Store(mod, customBytecodeEntry{bundle: bundle, bc: bc, err: err})
+	return bc, err
 }

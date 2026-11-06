@@ -25,6 +25,23 @@ type contentTypeResult struct {
 	Validation []error
 }
 
+// ContentValidationError reports content entries that violate their
+// collection schema. It fails the build so invalid content is never shipped.
+type ContentValidationError struct {
+	Errors []error
+}
+
+func (e *ContentValidationError) Error() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "%d content validation error(s):", len(e.Errors))
+	for _, err := range e.Errors {
+		b.WriteString("\n  ")
+		b.WriteString(err.Error())
+	}
+	b.WriteString("\n  hint: fix the frontmatter above, or relax the collection schema in krate.config.ts")
+	return b.String()
+}
+
 // contentConfig returns the effective typed content config: the `content:`
 // declarations from `krate.config.ts` (`defineContent({...})` or a plain
 // object) merged with collections contributed by registered plugins (e.g. the
@@ -59,15 +76,25 @@ func (b *Builder) prepareContent() contentTypeResult {
 		return res
 	}
 
+	userCols := content.ParseConfig(b.Cfg.Content)
 	entries := map[string][]content.Entry{}
+	imageAssets := map[string]string{}
 	for name, col := range cfg.Collections {
+		// Plugin-contributed collections (docs) render their pages themselves,
+		// so static-HTML omissions would only be noise there.
+		userDeclared := false
+		if userCols != nil {
+			_, userDeclared = userCols.Collections[name]
+		}
 		dir := col.Dir
 		if !filepath.IsAbs(dir) {
 			dir = filepath.Join(b.Root, filepath.FromSlash(dir))
 		}
-		found, walkErrs := discoverContentEntries(b.Root, dir, b.Cfg.Markdown)
+		found, walkErrs, badMD := discoverContentEntries(b.Root, dir, b.Cfg.Markdown, userDeclared, b.Cfg.BaseURLPath(), imageAssets)
 		res.Warnings = append(res.Warnings, walkErrs...)
+		res.Validation = append(res.Validation, badMD...)
 		for _, e := range found {
+			content.ApplyDefaults(col.Schema, e.Data)
 			if schemaErrs := content.Validate(col.Schema, e.Data); len(schemaErrs) > 0 {
 				for _, se := range schemaErrs {
 					res.Validation = append(res.Validation, fmt.Errorf("%s: %s: %w", name, filepath.ToSlash(e.Path), se))
@@ -75,6 +102,12 @@ func (b *Builder) prepareContent() contentTypeResult {
 			}
 		}
 		entries[name] = found
+	}
+
+	if len(imageAssets) > 0 {
+		if err := b.writeAssetFiles(imageAssets); err != nil {
+			res.Warnings = append(res.Warnings, fmt.Errorf("copying content images: %w", err))
+		}
 	}
 
 	typesDir := filepath.Join(b.Root, filepath.FromSlash(routeTypesDir))
@@ -126,17 +159,26 @@ func (b *Builder) contentAmbientPath() string {
 }
 
 // discoverContentEntries walks a collection dir for .md/.mdx files and parses
-// each one's frontmatter plus rendered body.
-func discoverContentEntries(root, dir string, mdCfg markdown.Config) ([]content.Entry, []error) {
-	var entries []content.Entry
-	var errs []error
+// each one's frontmatter plus rendered body. Relative images are recorded in
+// assets (source path to hashed site URL, under base) for the caller to copy.
+// Hidden files and directories are skipped, and two files that map to the same
+// slug are an error.
+func discoverContentEntries(root, dir string, mdCfg markdown.Config, warnStatic bool, base string, assets map[string]string) (entries []content.Entry, errs, bad []error) {
 	fi, err := os.Stat(dir)
 	if err != nil || !fi.IsDir() {
-		return nil, nil // a declared collection with no dir yet is not an error
+		return nil, nil, nil // a declared collection with no dir yet is not an error
 	}
+	seenSlugs := map[string]string{}
 	walkErr := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
+		}
+		if strings.HasPrefix(d.Name(), ".") && path != dir {
+			// Editor lock files (.#x.md), swap files and hidden folders.
+			if d.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		if d.IsDir() {
 			return nil
@@ -150,6 +192,12 @@ func discoverContentEntries(root, dir string, mdCfg markdown.Config) ([]content.
 			return nil
 		}
 		slug := strings.TrimSuffix(filepath.ToSlash(rel), ext)
+		if prev, dup := seenSlugs[slug]; dup {
+			bad = append(bad, fmt.Errorf("%s: slug %q is also used by %s (hint: rename one file; entries are addressed by slug, so the second would be unreachable)",
+				filepath.ToSlash(relToRoot(root, path)), slug, filepath.ToSlash(relToRoot(root, prev))))
+			return nil
+		}
+		seenSlugs[slug] = path
 		src, rerr := os.ReadFile(path)
 		if rerr != nil {
 			errs = append(errs, fmt.Errorf("reading %s: %w", path, rerr))
@@ -161,15 +209,27 @@ func discoverContentEntries(root, dir string, mdCfg markdown.Config) ([]content.
 			data = map[string]any{}
 		}
 		body := docs.StripFrontmatter(raw)
-		var html string
-		if ext == ".mdx" {
-			html, _ = docs.ParseMDX(raw, mdCfg)
-		} else {
-			html, _ = docs.ParseMD(raw, mdCfg)
-		}
 		projRel := path
 		if pr, rerr := filepath.Rel(root, path); rerr == nil {
 			projRel = pr
+		}
+		entryCfg := mdCfg
+		entryCfg.ImageURL = markdown.LocalImageResolver(root, path, base, func(abs, siteURL string) {
+			assets[abs] = siteURL
+		})
+		compiled := markdown.Compile(raw, entryCfg, markdown.Options{MDX: ext == ".mdx"})
+		html := compiled.StaticHTML(entryCfg)
+		diags := compiled.Diags
+		if ext == ".mdx" && warnStatic {
+			diags = append(diags, compiled.StaticWarnings()...)
+		}
+		for _, d := range diags {
+			err := fmt.Errorf("%s:%d:%d: %s (hint: %s)", filepath.ToSlash(projRel), d.Line, d.Col, d.Msg, d.Hint)
+			if d.Warning {
+				errs = append(errs, err)
+			} else {
+				bad = append(bad, err)
+			}
 		}
 		entries = append(entries, content.Entry{
 			Slug: slug,
@@ -183,5 +243,12 @@ func discoverContentEntries(root, dir string, mdCfg markdown.Config) ([]content.
 	if walkErr != nil {
 		errs = append(errs, fmt.Errorf("walking %s: %w", dir, walkErr))
 	}
-	return entries, errs
+	return entries, errs, bad
+}
+
+func relToRoot(root, path string) string {
+	if r, err := filepath.Rel(root, path); err == nil {
+		return r
+	}
+	return path
 }

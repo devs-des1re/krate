@@ -1,0 +1,6 @@
+{
+  "ready": ".lazy-toggle",
+  "steps": [
+    { "op": "click", "sel": ".lazy-toggle" }
+  ]
+}

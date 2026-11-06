@@ -42,7 +42,7 @@ Trailing.`
 		}
 	}
 
-	want := []string{"HTML", "Code(tsx)", "HTML", "JSX", "HTML", "Code(go)", "HTML"}
+	want := []string{"HTML", "Code(tsx)", "HTML", "JSX", "Code(go)", "HTML"}
 	if len(kinds) != len(want) {
 		t.Fatalf("segment order = %v, want %v", kinds, want)
 	}
@@ -77,7 +77,7 @@ Trailing.`
 
 	// Verify BuildCodeJSX output.
 	jsx := BuildCodeJSX("tsx", "const x = 1;\n// `backtick` and ${interp}")
-	if !strings.HasPrefix(jsx, "<Code lang=\"tsx\">") {
+	if !strings.HasPrefix(jsx, `<Code lang={"tsx"}>`) {
 		t.Errorf("BuildCodeJSX prefix wrong: %q", jsx)
 	}
 }
@@ -125,7 +125,7 @@ Tail.`
 		}
 	}
 
-	want := []string{"HTML", "Aside(note)", "HTML", "Aside(tip)", "HTML", "Aside(warning)", "HTML"}
+	want := []string{"HTML", "Aside(note)", "Aside(tip)", "Aside(warning)", "HTML"}
 	if len(kinds) != len(want) {
 		t.Fatalf("segment kinds = %v, want %v", kinds, want)
 	}
@@ -169,7 +169,7 @@ Tail.`
 	// BuildAsideJSX emits an <Aside> with type/title and dangerouslySetInnerHTML.
 	ad := &AsideSegment{Type: "warning", Title: "Warning", InnerHTML: "<p>hi</p>"}
 	jsx := BuildAsideJSX(ad)
-	if !strings.HasPrefix(jsx, "<Aside type=\"warning\" title=\"Warning\">") {
+	if !strings.HasPrefix(jsx, `<Aside type={"warning"} title={"Warning"}>`) {
 		t.Errorf("BuildAsideJSX prefix wrong: %q", jsx)
 	}
 	if !strings.Contains(jsx, "dangerouslySetInnerHTML") {

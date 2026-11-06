@@ -1,72 +1,50 @@
 import './checkbox.css';
-import { createSignal, createEffect } from '@krate/runtime';
 
 export interface CheckboxProps {
-  checked?: boolean;
+  children?: any;
+  /** Name the checkbox is submitted under in a form. */
+  name?: string;
+  /** Submitted value when checked (default "on"). */
+  value?: string;
+  /** Initial state. The checkbox is uncontrolled: the browser owns it afterwards. */
   defaultChecked?: boolean;
-  onCheckedChange?: (checked: boolean) => void;
   disabled?: boolean;
   required?: boolean;
-  name?: string;
-  value?: string;
+  /** Put on the input, so `<Label htmlFor>` and form errors can point at it. */
   id?: string;
-  children?: any;
+  /** Extra classes for the wrapping label. */
+  class?: string;
+  /** Alias of `class`. */
+  className?: string;
+  /** Accessible name when there is no visible label text. */
+  label?: string;
 }
 
+/**
+ * Checkbox. Zero JS: a native `<input type="checkbox">` inside a label, styled
+ * with `:checked`. It submits with a form under `name`/`value`, is operable with
+ * Space, and works with `<Label htmlFor>` through `id`.
+ */
 export function Checkbox(props: CheckboxProps) {
-  var [checked, setChecked] = createSignal(props.defaultChecked || false);
-
-  createEffect(function () {
-    if (props.checked !== undefined) {
-      setChecked(props.checked);
-    }
-  });
-
-  function toggle() {
-    if (props.disabled) return;
-    var next = !checked();
-    setChecked(next);
-    if (props.onCheckedChange) {
-      props.onCheckedChange(next);
-    }
-  }
-
-  function handleKeyDown(e: KeyboardEvent) {
-    if (e.key === " " || e.key === "Enter") {
-      e.preventDefault();
-      toggle();
-    }
-  }
-
   return (
-    <span class="krate-checkbox-wrapper">
-      <button
-        class={"krate-checkbox" + (checked() ? " krate-checkbox-checked" : "")}
-        role="checkbox"
-        type="button"
-        aria-checked={checked() ? "true" : "false"}
-        data-state={checked() ? "checked" : "unchecked"}
+    <label class={"krate-checkbox" + (props.class ? " " + props.class : "") + (props.className ? " " + props.className : "")}>
+      <input
+        class="krate-checkbox-input"
+        type="checkbox"
+        id={props.id}
+        name={props.name}
+        value={props.value}
+        defaultChecked={props.defaultChecked}
         disabled={props.disabled}
-        id={props.id || ""}
-        name={props.name || ""}
-        value={props.value || ""}
         required={props.required}
-        onClick={toggle}
-        onKeyDown={handleKeyDown}
-      >
-        <span class="krate-checkbox-indicator">
-          {checked() ? (
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
-              <polyline points="20 6 9 17 4 12"/>
-            </svg>
-          ) : null}
-        </span>
-      </button>
-      {props.children ? (
-        <label class="krate-checkbox-label" onClick={toggle}>
-          {props.children}
-        </label>
-      ) : null}
-    </span>
+        aria-label={props.label}
+      />
+      <span class="krate-checkbox-box" aria-hidden="true">
+        <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round">
+          <path d="m5 12 5 5L20 7" />
+        </svg>
+      </span>
+      <span class="krate-checkbox-label">{props.children}</span>
+    </label>
   );
 }

@@ -89,7 +89,7 @@ func (b *Builder) RouteList() ([]RouteSummary, error) {
 		// 404/500 pages output at the root as error handlers, not navigable
 		// routes, so they never appear in RouteList.
 		base := strings.TrimSuffix(filepath.Base(p), filepath.Ext(p))
-		if base == "404" || base == "500" {
+		if isSegmentPageBase(base) {
 			continue
 		}
 		out := pageToOutput(p, b.Cfg.PagesDir)
@@ -118,6 +118,24 @@ func (b *Builder) RouteList() ([]RouteSummary, error) {
 		out = append(out, byRoute[r])
 	}
 	return out, nil
+}
+
+// PageGraph returns copies of the page->dependencies graph recorded during a
+// build on this Builder (empty when it never built). pageDeps is keyed by the
+// page's absolute source path; depGraph maps each depended-on file to the pages
+// that reference it.
+func (b *Builder) PageGraph() (pageDeps map[string][]string, depGraph map[string][]string) {
+	b.depMu.Lock()
+	defer b.depMu.Unlock()
+	pageDeps = make(map[string][]string, len(b.pageDeps))
+	for k, v := range b.pageDeps {
+		pageDeps[k] = append([]string(nil), v...)
+	}
+	depGraph = make(map[string][]string, len(b.depGraph))
+	for k, v := range b.depGraph {
+		depGraph[k] = append([]string(nil), v...)
+	}
+	return pageDeps, depGraph
 }
 
 // PageDetail loads a page by route ("/about") or by source path. It parses the

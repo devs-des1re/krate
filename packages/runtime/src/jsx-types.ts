@@ -23,6 +23,9 @@ declare global {
       : string
     : string;
 
+  /** A server action imported from a "use server" module, or a URL. */
+  type KrateFormAction = string | ((formData: FormData) => unknown | Promise<unknown>);
+
   namespace JSX {
     interface Element extends Node {}
     interface ElementChildrenAttribute { children: {} }
@@ -38,6 +41,12 @@ declare global {
       showIf?: unknown;
       /** Alias of `showIf`. */
       visibleIf?: unknown;
+      /** On a compiled package component (an island): mount it when it scrolls into view. */
+      'client:visible'?: boolean;
+      /** On a compiled package component (an island): mount it when the browser is idle. */
+      'client:idle'?: boolean;
+      /** On a compiled package component (an island): mount it at load (the default). */
+      'client:load'?: boolean;
     }
 
     type Booleanish = boolean | 'true' | 'false';
@@ -223,10 +232,13 @@ declare global {
 
     interface HTMLAttributes extends AriaAttributes, ClipboardEventHandler, CompositionEventHandler, FocusEventHandler, FormEventHandler, KeyboardEventHandler, MouseEventHandler, PointerEventHandler, TouchEventHandler, WheelEventHandler, AnimationEventHandler, TransitionEventHandler, UIEventHandler, MediaEventHandler, DOMAttributes {
       accessKey?: string;
+      accesskey?: string;
       class?: string;
       className?: string;
       contentEditable?: Booleanish | 'inherit' | 'false' | 'true';
+      contenteditable?: Booleanish | 'inherit' | 'false' | 'true';
       contextMenu?: string;
+      contextmenu?: string;
       dir?: string;
       draggable?: Booleanish;
       hidden?: boolean | string;
@@ -237,6 +249,7 @@ declare global {
       role?: string;
       spellcheck?: Booleanish;
       tabIndex?: number;
+      tabindex?: number;
       title?: string;
       translate?: 'yes' | 'no';
       about?: string;
@@ -266,6 +279,9 @@ declare global {
       writingSuggestions?: 'mark' | 'suggestion';
       inputMode?: 'none' | 'text' | 'tel' | 'url' | 'email' | 'numeric' | 'decimal' | 'search';
       placeholder?: string;
+      // Raw HTML injected verbatim (trusted). Used by Markdown/MDX rendering and
+      // content-collection bodies: `dangerouslySetInnerHTML={{ __html: html }}`.
+      dangerouslySetInnerHTML?: { __html: string };
     }
 
     interface AnchorHTMLAttributes extends HTMLAttributes {
@@ -386,13 +402,20 @@ declare global {
       accept?: string;
       alt?: string;
       autoComplete?: string;
+      autocomplete?: string;
       autoFocus?: boolean;
+      autofocus?: boolean;
       capture?: boolean | string;
       checked?: boolean | string;
+      /** Initial checked state of an uncontrolled checkbox or radio. */
+      defaultChecked?: boolean;
+      /** Initial value of an uncontrolled input. */
+      defaultValue?: string | number;
       crossOrigin?: string;
       disabled?: boolean | string;
       form?: string;
       formAction?: string;
+      formaction?: string;
       formEncType?: string;
       formMethod?: string;
       formNoValidate?: boolean;
@@ -401,13 +424,16 @@ declare global {
       list?: string;
       max?: number | string;
       maxLength?: number;
+      maxlength?: number;
       min?: number | string;
       minLength?: number;
+      minlength?: number;
       multiple?: boolean;
       name?: string;
       pattern?: string;
       placeholder?: string;
       readOnly?: boolean;
+      readonly?: boolean;
       required?: boolean | string;
       size?: number;
       src?: string;
@@ -421,7 +447,9 @@ declare global {
 
     interface SelectHTMLAttributes extends Omit<HTMLAttributes, 'onChange'> {
       autoComplete?: string;
+      autocomplete?: string;
       autoFocus?: boolean;
+      autofocus?: boolean;
       disabled?: boolean | string;
       form?: string;
       multiple?: boolean;
@@ -434,16 +462,21 @@ declare global {
 
     interface TextareaHTMLAttributes extends Omit<HTMLAttributes, 'onChange' | 'onInput'> {
       autoComplete?: string;
+      autocomplete?: string;
       autoFocus?: boolean;
+      autofocus?: boolean;
       cols?: number;
       dirName?: string;
       disabled?: boolean | string;
       form?: string;
       maxLength?: number;
+      maxlength?: number;
       minLength?: number;
+      minlength?: number;
       name?: string;
       placeholder?: string;
       readOnly?: boolean;
+      readonly?: boolean;
       required?: boolean | string;
       rows?: number;
       value?: string | number;
@@ -629,8 +662,10 @@ declare global {
 
     interface TdHTMLAttributes extends HTMLAttributes {
       colSpan?: number;
+      colspan?: number;
       headers?: string;
       rowSpan?: number;
+      rowspan?: number;
       scope?: string;
       abbr?: string;
       width?: number | string;
@@ -639,8 +674,10 @@ declare global {
     interface ThHTMLAttributes extends HTMLAttributes {
       abbr?: string;
       colSpan?: number;
+      colspan?: number;
       headers?: string;
       rowSpan?: number;
+      rowspan?: number;
       scope?: 'col' | 'colgroup' | 'row' | 'rowgroup';
       width?: number | string;
     }
@@ -1075,7 +1112,7 @@ declare global {
   function Head(props: { children?: any }): JSX.Element;
   function Suspense(props: { children?: any; fallback?: any }): JSX.Element;
   function Link(props: JSX.LinkProps): JSX.Element;
-  function SyntaxHighlight(props: { lang?: string; children?: any }): JSX.Element;
+  function SyntaxHighlight(props: { lang?: string; highlight?: string; children?: any }): JSX.Element;
   interface HTMLImageElement {
     __jsxProps: JSX.ImageProps;
   }

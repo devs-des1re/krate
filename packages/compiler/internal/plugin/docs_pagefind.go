@@ -3,8 +3,12 @@ package plugin
 import (
 	"context"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"os/exec"
+	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,7 +22,7 @@ const pagefindTimeout = 4 * time.Minute
 
 // afterBuild runs site-wide post-build work. Today this is the opt-in Pagefind
 // indexer: Pagefind indexes built HTML, so it must run after every page has been
-// written. Any failure is a warning (the client falls back to docfind/JSON) —
+// written. Any failure is a warning (the client falls back to docfind/JSON) -
 // Pagefind is an enhancement, never a hard build requirement.
 func (p *DocsPlugin) afterBuild(ctx *BuildResultHookCtx) error {
 	cfg, ok := ctx.Config.(*config.Config)
@@ -35,10 +39,62 @@ func (p *DocsPlugin) afterBuild(ctx *BuildResultHookCtx) error {
 		return nil
 	}
 
+	// Pagefind is a native binary distributed via npm and is invoked with npx,
+	// so it needs Node at build time. Warn early with an actionable message
+	// rather than letting the subprocess fail with a less specific error.
+	if _, err := exec.LookPath("npx"); err != nil {
+		fmt.Fprintln(os.Stderr, "  Docs search warning: pagefind requires Node.js (npx not found on PATH); install Node or set search.engine to \"docfind\" (falling back to JSON search)")
+		return nil
+	}
+
+	// Skip the (slow, subprocess-spawning) indexer when the indexable content
+	// is unchanged since the last successful run. Pagefind indexes the rendered
+	// docs content, so a content-input hash is a sound staleness signal.
+	contentDir := opts.ContentDir
+	if contentDir == "" {
+		contentDir = "src/content/docs"
+	}
+	hashFile := filepath.Join(ctx.Root, ".krate", "cache", "pagefind.hash")
+	inHash := pagefindInputHash(ctx.Root, contentDir)
+	if data, err := os.ReadFile(hashFile); err == nil && strings.TrimSpace(string(data)) == inHash {
+		return nil
+	}
+
 	if err := runPagefind(ctx.Root, ctx.OutDir, pagefindOptions(opts)); err != nil {
 		fmt.Fprintf(os.Stderr, "  Docs search warning: pagefind: %v (falling back to JSON search)\n", err)
+		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(hashFile), 0755); err == nil {
+		_ = os.WriteFile(hashFile, []byte(inHash), 0644)
 	}
 	return nil
+}
+
+// pagefindInputHash hashes the (path, size, mtime) of every file under the docs
+// content directory. Any content change alters the hash and re-runs the indexer.
+func pagefindInputHash(root, contentDir string) string {
+	dir := contentDir
+	if !filepath.IsAbs(dir) {
+		dir = filepath.Join(root, dir)
+	}
+	var files []string
+	_ = filepath.Walk(dir, func(p string, info os.FileInfo, err error) error {
+		if err != nil || info == nil || info.IsDir() {
+			return nil
+		}
+		files = append(files, p)
+		return nil
+	})
+	sort.Strings(files)
+	h := fnv.New64a()
+	for _, f := range files {
+		info, err := os.Stat(f)
+		if err != nil {
+			continue
+		}
+		fmt.Fprintf(h, "%s\x00%d\x00%d\n", f, info.Size(), info.ModTime().UnixNano())
+	}
+	return strconv.FormatUint(h.Sum64(), 16)
 }
 
 // runPagefind runs `npx pagefind` over the built site, writing the bundle to the

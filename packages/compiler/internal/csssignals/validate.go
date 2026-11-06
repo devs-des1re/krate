@@ -22,13 +22,13 @@ func isIntrinsic(name string) bool {
 }
 
 // validate returns the first reason the component cannot be compiled, or "".
-//
 // The rules:
 //   - State may be READ only as a panel condition inside showIf/visibleIf.
 //   - State may be WRITTEN only from an onClick trigger calling the setter.
 //   - A trigger must be a labelable element with a static class.
 //   - A panel/scope anchor must have a static class.
-//   - Anything else (text, dynamic attribute, nested function, …) is rejected.
+//
+// - Anything else (text, dynamic attribute, nested function, ...) is rejected.
 func (a *Analyzer) validate(body []ast.Stmt) string {
 	names := a.names()
 	ret := findReturnStmt(body)
@@ -60,9 +60,10 @@ func (a *Analyzer) validateJSX(el *ast.JSXElement, names map[string]bool) string
 		return ""
 	}
 	if !isIntrinsic(el.Opening.Name) {
-		if elementReferencesCSS(el, names) {
-			return "CSS state is used on a component element (" + el.Opening.Name + "); use a native HTML element"
-		}
+		// A scope handle is a first-class value: it may be passed to a child
+		// component as a prop, and the child resolves `props.scope.trigger(...)`
+		// / `.panel(...)` against it. Nothing else is legal on a component
+		// element, but those references are fine.
 		return ""
 	}
 
@@ -73,17 +74,11 @@ func (a *Analyzer) validateJSX(el *ast.JSXElement, names map[string]bool) string
 		if !CanBeLabel(el.Opening.Name) {
 			return "trigger <" + el.Opening.Name + "> cannot become a <label>; use <button> (or switch to createSignal)"
 		}
-		if !hasStaticClass(el) {
-			return "trigger <" + el.Opening.Name + "> has a dynamic class; use a static string class (or switch to createSignal)"
-		}
-	} else if isPanel {
-		if !hasStaticClass(el) {
-			return "panel <" + el.Opening.Name + "> has a dynamic class; use a static string class (or switch to createSignal)"
-		}
+		// A dynamic class is fine: the builder concatenates the scope class
+		// onto whatever the expression produces.
 	}
-	// A dynamic class on the component root is fine: the scope class is then
-	// applied to a display:contents wrapper by the builder. Only triggers and
-	// panels (which need the class inline) require a static class.
+	// A dynamic class on a panel or the component root is fine too: the scope
+	// class lives on a display:contents wrapper the builder adds.
 
 	for _, attr := range el.Opening.Attributes {
 		if attr == nil || attr.Value == nil || attr.Spread {
@@ -126,6 +121,9 @@ func (a *Analyzer) validateJSX(el *ast.JSXElement, names map[string]bool) string
 			if _, ok := a.MatchText(c.Expression); ok {
 				continue // live text: driven by --krate-current, zero JS
 			}
+			if isScopeHelperCall(c.Expression, names) {
+				continue // scope handle: x.current() live text
+			}
 			if referencesCSS(c.Expression, names) {
 				return "the state is rendered as text; only showIf panels and onClick triggers are supported"
 			}
@@ -158,22 +156,6 @@ func (a *Analyzer) validateFragment(frag *ast.JSXFragment, names map[string]bool
 		}
 	}
 	return ""
-}
-
-// hasStaticClass reports whether the element's class (if present) is a static
-// string literal.
-func hasStaticClass(el *ast.JSXElement) bool {
-	for _, attr := range el.Opening.Attributes {
-		if attr == nil || (attr.Name != "class" && attr.Name != "className") {
-			continue
-		}
-		if attr.Value == nil {
-			return true
-		}
-		lit, ok := attr.Value.(*ast.Literal)
-		return ok && lit.Kind == ast.StringLit
-	}
-	return true
 }
 
 // validateStmts rejects any use of the state outside the return JSX and the
@@ -277,26 +259,39 @@ func (a *Analyzer) validateStmts(stmts []ast.Stmt, skip *ast.ReturnStmt, names m
 	return ""
 }
 
+// isScopeHelperCall reports whether expr is `X.<helper>(...)` where X is one of
+// the component's scope vars - the first-class scope-handle API (`x.current()`
+// live text; `x.trigger/panel/close` are normally spreads).
+func isScopeHelperCall(expr ast.Expr, names map[string]bool) bool {
+	call, ok := expr.(*ast.CallExpr)
+	if !ok {
+		return false
+	}
+	mem, ok := call.Callee.(*ast.MemberExpr)
+	if !ok || mem.Computed {
+		return false
+	}
+	id, ok := mem.Object.(*ast.Identifier)
+	if !ok || !names[id.Name] {
+		return false
+	}
+	prop, ok := mem.Property.(*ast.Identifier)
+	if !ok {
+		return false
+	}
+	switch prop.Name {
+	case "current", "trigger", "panel", "close", "is", "on", "off":
+		return true
+	}
+	return false
+}
+
 // isCSSFactory reports whether a callee name is one of the CSS signal factories.
 func isCSSFactory(name string) bool {
 	switch name {
 	case "createCSSChoice", "createCSSToggle", "createCSSFlags",
 		"createCSSGroup", "createCSSRange", "createCSSStack":
 		return true
-	}
-	return false
-}
-
-// elementReferencesCSS reports whether a component element mentions any
-// choice name (it cannot be rewritten).
-func elementReferencesCSS(el *ast.JSXElement, names map[string]bool) bool {
-	for _, attr := range el.Opening.Attributes {
-		if attr == nil || attr.Value == nil {
-			continue
-		}
-		if referencesCSS(attr.Value, names) {
-			return true
-		}
 	}
 	return false
 }

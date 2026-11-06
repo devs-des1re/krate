@@ -21,7 +21,7 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: "1.26"
+          go-version-file: packages/compiler/go.mod
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -60,8 +60,72 @@ jobs:
       - name: Build JS packages
         run: pnpm -r --filter "!@krate/web" --filter "!@krate/benchmark" build
 
+      - name: TypeScript type-check
+        run: pnpm run typecheck
+
+      - name: JS unit tests
+        run: pnpm run test:js
+
+      - name: Build docs site
+        run: pnpm --filter @krate/web build
+
+      - name: Sync framework docs
+        run: pnpm sync:docs
+
+      # Gate the release on a green compiler so a broken build or stale embedded
+      # docs can never be published.
+      - name: Verify compiler
+        working-directory: packages/compiler
+        run: |
+          go build ./...
+          go vet ./...
+          go test -race -gcflags=all=-d=checkptr=0 -p 2 -timeout 20m ./...
+        env:
+          KRATE_REQUIRE_E2E: "1"
+
+      - name: Install Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Browser conformance
+        working-directory: packages/compiler
+        run: go test -run "TestBrowserConformance|TestTrimmedRuntimeBrowser" -count=1 -v ./internal/build
+        env:
+          KRATE_BROWSER: chromium
+          KRATE_REQUIRE_E2E: "1"
+          KRATE_HYDRATION_BUDGET_MS: "2500"
+
+      - name: Check embedded docs are in sync
+        run: node scripts/sync-krate-docs.mjs --check
+
+      - name: Check compatibility matrix
+        run: pnpm run check:matrix
+
+      - name: Check roadmap and v1 gates
+        run: pnpm run check:roadmap
+
+      - name: Check package versions
+        run: pnpm run check:version
+
+      - name: Check release readiness
+        run: pnpm run check:release
+
       - name: Generate platform packages
         run: node scripts/build-platform-packages.mjs
+
+      # Re-run now that dist-platform/ exists, so the generated manifests are
+      # checked too (no platform package may declare bin).
+      - name: Check generated platform packages
+        run: pnpm run check:release
+
+      # The step above leaves a dev binary in packages/core/bin. Publishing it
+      # would make the wrapper run a non-executable, single-platform file.
+      - name: Check @krate/core ships no compiler binary
+        working-directory: packages/core
+        run: |
+          if npm pack --dry-run --json | grep -E '"path": "bin/krate(\.exe)?"'; then
+            echo "@krate/core would publish a compiler binary" >&2
+            exit 1
+          fi
 
       - name: Publish platform packages
         run: |
@@ -76,7 +140,7 @@ jobs:
       - name: Publish npm packages
         run: |
           set -e
-          for dir in packages/runtime packages/components packages/core packages/plugin packages/base-docs-theme packages/create-krate-app packages/create-krate-docs; do
+          for dir in packages/runtime packages/components packages/plugin packages/ts-plugin packages/base-docs-theme packages/simple-docs-theme packages/create-krate-app packages/create-krate-docs packages/core; do
             echo "Publishing $(basename "$dir") with tag ${{ steps.tag.outputs.dist_tag }}..."
             (cd "$dir" && pnpm publish --access public --no-git-checks --tag "${{ steps.tag.outputs.dist_tag }}")
           done
@@ -105,7 +169,7 @@ jobs:
             RANGE="HEAD"
           fi
 
-          # Every commit is a squash-merge, so list them all directly — no need
+          # Every commit is a squash-merge, so list them all directly - no need
           # to resolve associated PRs via the GitHub API.
           : > /tmp/krate-entries.txt
           git log --no-merges --format='%H%x09%s' "${RANGE}" | while IFS=$'\t' read -r OID SUBJECT; do
@@ -136,7 +200,9 @@ jobs:
             printf -- '- `@krate/runtime@%s`\n' "${VERSION}"
             printf -- '- `@krate/components@%s`\n' "${VERSION}"
             printf -- '- `@krate/plugin@%s`\n' "${VERSION}"
+            printf -- '- `@krate/ts-plugin@%s`\n' "${VERSION}"
             printf -- '- `@krate/base-docs-theme@%s`\n' "${VERSION}"
+            printf -- '- `@krate/simple-docs-theme@%s`\n' "${VERSION}"
             printf -- '- `@krate/create-krate-app@%s`\n' "${VERSION}"
             printf -- '- `@krate/create-krate-docs@%s`\n' "${VERSION}"
             printf -- '- `@krate/core-win32-x64@%s`\n' "${VERSION}"

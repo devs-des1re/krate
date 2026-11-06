@@ -1,6 +1,7 @@
 package build
 
 import (
+	"fmt"
 	"strconv"
 
 	"github.com/kratejs/krate/packages/compiler/ast"
@@ -10,13 +11,13 @@ import (
 type RenderMode int
 
 const (
-	// RenderSSG — pre-rendered at build time (default, current behavior).
+	// RenderSSG - pre-rendered at build time (default, current behavior).
 	RenderSSG RenderMode = iota
-	// RenderSSR — rendered on every request via Node.js runtime.
+	// RenderSSR - rendered on every request via Node.js runtime.
 	RenderSSR
-	// RenderISR — pre-rendered at build, revalidated in background after `revalidate` seconds.
+	// RenderISR - pre-rendered at build, revalidated in background after `revalidate` seconds.
 	RenderISR
-	// RenderStreaming — SSR with Suspense-based streaming via HTTP chunked encoding.
+	// RenderStreaming - SSR with Suspense-based streaming via HTTP chunked encoding.
 	RenderStreaming
 )
 
@@ -50,6 +51,12 @@ type PageMeta struct {
 	// StaticOnly marks a dynamic route whose set of valid params is closed, so
 	// the build should not emit a `[param]` fallback template.
 	StaticOnly bool `json:"staticOnly,omitempty"`
+	// ServerComponents marks a page that renders async server components.
+	ServerComponents bool `json:"serverComponents,omitempty"`
+	// SegDir is the page source's directory relative to the pages root, route
+	// groups kept ("" for the root). LookupSegmentPage walks up from it to find
+	// the page's nearest not-found or error page.
+	SegDir string `json:"segDir,omitempty"`
 }
 
 // pageConfig holds the merged page-level render config extracted from
@@ -59,39 +66,94 @@ type pageConfig struct {
 	ssr        bool
 	isr        bool
 	revalidate int
+	// lang overrides the document <html lang> for this page (e.g. docs locales).
+	lang string
 	// dynamicParams is tri-state: nil = unset (inherit global), otherwise the
 	// page-level override.
 	dynamicParams *bool
+
+	// Next.js-style segment exports: `export const revalidate = N | false`
+	// and `export const dynamic = "..."`.
+	hasRevalidateExport bool
+	revalidateExport    int  // seconds; 0 means request-time (ssr)
+	revalidateForever   bool // `revalidate = false`: cache indefinitely (static)
+	dynamic             string
+	dynamicPos          ast.Pos
+	// issues are unsupported segment-export values, reported as warnings.
+	issues []pageConfigIssue
+}
+
+// pageConfigIssue is an unsupported page config value found while parsing.
+type pageConfigIssue struct {
+	pos     ast.Pos
+	message string
+	hint    string
 }
 
 // detectRenderMode inspects a page's AST to determine its rendering mode.
 // Returns the mode and revalidation interval.
-//
 // Precedence: explicit `isr` > `ssr` > `streaming` (config or <Suspense>).
-// ISR/SSR were previously unreachable — nothing in the build ever produced
-// them — so wiring the config keys here is what makes them real.
+// ISR/SSR were previously unreachable - nothing in the build ever produced
+// them - so wiring the config keys here is what makes them real.
 func detectRenderMode(prog *ast.Program) (RenderMode, int) {
 	cfg := parsePageConfig(prog)
-
-	switch {
-	case cfg.isr:
-		if cfg.revalidate <= 0 {
-			cfg.revalidate = defaultISRRevalidate
-		}
-		return RenderISR, cfg.revalidate
-	case cfg.ssr:
-		return RenderSSR, 0
-	case cfg.streaming:
-		return RenderStreaming, 0
+	if mode, reval, ok := explicitRenderMode(cfg); ok {
+		return mode, reval
 	}
 
-	// Using <Suspense> implies a streaming boundary — resolved fallbacks are
+	// Using <Suspense> implies a streaming boundary - resolved fallbacks are
 	// swapped in at request time, so such pages cannot be statically baked.
 	if usesSuspense(prog) {
 		return RenderStreaming, 0
 	}
 
 	return RenderSSG, 0
+}
+
+// explicitRenderMode resolves the render mode a page asks for explicitly.
+// The Krate `config` object wins; otherwise the Next.js-style segment exports
+// apply: `dynamic = "force-dynamic"` or `revalidate = 0` render per request,
+// `revalidate = N` is ISR, and `dynamic = "force-static"`/`"error"` or
+// `revalidate = false` pin the page static. ok is false when the page states
+// nothing and the mode is inferred (Suspense, data-cache usage, default SSG).
+func explicitRenderMode(cfg pageConfig) (RenderMode, int, bool) {
+	switch {
+	case cfg.isr:
+		if cfg.revalidate <= 0 {
+			cfg.revalidate = defaultISRRevalidate
+		}
+		return RenderISR, cfg.revalidate, true
+	case cfg.ssr:
+		return RenderSSR, 0, true
+	case cfg.streaming:
+		return RenderStreaming, 0, true
+	}
+	if cfg.dynamic == "force-dynamic" {
+		return RenderSSR, 0, true
+	}
+	if cfg.hasRevalidateExport {
+		switch {
+		case cfg.revalidateForever:
+			return RenderSSG, 0, true
+		case cfg.revalidateExport == 0:
+			if cfg.dynamic == "force-static" || cfg.dynamic == "error" {
+				return RenderSSG, 0, true
+			}
+			return RenderSSR, 0, true
+		default:
+			return RenderISR, cfg.revalidateExport, true
+		}
+	}
+	if cfg.dynamic == "force-static" || cfg.dynamic == "error" {
+		return RenderSSG, 0, true
+	}
+	return RenderSSG, 0, false
+}
+
+// detectPageLang returns a page-level `export const lang` (or `config.lang`)
+// override for the document <html lang>, or "" when unset.
+func detectPageLang(prog *ast.Program) string {
+	return parsePageConfig(prog).lang
 }
 
 // parsePageConfig reads the page-level render config from
@@ -121,11 +183,23 @@ func parsePageConfig(prog *ast.Program) pageConfig {
 		// Sibling exports: `export const dynamicParams = false`.
 		if vs, ok := exp.Declaration.(*ast.VarStmt); ok {
 			for _, d := range vs.Decls {
-				if d.Name == "dynamicParams" && d.Init != nil {
+				if d.Init == nil {
+					continue
+				}
+				switch d.Name {
+				case "dynamicParams":
 					if b, ok := boolLiteral(d.Init); ok {
 						v := b
 						cfg.dynamicParams = &v
 					}
+				case "lang":
+					if lit, ok := d.Init.(*ast.Literal); ok && lit.Kind == ast.StringLit {
+						cfg.lang = lit.Value
+					}
+				case "revalidate":
+					parseRevalidateExport(&cfg, d.Init, exp.Position)
+				case "dynamic":
+					parseDynamicExport(&cfg, d.Init, exp.Position)
 				}
 			}
 		}
@@ -160,11 +234,107 @@ func parsePageConfig(prog *ast.Program) pageConfig {
 						v := b
 						cfg.dynamicParams = &v
 					}
+				case "lang":
+					if lit, ok := prop.Value.(*ast.Literal); ok && lit.Kind == ast.StringLit {
+						cfg.lang = lit.Value
+					}
 				}
 			}
 		}
 	}
 	return cfg
+}
+
+// parseRevalidateExport reads `export const revalidate = N | false`. N must
+// be a constant number of seconds (simple arithmetic such as 60 * 60 folds).
+func parseRevalidateExport(cfg *pageConfig, init ast.Expr, pos ast.Pos) {
+	if b, ok := boolLiteral(init); ok {
+		if b {
+			cfg.issues = append(cfg.issues, pageConfigIssue{pos: pos,
+				message: "`export const revalidate = true` is not a valid revalidate value",
+				hint:    "use a number of seconds (ISR), 0 (render per request) or false (cache indefinitely)"})
+			return
+		}
+		cfg.hasRevalidateExport = true
+		cfg.revalidateForever = true
+		return
+	}
+	if id, ok := init.(*ast.Identifier); ok && id.Name == "Infinity" {
+		cfg.hasRevalidateExport = true
+		cfg.revalidateForever = true
+		return
+	}
+	n, ok := constNumber(init)
+	if !ok || n < 0 {
+		cfg.issues = append(cfg.issues, pageConfigIssue{pos: pos,
+			message: "`export const revalidate` must be a constant number of seconds or false; the value is ignored and the page renders statically",
+			hint:    "write a literal such as `export const revalidate = 60`, `0` for per-request rendering, or `false` to cache indefinitely"})
+		return
+	}
+	cfg.hasRevalidateExport = true
+	cfg.revalidateExport = int(n)
+}
+
+// parseDynamicExport reads `export const dynamic = "auto" | "force-dynamic" |
+// "force-static" | "error"`.
+func parseDynamicExport(cfg *pageConfig, init ast.Expr, pos ast.Pos) {
+	lit, ok := init.(*ast.Literal)
+	if ok && lit.Kind == ast.StringLit {
+		switch lit.Value {
+		case "auto", "force-dynamic", "force-static", "error":
+			cfg.dynamic = lit.Value
+			cfg.dynamicPos = pos
+			return
+		}
+	}
+	val := "a non-literal value"
+	if ok {
+		val = fmt.Sprintf("%q", lit.Value)
+	}
+	cfg.issues = append(cfg.issues, pageConfigIssue{pos: pos,
+		message: fmt.Sprintf("`export const dynamic` has unsupported %s; it is ignored", val),
+		hint:    `use "auto", "force-dynamic" (render per request), "force-static" or "error" (static)`})
+}
+
+// constNumber folds a constant numeric expression (literals combined with
+// + - * / and parentheses). It returns false for anything else.
+func constNumber(e ast.Expr) (float64, bool) {
+	switch v := e.(type) {
+	case *ast.Literal:
+		if v.Kind != ast.NumberLit {
+			return 0, false
+		}
+		n, err := strconv.ParseFloat(v.Value, 64)
+		if err != nil {
+			return 0, false
+		}
+		return n, true
+	case *ast.ParenExpr:
+		return constNumber(v.Expr)
+	case *ast.BinaryExpr:
+		l, ok := constNumber(v.Left)
+		if !ok {
+			return 0, false
+		}
+		r, ok := constNumber(v.Right)
+		if !ok {
+			return 0, false
+		}
+		switch v.Op {
+		case "+":
+			return l + r, true
+		case "-":
+			return l - r, true
+		case "*":
+			return l * r, true
+		case "/":
+			if r == 0 {
+				return 0, false
+			}
+			return l / r, true
+		}
+	}
+	return 0, false
 }
 
 // boolLiteral returns the boolean value of a bool literal expression.
@@ -183,7 +353,6 @@ func boolPropTrue(v ast.Expr) bool {
 
 // dynamicParamsAllowed reports whether a page (typically a dynamic route) may
 // render params outside those returned by generateStaticParams.
-//
 // Resolution: a page-level `export const dynamicParams` always wins; otherwise
 // the global static output mode (`output: "static"`) closes the set, and SSG
 // is the default (dynamic fallback allowed). Request-time modes (ssr/isr/
@@ -198,170 +367,18 @@ func dynamicParamsAllowed(prog *ast.Program, staticMode bool) bool {
 
 // usesSuspense reports whether the page AST contains a <Suspense> JSX element
 // anywhere (nested inside functions, conditionals, arrays, etc.). This is an
-// AST-based check — a prior string scan (`strings.Contains(source, "<Suspense")`)
+// AST-based check - a prior string scan (`strings.Contains(source, "<Suspense")`)
 // could misfire on comments and string literals.
 func usesSuspense(prog *ast.Program) bool {
 	found := false
-
-	var walkStmt func([]ast.Stmt)
-	var walkExpr func(ast.Expr)
-	var walkJSXChild func(ast.JSXChild)
-
-	walkExpr = func(e ast.Expr) {
-		if found || e == nil {
-			return
-		}
-		switch v := e.(type) {
-		case *ast.CallExpr:
-			walkExpr(v.Callee)
-			for _, a := range v.Args {
-				walkExpr(a)
-			}
-		case *ast.MemberExpr:
-			walkExpr(v.Object)
-			walkExpr(v.Property)
-		case *ast.BinaryExpr:
-			walkExpr(v.Left)
-			walkExpr(v.Right)
-		case *ast.UnaryExpr:
-			walkExpr(v.Arg)
-		case *ast.ConditionalExpr:
-			walkExpr(v.Test)
-			walkExpr(v.Consequent)
-			walkExpr(v.Alternate)
-		case *ast.TemplateExpr:
-			for _, p := range v.Parts {
-				walkExpr(p)
-			}
-		case *ast.ArrowFn:
-			walkStmt(v.Body)
-		case *ast.AwaitExpr:
-			walkExpr(v.Arg)
-		case *ast.DynamicImport:
-			walkExpr(v.Arg)
-		case *ast.ImportMetaExpr:
-		case *ast.NewExpr:
-			walkExpr(v.Callee)
-			for _, a := range v.Args {
-				walkExpr(a)
-			}
-		case *ast.ObjectExpr:
-			for _, p := range v.Properties {
-				if p.Value != nil {
-					walkExpr(p.Value)
-				}
-			}
-		case *ast.ArrayExpr:
-			for _, el := range v.Elements {
-				walkExpr(el)
-			}
-		case *ast.JSXElement:
-			if v.Opening != nil {
-				name := v.Opening.Name
-				if name == "Suspense" || name == "suspense" {
-					found = true
-					return
-				}
-				for _, attr := range v.Opening.Attributes {
-					if attr.Value != nil {
-						walkExpr(attr.Value)
-					}
-				}
-			}
-			for _, c := range v.Children {
-				walkJSXChild(c)
-			}
-		case *ast.JSXFragment:
-			for _, c := range v.Children {
-				walkJSXChild(c)
+	walkProgramExprs(prog, func(e ast.Expr) bool {
+		if el, ok := e.(*ast.JSXElement); ok && el.Opening != nil {
+			if el.Opening.Name == "Suspense" || el.Opening.Name == "suspense" {
+				found = true
+				return false
 			}
 		}
-	}
-
-	walkJSXChild = func(c ast.JSXChild) {
-		if found {
-			return
-		}
-		switch ch := c.(type) {
-		case *ast.JSXExprContainer:
-			walkExpr(ch.Expression)
-		case *ast.JSXElementChild:
-			walkExpr(ch.Element)
-		case *ast.JSXFragmentChild:
-			walkExpr(ch.Fragment)
-		}
-	}
-
-	walkStmt = func(stmts []ast.Stmt) {
-		if found {
-			return
-		}
-		for _, stmt := range stmts {
-			if found {
-				return
-			}
-			switch s := stmt.(type) {
-			case *ast.ExprStmt:
-				walkExpr(s.Expression)
-			case *ast.VarStmt:
-				for _, d := range s.Decls {
-					if d.Init != nil {
-						walkExpr(d.Init)
-					}
-				}
-			case *ast.FnDecl:
-				walkStmt(s.Body)
-			case *ast.ReturnStmt:
-				if s.Value != nil {
-					walkExpr(s.Value)
-				}
-			case *ast.BlockStmt:
-				walkStmt(s.Body)
-			case *ast.IfStmt:
-				walkExpr(s.Test)
-				walkStmt(s.Consequent)
-				walkStmt(s.Alternate)
-			case *ast.ForStmt:
-				if s.Init != nil {
-					walkStmt([]ast.Stmt{s.Init})
-				}
-				if s.Test != nil {
-					walkExpr(s.Test)
-				}
-				walkStmt(s.Body)
-			case *ast.ForInStmt:
-				walkExpr(s.Right)
-				walkStmt(s.Body)
-			case *ast.WhileStmt:
-				walkExpr(s.Test)
-				walkStmt(s.Body)
-			case *ast.DoWhileStmt:
-				walkStmt(s.Body)
-				walkExpr(s.Test)
-			case *ast.SwitchStmt:
-				walkExpr(s.Discriminant)
-				for _, c := range s.Cases {
-					if c.Test != nil {
-						walkExpr(c.Test)
-					}
-					walkStmt(c.Body)
-				}
-			case *ast.TryStmt:
-				walkStmt(s.Body)
-				if s.Catch != nil {
-					walkStmt(s.Catch.Body)
-				}
-				walkStmt(s.Finally)
-			case *ast.ThrowStmt:
-				walkExpr(s.Value)
-			case *ast.ExportStmt:
-				if s.Declaration != nil {
-					walkStmt([]ast.Stmt{s.Declaration})
-				}
-			}
-		}
-	}
-
-	walkStmt(prog.Body)
+		return true
+	})
 	return found
 }

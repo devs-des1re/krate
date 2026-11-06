@@ -22,7 +22,7 @@ func TestSSREvalUnsupportedExpressionErrors(t *testing.T) {
 
 // TestEmitUnsupportedExpressionFailsBuild verifies that a page whose
 // SSR-evaluated component uses an unsupported expression surfaces an error on
-// EmitResult.Errors — the build must fail rather than ship empty output.
+// EmitResult.Errors - the build must fail rather than ship empty output.
 func TestEmitUnsupportedExpressionFailsBuild(t *testing.T) {
 	// `{this}` appears in the return JSX of a signal-less (SSR-evaluated)
 	// component. The evaluator cannot resolve `this` at compile time.
@@ -70,5 +70,24 @@ export default function Page() {
 	result, _ := fullPipeline(t, src)
 	if strings.Contains(result.HTML, `class="banner"`) {
 		t.Errorf("expected false showIf to elide the element, got: %s", result.HTML)
+	}
+}
+
+// TestStringSliceFoldsAtSSR verifies `str.slice(a, b)` folds to the sliced
+// substring in emitted HTML. The SSR const evaluators previously ignored
+// `.slice`, so the text rendered empty (e.g. the docs "Last updated" line).
+func TestStringSliceFoldsAtSSR(t *testing.T) {
+	src := `function Meta(props) {
+  return <p class="updated">{props.updated.slice(0, 10)}</p>;
+}
+export default function Page() {
+  return <Meta updated="2026-09-12T19:48:40+01:00" />;
+}`
+	result, _ := fullPipeline(t, src)
+	if !strings.Contains(result.HTML, "2026-09-12") {
+		t.Fatalf("expected sliced date in HTML, got:\n%s", result.HTML)
+	}
+	if strings.Contains(result.HTML, "T19:48") {
+		t.Fatalf("slice must trim the timestamp, got:\n%s", result.HTML)
 	}
 }

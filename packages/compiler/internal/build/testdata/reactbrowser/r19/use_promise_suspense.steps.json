@@ -1,0 +1,7 @@
+{
+  "steps": [
+    { "op": "click", "sel": "#release", "then": "#comments" },
+    { "op": "click", "sel": "#next", "then": "#loading" },
+    { "op": "click", "sel": "#release", "then": "text=part2: first!" }
+  ]
+}

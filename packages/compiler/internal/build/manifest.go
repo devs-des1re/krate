@@ -4,22 +4,34 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 )
 
-// Manifest is written to dist/manifest.json and read by the SSR server at runtime.
+// Manifest is written to dist/.krate/manifest.json and read by the SSR server at runtime.
 type Manifest struct {
 	Pages             []PageMeta             `json:"pages"`
 	Stylesheet        string                 `json:"stylesheet,omitempty"`        // global CSS filename
 	RuntimeJS         string                 `json:"runtimeJS,omitempty"`         // shared runtime chunk path (relative to outDir)
-	Routes            map[string]PageMeta    `json:"-"`                           // URL route → PageMeta (in-memory only)
+	Routes            map[string]PageMeta    `json:"-"`                           // URL route -> PageMeta (in-memory only)
 	RuntimeComponents []RuntimeComponentMeta `json:"runtimeComponents,omitempty"` // runtime server components
 	// Regions maps each server-rendered page route to its dynamic regions.
 	Regions map[string][]RegionMeta `json:"regions,omitempty"`
 	// StaticOnlyRoutes lists dynamic route patterns (e.g. "/blog/[slug]") whose
-	// parameters are closed — the server must 404 for params not baked at build
+	// parameters are closed - the server must 404 for params not baked at build
 	// time. Populated from `output: "static"` or `dynamicParams = false`.
 	StaticOnlyRoutes []string `json:"staticOnlyRoutes,omitempty"`
+	// HashedAssets lists the content-hashed files this build emitted (URL paths
+	// such as "/styles.abc123.css"). Only these are served as immutable; user
+	// files from public/ that merely look hashed are not.
+	HashedAssets []string `json:"hashedAssets,omitempty"`
+	// Segments lists the directories that have their own not-found or error
+	// page (see LookupSegmentPage), sorted by key.
+	Segments []SegmentEntry `json:"segments,omitempty"`
+	// Middleware records whether the app has a middleware module. Nil means
+	// the build predates the record, so `krate serve` cannot tell "no
+	// middleware" from "middleware missing" and only warns.
+	Middleware *bool `json:"middleware,omitempty"`
 }
 
 // RuntimeComponentMeta describes a compiled runtime component bundle.
@@ -36,6 +48,11 @@ type ManifestPage struct {
 	Mode       string `json:"mode"`
 	Revalidate int    `json:"revalidate,omitempty"`
 	BundlePath string `json:"bundlePath"` // path to server bundle (relative to outDir)
+	// ServerComponents marks a page that renders async server components: a
+	// failed render is fatal (500), never the baked placeholder body.
+	ServerComponents bool `json:"serverComponents,omitempty"`
+	// SegDir mirrors PageMeta.SegDir.
+	SegDir string `json:"segDir,omitempty"`
 }
 
 // ServerManifest is the on-disk format read by the Node.js renderer server.
@@ -56,7 +73,7 @@ func BuildManifest(results []*PageResult, cssFile string, runtimeJS string) *Man
 	}
 
 	for _, r := range results {
-		// Skip error pages (404/500) from manifest — they're served directly
+		// Skip error pages (404/500) from manifest - they're served directly
 		if r.IsErrorPage {
 			continue
 		}
@@ -67,6 +84,8 @@ func BuildManifest(results []*PageResult, cssFile string, runtimeJS string) *Man
 			Revalidate:    r.Revalidate,
 			DynamicParams: r.DynamicParams,
 			StaticOnly:    r.StaticOnly,
+
+			ServerComponents: len(r.ServerExports) > 0 || r.ServerPage,
 		}
 		m.Pages = append(m.Pages, meta)
 		m.Routes[meta.Route] = meta
@@ -80,16 +99,28 @@ func BuildManifest(results []*PageResult, cssFile string, runtimeJS string) *Man
 			regs := make([]RegionMeta, 0, len(r.Regions))
 			for _, reg := range r.Regions {
 				regs = append(regs, RegionMeta{
-					ID:         reg.ID,
-					Component:  reg.ComponentName,
-					SourcePath: reg.SourcePath,
-					Props:      reg.Props,
-					Suspense:   reg.Suspense,
+					ID:           reg.ID,
+					Component:    reg.ComponentName,
+					SourcePath:   reg.SourcePath,
+					Props:        reg.Props,
+					Suspense:     reg.Suspense,
+					Runtime:      reg.Runtime,
+					Revalidate:   reg.Revalidate,
+					ServerExport: reg.ServerExport,
 				})
 			}
 			m.Regions[meta.Route] = regs
 		}
 	}
+
+	// Pages are collected in concurrent-build completion order; sort by route so
+	// manifest.json is byte-identical across builds (stable output hashing).
+	sort.Slice(m.Pages, func(i, j int) bool {
+		if m.Pages[i].Route != m.Pages[j].Route {
+			return m.Pages[i].Route < m.Pages[j].Route
+		}
+		return m.Pages[i].Source < m.Pages[j].Source
+	})
 
 	return m
 }
@@ -101,11 +132,7 @@ func (m *Manifest) SetRuntimeComponents(bundles []RuntimeComponentBundle) {
 	}
 	m.RuntimeComponents = make([]RuntimeComponentMeta, 0, len(bundles))
 	for _, b := range bundles {
-		m.RuntimeComponents = append(m.RuntimeComponents, RuntimeComponentMeta{
-			Name:       b.Name,
-			SourcePath: b.SourcePath,
-			BundlePath: b.BundlePath,
-		})
+		m.RuntimeComponents = append(m.RuntimeComponents, RuntimeComponentMeta(b))
 	}
 	linkRegionBundles(m, bundles)
 }
@@ -114,7 +141,7 @@ func (m *Manifest) SetRuntimeComponents(bundles []RuntimeComponentBundle) {
 // runtime component bundle that backs it. A suspense-primary region renders
 // that single runtime component, so the per-runtime-component bundle (a
 // self-contained __krate_render IIFE) is exactly the renderer the sidecar
-// needs — no per-region esbuild pass required.
+// needs - no per-region esbuild pass required.
 func linkRegionBundles(m *Manifest, bundles []RuntimeComponentBundle) {
 	if m == nil || len(bundles) == 0 {
 		return
@@ -143,7 +170,10 @@ func WriteManifest(m *Manifest, outDir string, serverBundles map[string]string) 
 	if err != nil {
 		return err
 	}
-	if err := os.WriteFile(filepath.Join(outDir, "manifest.json"), data, 0644); err != nil {
+	if err := os.MkdirAll(ServerOutPath(outDir), 0755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(ManifestPath(outDir), data, 0644); err != nil {
 		return err
 	}
 
@@ -160,6 +190,9 @@ func WriteManifest(m *Manifest, outDir string, serverBundles map[string]string) 
 			Mode:       p.Mode.String(),
 			Revalidate: p.Revalidate,
 			BundlePath: bundlePath,
+
+			ServerComponents: p.ServerComponents,
+			SegDir:           p.SegDir,
 		}
 		serverPages = append(serverPages, sp)
 	}
@@ -176,7 +209,7 @@ func WriteManifest(m *Manifest, outDir string, serverBundles map[string]string) 
 		if err != nil {
 			return err
 		}
-		if err := os.WriteFile(filepath.Join(outDir, "server-manifest.json"), smData, 0644); err != nil {
+		if err := os.WriteFile(ServerManifestPath(outDir), smData, 0644); err != nil {
 			return err
 		}
 	}

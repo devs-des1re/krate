@@ -9,17 +9,23 @@ import (
 	"testing"
 
 	"github.com/kratejs/krate/packages/compiler/internal/config"
+	"github.com/kratejs/krate/packages/compiler/internal/deploy"
 )
 
 func TestSubstituteImportMetaURL(t *testing.T) {
 	js := "const base = new URL('../models/', import.meta.url);"
-	got := substituteImportMetaURL(js, "demo", "index.ab12cd.js")
+	got := substituteImportMetaURL(js, "demo", "index.ab12cd.js", "")
 	want := "const base = new URL('../models/', \"/demo/index.ab12cd.js\");"
 	if got != want {
 		t.Fatalf("got %q want %q", got, want)
 	}
-	if !strings.Contains(substituteImportMetaURL("no import.meta here", "x", "y.js"), "import.meta") {
+	if !strings.Contains(substituteImportMetaURL("no import.meta here", "x", "y.js", ""), "import.meta") {
 		t.Fatal("must be a no-op when import.meta.url is absent")
+	}
+	// basePath is applied so relative imports resolve under the sub-path.
+	withBase := substituteImportMetaURL(js, "demo", "index.ab12cd.js", "/docs")
+	if !strings.Contains(withBase, `"/docs/demo/index.ab12cd.js"`) {
+		t.Fatalf("basePath not applied: %q", withBase)
 	}
 }
 
@@ -88,7 +94,9 @@ func TestBuildTestProject(t *testing.T) {
 		{path: filepath.Join(outDir, "test", "index.html")},
 		{path: filepath.Join(outDir, "video", "[id]", "index.html"), contains: []string{"<!DOCTYPE html>", "video"}},
 		{path: filepath.Join(outDir, "syntax-robustness", "index.html"), contains: []string{"<!DOCTYPE html>", "Syntax Robustness"}},
-		{path: filepath.Join(outDir, "manifest.json"), contains: []string{"\"pages\""}},
+		{path: filepath.Join(outDir, "go-component", "index.html"), contains: []string{"<!DOCTYPE html>", "krate-go-badge", "go-native"}},
+		{path: filepath.Join(outDir, "server-runtime-demo", "index.html"), contains: []string{"go-server-time", "Go build time"}},
+		{path: ManifestPath(outDir), contains: []string{"\"pages\"", "\"runtime\": \"go\"", "\"component\": \"GoRuntimeTime\""}},
 	}
 
 	for _, c := range checks {
@@ -114,6 +122,88 @@ func TestBuildTestProject(t *testing.T) {
 				}
 			}
 		}
+	}
+
+	// Config-surface features exercised by examples/krate.config.ts.
+	if cfg.Site.URL != "https://example.com" || cfg.SEO.BaseURL != cfg.Site.URL {
+		t.Errorf("site block not folded into SEO: site=%q seo=%q", cfg.Site.URL, cfg.SEO.BaseURL)
+	}
+	if cfg.Deploy.Target != "netlify" {
+		t.Errorf("deploy.target = %q, want netlify", cfg.Deploy.Target)
+	}
+	if !cfg.Compress.Gzip {
+		t.Error("compress.gzip not parsed")
+	}
+	if cfg.Images.Quality != 80 {
+		t.Errorf("images.quality = %d, want 80", cfg.Images.Quality)
+	}
+	if len(cfg.Markdown.Plugins) == 0 {
+		t.Error("markdown.plugins not parsed")
+	}
+	// `extends` is consumed during load; the proof it merged is that the base's
+	// `tailwind.enabled` is present although the main config only sets
+	// `markdown.plugins`.
+	if !cfg.Tailwind.Enabled {
+		t.Error("extends merge not applied (tailwind.enabled from shared.config.ts missing)")
+	}
+	if cfg.Security.FrameOptions != "SAMEORIGIN" || len(cfg.Headers) == 0 {
+		t.Errorf("security/headers not parsed: %+v / %d", cfg.Security, len(cfg.Headers))
+	}
+	if len(cfg.Head.Scripts) == 0 || len(cfg.Head.Meta) == 0 {
+		t.Errorf("head not parsed: %+v", cfg.Head)
+	}
+
+	// Output checks for those features.
+	if data, err := os.ReadFile(filepath.Join(outDir, "markdown-demo", "index.html")); err != nil {
+		t.Errorf("reading markdown page: %v", err)
+	} else if !strings.Contains(string(data), "data-markdown-plugin") {
+		t.Error("markdown.plugins transform did not run")
+	}
+	if data, err := os.ReadFile(filepath.Join(outDir, "index.html")); err == nil {
+		h := string(data)
+		for _, want := range []string{"example-head", "/analytics.js"} {
+			if !strings.Contains(h, want) {
+				t.Errorf("index.html missing %q (head/analytics injection)", want)
+			}
+		}
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "index.html.gz")); err != nil {
+		t.Errorf("precompressed sibling missing (compress.gzip): %v", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(outDir, "robots.txt")); err != nil {
+		t.Errorf("robots.txt missing: %v", err)
+	} else if !strings.Contains(string(data), "Allow: /") {
+		t.Errorf("robots plugin options not applied:\n%s", data)
+	}
+	if _, err := os.Stat(filepath.Join(outDir, "llms.txt")); err != nil {
+		t.Errorf("llms.txt missing: %v", err)
+	}
+	if data, err := os.ReadFile(filepath.Join(outDir, "docs", "getting-started", "index.html")); err == nil {
+		h := string(data)
+		if !strings.Contains(h, "edit/main/examples/src/content") {
+			t.Error("docs editLink.pattern not applied")
+		}
+		if !strings.Contains(h, "Search the docs") || !strings.Contains(h, "krate-docs-search-kbd") {
+			t.Error("docs search placeholder/hotkey not applied")
+		}
+		if !strings.Contains(h, "data-markdown-plugin") {
+			t.Error("markdown.plugins did not run on docs pages")
+		}
+	}
+
+	if data, err := os.ReadFile(filepath.Join(outDir, "lang-demo", "index.html")); err != nil {
+		t.Errorf("reading lang-demo page: %v", err)
+	} else if !strings.Contains(string(data), "lang=fr") && !strings.Contains(string(data), `lang="fr"`) {
+		t.Error("per-page `export const lang` not applied to <html lang>")
+	}
+
+	// Deploy adapters emit explicit header rules for static hosts.
+	if _, err := deploy.Emit("netlify", cfg, outDir, outDir, deploy.Options{StaticOnly: true}); err != nil {
+		t.Errorf("deploy.Emit: %v", err)
+	} else if headers, err := os.ReadFile(filepath.Join(outDir, "_headers")); err != nil {
+		t.Error("deploy did not write _headers")
+	} else if !strings.Contains(string(headers), "/_krate/images/*") {
+		t.Errorf("_headers missing images rule:\n%s", headers)
 	}
 
 	// Verify syntax-robustness page renders alias-imported components. The
@@ -143,7 +233,7 @@ func TestBuildTestProject(t *testing.T) {
 	// Dynamic-route regression: the reusable [id] template must be built with a
 	// replaceable sentinel (not a leaked variable name or a folded literal), so
 	// the server can substitute the matched URL segment anywhere the param is
-	// read — body text, <title>, and meta attributes.
+	// read - body text, <title>, and meta attributes.
 	templatePath := filepath.Join(outDir, "video", "[id]", "index.html")
 	if data, err := os.ReadFile(templatePath); err == nil {
 		content := string(data)
@@ -391,7 +481,7 @@ func TestStageServerRenderer(t *testing.T) {
 		t.Errorf("staged driver missing bundled SSR runtime (renderToString)")
 	}
 
-	// Node must be able to parse the driver without tsx.
+	// Node must be able to parse the bundled driver.
 	node, err := exec.LookPath("node")
 	if err != nil {
 		requireE2E(t, "node not available: %v", err)
@@ -408,6 +498,31 @@ func TestStageServerRenderer(t *testing.T) {
 	}
 	if got != staged {
 		t.Errorf("findRendererScript = %q, want staged driver %q", got, staged)
+	}
+}
+
+func TestSSRServerUsesCustomOutDir(t *testing.T) {
+	root := t.TempDir()
+	custom := filepath.Join(root, "build")
+	if err := os.MkdirAll(custom, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(custom, "server-manifest.json"), []byte(`{"pages":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := NewSSRServer(root, 0, "node")
+	srv.SetOutDir(custom)
+	if err := srv.LoadManifest(); err != nil {
+		t.Fatalf("LoadManifest with custom outDir: %v", err)
+	}
+	if !srv.HasManifest() {
+		t.Fatal("manifest was not loaded from the custom outDir")
+	}
+
+	defaultSrv := NewSSRServer(root, 0, "node")
+	if err := defaultSrv.LoadManifest(); err == nil {
+		t.Fatal("default dist/ should not contain the custom manifest")
 	}
 }
 

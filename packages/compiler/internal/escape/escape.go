@@ -4,7 +4,10 @@
 // consistent (one shared implementation, no drift).
 package escape
 
-import "strings"
+import (
+	"fmt"
+	"strings"
+)
 
 var htmlReplacer = strings.NewReplacer(
 	"&", "&amp;",
@@ -12,16 +15,45 @@ var htmlReplacer = strings.NewReplacer(
 	">", "&gt;",
 	"\"", "&quot;",
 	"'", "&#39;",
-	// The \x1f unit separator is the internal array-item delimiter used by
-	// SSREval's array evaluation. It is not content and must never reach HTML.
-	"\x1f", "",
 )
 
 // HTML escapes a string for safe inclusion in HTML text content or attribute
-// values. The full set (& < > " ') is escaped and the internal \x1f array
-// separator is stripped.
+// values. The full set (& < > " ') is escaped.
 func HTML(s string) string {
 	return htmlReplacer.Replace(s)
+}
+
+var textReplacer = strings.NewReplacer(
+	"&", "&amp;",
+	"<", "&lt;",
+	">", "&gt;",
+)
+
+// Text escapes a decoded string for an HTML text position (element content
+// outside raw-text elements). Only & < > need escaping there; quotes are left
+// alone so ordinary prose stays readable.
+func Text(s string) string {
+	return textReplacer.Replace(s)
+}
+
+var commentReplacer = strings.NewReplacer(
+	"%", "%25",
+	">", "%3E",
+	"<", "%3C",
+	"\x00", "%00",
+	"\x1f", "",
+)
+
+// Comment encodes a value (slot id, list key, stream id) for use inside an
+// HTML comment marker such as <!--k:ID-->. A comment can only be closed by a
+// sequence containing '>', so percent-encoding '>' (and '<' and '%', which
+// keeps the encoding reversible with decodeURIComponent) means user data can
+// never terminate the marker. Ordinary ids and keys are left unchanged.
+func Comment(s string) string {
+	if !strings.ContainsAny(s, "%<>\x00\x1f") {
+		return s
+	}
+	return commentReplacer.Replace(s)
 }
 
 // HTMLAttr is an alias for HTML: both escape the full set, so the result is
@@ -38,7 +70,12 @@ func JSString(s string) string {
 	s = strings.ReplaceAll(s, "\n", `\n`)
 	s = strings.ReplaceAll(s, "\r", `\r`)
 	s = strings.ReplaceAll(s, "\t", `\t`)
-	s = strings.ReplaceAll(s, "\x00", `\0`)
+	// \x00 (not \0) so a following digit cannot form a legacy octal escape.
+	s = strings.ReplaceAll(s, "\x00", `\x00`)
+	// U+2028/U+2029 are line terminators in older JS engines and would break a
+	// single-line string literal.
+	s = strings.ReplaceAll(s, "\u2028", `\u2028`)
+	s = strings.ReplaceAll(s, "\u2029", `\u2029`)
 	return s
 }
 
@@ -46,19 +83,41 @@ func JSString(s string) string {
 // literal and returns it wrapped in double quotes. Used when interpolating a
 // JSON payload (e.g. props) directly into generated JS.
 func JSStringDQ(s string) string {
-	s = strings.ReplaceAll(s, `\`, `\\`)
-	s = strings.ReplaceAll(s, `"`, `\"`)
-	s = strings.ReplaceAll(s, "\n", `\n`)
-	s = strings.ReplaceAll(s, "\r", `\r`)
-	s = strings.ReplaceAll(s, "\t", `\t`)
-	return `"` + s + `"`
+	var b strings.Builder
+	b.Grow(len(s) + 2)
+	b.WriteByte('"')
+	for _, r := range s {
+		switch r {
+		case '\\':
+			b.WriteString(`\\`)
+		case '"':
+			b.WriteString(`\"`)
+		case '\n':
+			b.WriteString(`\n`)
+		case '\r':
+			b.WriteString(`\r`)
+		case '\t':
+			b.WriteString(`\t`)
+		case '<':
+			// A payload containing "</script" must not terminate an inline
+			// script element.
+			b.WriteString(`\x3C`)
+		default:
+			if r < 0x20 || r == 0x7f || r == 0x2028 || r == 0x2029 {
+				fmt.Fprintf(&b, `\u%04x`, r)
+			} else {
+				b.WriteRune(r)
+			}
+		}
+	}
+	b.WriteByte('"')
+	return b.String()
 }
 
 // UnescapeJSString decodes the escape sequences inside a JS/TS string literal's
 // raw source text into their literal characters. The lexer stores the raw text
 // between the quotes with escapes intact, so a token like `a\nb` becomes the
 // two-character sequence backslash-n; this turns it into an actual newline.
-//
 // Handled: \n \r \t \b \f \v \0 \\ \' \" \` \xNN \uXXXX \u{...} \<newline>
 // (line continuation). Unknown escapes keep the backslash so no information is
 // lost on inputs the decoder does not understand.
@@ -126,7 +185,7 @@ func UnescapeJSString(s string) string {
 			b.WriteByte('\\')
 		case 'u':
 			if i+2 < len(s) && s[i+2] == '{' {
-				// \u{1F600} — consume up to the closing brace.
+				// \u{1F600} - consume up to the closing brace.
 				end := strings.IndexByte(s[i+3:], '}')
 				if end >= 0 {
 					if v, ok := decodeHex(s[i+3 : i+3+end]); ok {

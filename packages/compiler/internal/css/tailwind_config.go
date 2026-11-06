@@ -1,20 +1,27 @@
 package css
 
 import (
-	"context"
 	"encoding/json"
-	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
-	"time"
+
+	"github.com/kratejs/krate/packages/compiler/internal/jseval"
 )
 
 // TailwindConfig represents the tailwind.config.ts/js parsed values.
 type TailwindConfig struct {
 	Theme    TailwindTheme `json:"theme"`
 	DarkMode string        `json:"darkMode"`
+	// Warnings lists config constructs Krate cannot honour (unsupported keys,
+	// values the static parser cannot evaluate). The caller prints them.
+	Warnings []string `json:"warnings"`
+	// Extend holds theme.extend values from the evaluated config; they merge
+	// onto the built-in scales instead of replacing them.
+	Extend TailwindTheme `json:"extend"`
 }
 
 // TailwindOptions carries site config that influences generation (scan roots,
@@ -30,7 +37,8 @@ type TailwindOptions struct {
 	Strict bool
 	// DarkMode overrides the config's dark-mode strategy.
 	DarkMode string
-	// ExecuteConfig forces `npx tsx` config execution instead of static parse.
+	// ExecuteConfig forces in-process config evaluation (esbuild + QuickJS)
+	// instead of the static parser.
 	ExecuteConfig bool
 }
 
@@ -38,6 +46,10 @@ type TailwindOptions struct {
 var configFileNames = []string{
 	"tailwind.config.ts", "tailwind.config.js", "tailwind.config.mjs",
 }
+
+// FindTailwindConfig returns the path of the project's tailwind config file,
+// or "" when there is none.
+func FindTailwindConfig(root string) string { return findTailwindConfig(root) }
 
 // findTailwindConfig returns the first existing config path under root.
 func findTailwindConfig(root string) string {
@@ -51,9 +63,9 @@ func findTailwindConfig(root string) string {
 }
 
 // LoadTailwindConfig loads a tailwind.config file. It prefers a static parse
-// (no Node required); when `execute` is true or the static parse yields no
-// theme, it falls back to executing the config via `npx tsx`. On any failure it
-// returns defaults (a diagnostic is surfaced by the caller).
+// (no JS runtime required); when `execute` is true or the static parse yields no
+// theme, it evaluates the config in-process (esbuild + QuickJS). On any failure
+// it returns defaults (a diagnostic is surfaced by the caller).
 func LoadTailwindConfig(root string) *TailwindConfig {
 	return LoadTailwindConfigWithOptions(root, TailwindOptions{})
 }
@@ -92,32 +104,30 @@ func LoadTailwindConfigWithOptions(root string, opts TailwindOptions) *TailwindC
 	return cfg
 }
 
-// executeTailwindConfig runs the config via `npx --yes tsx`.
+// executeTailwindConfig evaluates the config in-process via jseval (esbuild
+// bundle + embedded QuickJS) - no Node subprocess. It returns ok=false when the
+// config can't be bundled or executed, so the caller falls back to the static
+// parser.
 func executeTailwindConfig(root, configPath string) (*TailwindConfig, bool) {
-	bootstrap := fmt.Sprintf(`import cfg from "%s"; console.log(JSON.stringify({theme:cfg.theme||{},darkMode:cfg.darkMode||""}));`, configPath)
-	tmpDir, err := os.MkdirTemp("", "krate-tailwind-*")
+	rel, err := filepath.Rel(root, configPath)
 	if err != nil {
 		return nil, false
 	}
-	defer os.RemoveAll(tmpDir)
+	spec := "./" + filepath.ToSlash(rel)
+	bootstrap := "import cfg from " + strconv.Quote(spec) + ";\n" + execConfigJS +
+		"\nglobalThis." + jseval.ResultGlobal + " = __krateNormalizeConfig(cfg);\n"
 
-	tmpFile := filepath.Join(tmpDir, "bootstrap.mjs")
-	if err := os.WriteFile(tmpFile, []byte(bootstrap), 0644); err != nil {
-		return nil, false
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(ctx, "npx", "--yes", "tsx", tmpFile)
-	cmd.Dir = root
-	output, err := cmd.Output()
+	data, err := jseval.Eval(jseval.Options{
+		Source:     bootstrap,
+		ResolveDir: root,
+		Sourcefile: "krate-tailwind-bootstrap.ts",
+	})
 	if err != nil {
 		return nil, false
 	}
 
 	var parsed TailwindConfig
-	if err := json.Unmarshal(output, &parsed); err != nil {
+	if err := json.Unmarshal(data, &parsed); err != nil {
 		return nil, false
 	}
 	return &parsed, true
@@ -174,11 +184,75 @@ func mergeTailwindConfig(cfg *TailwindConfig, parsed *TailwindConfig) {
 	if len(t.BgColors) > 0 {
 		cfg.Theme.BgColors = t.BgColors
 	}
+	if len(t.Animation) > 0 {
+		cfg.Theme.Animation = t.Animation
+	}
+	if len(t.Keyframes) > 0 {
+		cfg.Theme.Keyframes = t.Keyframes
+	}
+	if len(t.Tracking) > 0 {
+		cfg.Theme.Tracking = t.Tracking
+	}
+	if len(t.Containers) > 0 {
+		cfg.Theme.Containers = t.Containers
+	}
+	if t.SpacingUnit != "" {
+		cfg.Theme.SpacingUnit = t.SpacingUnit
+	}
+	if t.DarkSelector != "" {
+		cfg.Theme.DarkSelector = t.DarkSelector
+	}
+	if t.Prefix != "" {
+		cfg.Theme.Prefix = t.Prefix
+	}
+	if t.Important != "" {
+		cfg.Theme.Important = t.Important
+	}
+	cfg.Warnings = append(cfg.Warnings, parsed.Warnings...)
+	mergeExtend(&cfg.Theme, &parsed.Extend)
 	if t.DarkMode != "" {
 		cfg.Theme.DarkMode = t.DarkMode
 	}
 	if parsed.DarkMode != "" {
 		cfg.Theme.DarkMode = parsed.DarkMode
+	}
+}
+
+// mergeExtend merges theme.extend maps onto dst.
+func mergeExtend(dst, ext *TailwindTheme) {
+	merge := func(d *map[string]string, s map[string]string) {
+		if len(s) == 0 {
+			return
+		}
+		if *d == nil {
+			*d = map[string]string{}
+		}
+		for k, v := range s {
+			(*d)[k] = v
+		}
+	}
+	merge(&dst.Spacing, ext.Spacing)
+	merge(&dst.Sizing, ext.Sizing)
+	merge(&dst.MaxWidth, ext.MaxWidth)
+	merge(&dst.MinWidth, ext.MinWidth)
+	merge(&dst.LineHeight, ext.LineHeight)
+	merge(&dst.Opacity, ext.Opacity)
+	merge(&dst.Screens, ext.Screens)
+	merge(&dst.TextSizes, ext.TextSizes)
+	merge(&dst.FontWeights, ext.FontWeights)
+	merge(&dst.FontFamily, ext.FontFamily)
+	merge(&dst.Radii, ext.Radii)
+	merge(&dst.Shadows, ext.Shadows)
+	merge(&dst.Animation, ext.Animation)
+	merge(&dst.Keyframes, ext.Keyframes)
+	merge(&dst.Tracking, ext.Tracking)
+	if len(ext.Colors) > 0 {
+		if dst.Colors == nil {
+			dst.Colors = map[string]map[string]string{}
+		}
+		for k, v := range ext.Colors {
+			dst.Colors[k] = v
+		}
 	}
 }
 
@@ -192,30 +266,123 @@ func (g *TailwindGenerator) MergeConfig(cfg *TailwindConfig) {
 	g.Theme = merged.Theme
 }
 
-// GenerateTailwind runs the full Tailwind pipeline: scan classes → generate CSS.
+// GenerateTailwind runs the full Tailwind pipeline: scan classes -> generate CSS.
 func GenerateTailwind(root string, cfg *TailwindConfig) (string, error) {
 	return GenerateTailwindWithOptions(root, cfg, TailwindOptions{})
 }
 
 // GenerateTailwindWithOptions is GenerateTailwind with explicit options.
 func GenerateTailwindWithOptions(root string, cfg *TailwindConfig, opts TailwindOptions) (string, error) {
-	dirs := resolveScanDirs(root, opts)
+	res, err := GenerateTailwindDirectives(root, cfg, opts, nil)
+	return res.CSS, err
+}
 
-	scanner := NewTailwindScanner(root)
-	classes := scanner.ScanClasses(dirs)
-	if len(classes) == 0 {
-		return "", nil
+// TailwindResult is the output of a Tailwind generation run.
+type TailwindResult struct {
+	// CSS is the layered stylesheet (empty when nothing was generated).
+	CSS string
+	// Unknown lists scanned candidates that produced no rule (strict only).
+	Unknown []string
+	// Warnings lists unsupported config or directive constructs.
+	Warnings []string
+}
+
+// GenerateTailwindDirectives scans the project, applies the config and the
+// CSS-first directives (d may be nil), and returns the layered stylesheet:
+// `@layer theme, base, components, utilities;` then theme variables, the
+// preflight and the utilities each in their own layer, then @keyframes. User
+// CSS that is unlayered therefore beats preflight and utilities alike.
+func GenerateTailwindDirectives(root string, cfg *TailwindConfig, opts TailwindOptions, d *TailwindDirectives) (TailwindResult, error) {
+	if d == nil {
+		d = NewTailwindDirectives(root)
 	}
+	var res TailwindResult
 
 	generator := NewTailwindGenerator()
 	generator.MergeConfig(cfg)
+	d.ApplyTo(&generator.Theme)
 	generator.Strict = opts.Strict
-
-	css := generator.Generate(classes)
-	if opts.Preflight {
-		css = TailwindPreflight(generator.Theme) + css
+	if cfg != nil {
+		res.Warnings = append(res.Warnings, cfg.Warnings...)
 	}
-	return css, nil
+
+	var dirs []string
+	if !d.NoAutoSource {
+		dirs = resolveScanDirs(root, opts)
+	}
+	dirs = append(dirs, d.Sources...)
+	scanner := NewTailwindScanner(root)
+	scanner.Exclude = d.Excludes
+	scanner.Names = customUtilityRoots(&generator.Theme)
+	classes := scanner.ScanClasses(dirs)
+	for _, c := range d.Inline {
+		classes[c] = true
+	}
+	userVars := 0
+	for _, v := range d.Theme.Vars {
+		if !v.Reference {
+			userVars++
+		}
+	}
+	res.Warnings = append(res.Warnings, d.Warnings()...)
+	if len(classes) == 0 && userVars == 0 {
+		sort.Strings(res.Warnings)
+		return res, nil
+	}
+
+	for k := range scanner.VarDecls {
+		d.VarDecls[k] = true
+	}
+	generator.Theme.LiveVars = d.LiveVars(&generator.Theme)
+
+	utilities := generator.Generate(classes)
+	res.Unknown = append(res.Unknown, generator.Unknown...)
+	sort.Strings(res.Unknown)
+
+	refs := map[string]bool{}
+	for k := range scanner.VarRefs {
+		refs[k] = true
+	}
+	for k := range d.VarRefs {
+		refs[k] = true
+	}
+	for k := range generator.Theme.LiveVars {
+		refs[k] = true
+	}
+	res.CSS = assembleTailwindSheet(&generator.Theme, &d.Theme, refs, utilities, generator.KeyframesCSS(), opts.Preflight)
+	return res, nil
+}
+
+// assembleTailwindSheet lays the pieces out in cascade layers like Tailwind v4.
+func assembleTailwindSheet(theme *TailwindTheme, at *AtTheme, refs map[string]bool, utilities, keyframes string, preflight bool) string {
+	vars := themeLayerVars(theme, at, refs)
+	if utilities == "" && len(vars) == 0 && keyframes == "" {
+		return ""
+	}
+	var b strings.Builder
+	b.WriteString("@layer theme, base, components, utilities;\n")
+	if len(vars) > 0 {
+		b.WriteString("@layer theme{:root,:host{")
+		for _, v := range vars {
+			b.WriteString("--" + v.Name + ":" + v.Value + ";")
+		}
+		b.WriteString("}}\n")
+	}
+	if preflight {
+		b.WriteString("@layer base{\n")
+		b.WriteString(TailwindPreflight(*theme))
+		b.WriteString("}\n")
+	}
+	if utilities != "" {
+		b.WriteString("@layer utilities{\n")
+		b.WriteString(utilities)
+		b.WriteString("}\n")
+	}
+	b.WriteString(keyframes)
+	if keyframes != "" && !strings.HasSuffix(keyframes, "\n") {
+		b.WriteByte('\n')
+	}
+	return b.String()
 }
 
 // resolveScanDirs returns absolute scan roots: `content` wins over `scanDirs`,
@@ -255,16 +422,26 @@ func resolveScanDirs(root string, opts TailwindOptions) []string {
 	return dirs
 }
 
-// StripTailwindDirectives removes @tailwind and @apply directives from CSS.
-func StripTailwindDirectives(css string) string {
-	var result strings.Builder
-	for _, line := range strings.Split(css, "\n") {
-		trimmed := strings.TrimSpace(line)
-		if strings.HasPrefix(trimmed, "@tailwind") || strings.HasPrefix(trimmed, "@apply") {
-			continue
-		}
-		result.WriteString(line)
-		result.WriteByte('\n')
+// atTailwindRe matches a `@tailwind base|components|utilities;` directive.
+var atTailwindRe = regexp.MustCompile(`(?m)^[ \t]*@tailwind[^;{}]*;[ \t]*\r?\n?`)
+
+var atTailwindImportRe = regexp.MustCompile(`@import\s+(?:url\(\s*)?["']tailwindcss(?:/[A-Za-z0-9._/-]*)?["']`)
+
+// TailwindDirectiveUse returns the first Tailwind-only directive found in
+// authored CSS (`@tailwind utilities` or `@import "tailwindcss"`), or "".
+func TailwindDirectiveUse(css string) string {
+	if m := atTailwindImportRe.FindString(css); m != "" {
+		return m
 	}
-	return strings.TrimSpace(result.String())
+	if m := atTailwindRe.FindString(css); m != "" {
+		return strings.TrimSpace(strings.TrimSuffix(strings.TrimSpace(m), ";"))
+	}
+	return ""
+}
+
+// StripAtTailwind removes `@tailwind base|components|utilities;` directives.
+// Krate generates Tailwind output itself, so a leftover directive would ship as
+// an invalid at-rule.
+func StripAtTailwind(css string) string {
+	return atTailwindRe.ReplaceAllString(css, "")
 }

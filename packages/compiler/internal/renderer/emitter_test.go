@@ -3,18 +3,20 @@ package renderer
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/kratejs/krate/packages/compiler/ast"
 	"github.com/kratejs/krate/packages/compiler/internal/annotator"
 	"github.com/kratejs/krate/packages/compiler/internal/config"
 	"github.com/kratejs/krate/packages/compiler/internal/irtree"
+	"github.com/kratejs/krate/packages/compiler/internal/jsvalue"
 )
 
 func annotateWithRuntime(prog *ast.Program, raw string) *irtree.Annotations {
 	return annotator.Annotate(prog, &config.Config{RuntimeComponents: []string{"RuntimeWidget"}}, "page.tsx", raw)
 }
 
-// ─── emitSSREvaluated ───────────────────────────────────────────────────────
+// emitSSREvaluated
 
 func TestEmitSSREvaluatedWithPropBindings(t *testing.T) {
 	src := `function Card(props) {
@@ -59,42 +61,38 @@ func TestEmitSSREvaluatedChildrenEscaped(t *testing.T) {
 
 func TestEmitSSREvaluatedDateNow(t *testing.T) {
 	src := `function ServerTime(props) {
-  return <div>built {Date.now()}</div>;
+  return <div>built {Date.now()} {new Date().getUTCFullYear()}</div>;
 }
 export default function Page() {
   return <ServerTime />;
 }`
-	// ServerTime is signal-less → SSR-evaluated. Without the QuickJS hook,
-	// Date.now() is an unsupported built-in → "".
-	result, _ := fullPipeline(t, src)
-	if strings.Contains(result.HTML, "built 1") && !strings.Contains(result.HTML, "Date.now") {
-		t.Log("Date.now evaluated")
-	}
-
-	// With the hook wired (as the build does with QuickJS), the global is
-	// delegated and evaluated to a real value.
+	// ServerTime is signal-less, so it is SSR-evaluated at build time and the
+	// build clock supplies Date.now(). The JS engine is not involved.
+	jsvalue.SetBuildClock(time.Date(2024, 3, 9, 16, 0, 0, 0, time.UTC))
+	defer jsvalue.ResetBuildClock()
 	prog := parseProg(t, src)
 	ann := annotator.Annotate(prog, &config.Config{}, "page.tsx", src)
 	tree := irtree.Build(prog, ann)
 	emitter := NewEmitter()
 	emitter.EvalJS = func(code string) (string, error) {
-		if code == "Date.now()" {
-			return "1710000000000", nil
-		}
-		return "0", nil
+		t.Errorf("the JS engine was asked to evaluate %q", code)
+		return `["number",0]`, nil
 	}
-	result2 := emitter.Emit(tree)
-	if !strings.Contains(result2.HTML, "built 1710000000000") {
-		t.Errorf("expected delegated Date.now() value baked into HTML, got:\n%s", result2.HTML)
+	result := emitter.Emit(tree)
+	if !strings.Contains(result.HTML, "built 1710000000000 2024") {
+		t.Errorf("expected the build clock baked into HTML, got:\n%s", result.HTML)
 	}
 }
 
+// TestEmitSSREvaluatedDelegatesBuiltin verifies built-ins the Go evaluator
+// does not implement (encodeURIComponent here) are delegated to the JS engine, while pure
+// built-ins it implements natively (Math) never reach it.
 func TestEmitSSREvaluatedDelegatesBuiltin(t *testing.T) {
 	src := `function Widget(props) {
-  return <div>round {Math.round(3.7)} max {Math.max(1, 5, 3)}</div>;
+  return <div>round {Math.round(3.7)} max {Math.max(1, 5, 3)} enc {encodeURIComponent(props.q)}</div>;
 }
 export default function Page() {
-  return <Widget />;
+  return <Widget q="a b" />;
 }`
 	prog := parseProg(t, src)
 	ann := annotator.Annotate(prog, &config.Config{}, "page.tsx", src)
@@ -103,24 +101,22 @@ export default function Page() {
 	emitter := NewEmitter()
 	emitter.EvalJS = func(code string) (string, error) {
 		seen = append(seen, code)
-		switch {
-		case strings.Contains(code, "Math.round"):
-			return "4", nil
-		case strings.Contains(code, "Math.max"):
-			return "5", nil
+		// Free variables are passed in as literal arguments.
+		if strings.Contains(code, "encodeURIComponent(props.q)") && strings.Contains(code, "{q:'a b'}") {
+			return `["string","a%20b"]`, nil
 		}
-		return "0", nil
+		return `["number",0]`, nil
 	}
 	result := emitter.Emit(tree)
-	if !strings.Contains(result.HTML, "round 4") || !strings.Contains(result.HTML, "max 5") {
-		t.Errorf("expected delegated built-in results, got:\n%s", result.HTML)
+	if !strings.Contains(result.HTML, "round 4 max 5 enc a%20b") {
+		t.Errorf("expected native Math and delegated encodeURIComponent results, got:\n%s", result.HTML)
 	}
-	if len(seen) == 0 {
-		t.Error("expected built-in expressions to be delegated to the JS evaluator")
+	if len(seen) != 1 || strings.Contains(seen[0], "Math.") {
+		t.Errorf("expected exactly the encodeURIComponent call to be delegated, got %q", seen)
 	}
 }
 
-// ─── Meta slots ─────────────────────────────────────────────────────────────
+// Meta slots
 
 func TestEmitMultipleMetaSlots(t *testing.T) {
 	src := `export default function Page() {
@@ -165,7 +161,7 @@ export default function Page() {
 
 // TestEmitMetaCallSiteHeadInWrapper guards the call-site <Head> case: a <Head>
 // passed as a CHILD into a signal-less wrapper is not part of the wrapper's own
-// return JSX, so SSREval does not capture it — EmitMeta must still walk the
+// return JSX, so SSREval does not capture it - EmitMeta must still walk the
 // wrapper's call-site children to hoist it. Regression guard for the meta-dedup
 // fix, which only skips the eval'd own-return tree.
 func TestEmitMetaCallSiteHeadInWrapper(t *testing.T) {
@@ -212,7 +208,7 @@ func TestEmitRootLocalFoldsInHead(t *testing.T) {
 	}
 }
 
-// ─── emitClient edge cases ──────────────────────────────────────────────────
+// emitClient edge cases
 
 func TestEmitClientCollectsChildComponentSignatures(t *testing.T) {
 	src := `function Counter() {
@@ -265,7 +261,7 @@ func TestEmitExprSlotEscapesInitial(t *testing.T) {
 	}
 }
 
-// ─── Runtime component emission ─────────────────────────────────────────────
+// Runtime component emission
 
 func TestEmitRuntimeRegionMarkers(t *testing.T) {
 	src := `function RuntimeWidget(props) { return <div>{props.label}</div>; }
@@ -372,7 +368,7 @@ func slotBindingEqual(a, b irtree.SlotBinding) bool {
 	return true
 }
 
-// ─── Suspense slot emission ─────────────────────────────────────────────────
+// Suspense slot emission
 
 func TestEmitSuspenseSlot(t *testing.T) {
 	fb := []irtree.SlotNode{&irtree.StaticHTML{HTML: `<div class="loading">Loading...</div>`}}

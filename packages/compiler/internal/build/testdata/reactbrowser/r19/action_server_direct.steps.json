@@ -1,0 +1,6 @@
+{
+  "server": true,
+  "steps": [
+    { "op": "click", "sel": "#load", "then": "text=grace" }
+  ]
+}

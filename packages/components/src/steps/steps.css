@@ -1,12 +1,13 @@
 .krate-steps {
   margin: 24px 0;
-  padding-left: 0;
+  padding-inline-start: 0;
   counter-reset: krate-step;
-  border-left: 2px solid var(--krate-border, #27272a);
+  border-inline-start: 2px solid var(--krate-border, #e5e5e5);
 }
 .krate-step {
   position: relative;
-  padding: 0 0 32px 32px;
+  padding-block: 0 32px;
+  padding-inline: 32px 0;
   counter-increment: krate-step;
 }
 .krate-step:last-child {
@@ -20,14 +21,14 @@
 }
 .krate-step-number {
   position: absolute;
-  left: -16px;
+  inset-inline-start: -16px;
   top: 0;
   width: 30px;
   height: 30px;
   border-radius: 50%;
-  background: var(--krate-card-bg, #111113);
-  color: var(--krate-text, #fafafa);
-  border: 1px solid var(--krate-border, #27272a);
+  background: var(--krate-card-bg, #ffffff);
+  color: var(--krate-text, #0a0a0a);
+  border: 1px solid var(--krate-border, #e5e5e5);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -40,9 +41,9 @@
 .krate-step-title {
   font-weight: 600;
   font-size: 1.05rem;
-  color: var(--krate-text, #fafafa);
+  color: var(--krate-text, #0a0a0a);
 }
 .krate-step-content {
-  color: var(--krate-text-muted, #b9b9b9);
+  color: var(--krate-text-muted, #737373);
   line-height: 1.6;
 }

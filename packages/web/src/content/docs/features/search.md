@@ -1,6 +1,7 @@
 ---
 title: Search
-order: 7
+order: 8
+description: Full-text docs search with three interchangeable backends - Pagefind, docfind, or JSON.
 tags:
   - search
   - pagefind
@@ -14,7 +15,7 @@ categories:
 
 The docs plugin ships a full-text search bar with three interchangeable
 backends. The default and recommended backend is
-[**Pagefind**](https://pagefind.app) — a mature static search library that
+[**Pagefind**](https://pagefind.app) - a mature static search library that
 indexes your **built HTML** after a production build and serves a **chunked,
 streamed** index, so only the pieces a query needs are downloaded. This scales
 best on large documentation sites.
@@ -24,34 +25,17 @@ Rust-based engine) and a classic JSON index. **docfind is what Krate uses during
 development builds** (see [Engines](#engines)), and it remains available for
 production if you'd rather not depend on Node.
 
-## How it works
+Pressing the search button (or **Ctrl/Cmd+K**) focuses the search box and opens
+its result list. Typing queries the configured engine locally and streams the
+chunks it needs; if the engine can't load (offline, or a dev build) the UI falls
+back to the JSON index automatically.
 
-1. **At build time**, the docs plugin renders every documentation page to HTML
-   and tags the content region with `data-pagefind-body`.
-2. **After a production build**, the docs plugin runs the Pagefind indexer
-   (`npx pagefind`) over the output directory. Pagefind writes a chunked search
-   bundle to `pagefind/`:
-
-```
-dist/
-  pagefind/           # chunked index + Pagefind runtime (search-time fetches)
-  docs/
-    search/
-      search.js       # Krate's search UI (trigger, modal, keyboard nav)
-      search.css      # search UI styles
-    data/
-      search-index.json # classic JSON fallback (always written)
-```
-
-3. **In the browser**, pressing the search button (or **Ctrl/Cmd+K**) opens a
-   command-palette-style dialog. Typing queries the Pagefind index locally and
-   streams the chunks it needs. If Pagefind can't load (offline, or a dev build),
-   the UI automatically falls back to the JSON index.
-
-> **In development**, `krate dev` builds the docfind WASM index instead of
-> running Pagefind, because Pagefind's index is a whole-site post-build pass that
-> dev's incremental rebuilds don't re-run. Search therefore works identically
-> while you write, and switches to Pagefind in production.
+:::note
+**In development**, `krate dev` builds the docfind WASM index instead of running
+Pagefind, because Pagefind's index is a whole-site post-build pass that dev's
+incremental rebuilds don't re-run. Search therefore works identically while you
+write, and switches to Pagefind in production.
+:::
 
 ## Configuration
 
@@ -79,7 +63,7 @@ docs({
 | `enabled` | `true` | Turn the search bar on/off |
 | `engine` | `"pagefind"` | `"pagefind"` (recommended) runs the [Pagefind](https://pagefind.app) indexer after production builds; `"docfind"` builds the embedded WASM index; `"json"` uses `search-index.json` only |
 | `maxResults` | `8` | Max results shown |
-| `pagefind` | – | Options for the `"pagefind"` engine |
+| `pagefind` | - | Options for the `"pagefind"` engine |
 
 ## Engines
 
@@ -100,7 +84,7 @@ HTML** after a production build, then serves a chunked, streamed index. It scale
 better on large sites because only the chunks a query needs are downloaded, and
 it is a mature, widely used search library.
 
-It is on by default — no configuration required:
+It is on by default - no configuration required:
 
 ```ts
 docs({ search: { engine: "pagefind" } }) // the default
@@ -111,16 +95,19 @@ docs({ search: { engine: "pagefind" } }) // the default
   every incremental edit.
 - **Node + network required.** The first run downloads the Pagefind binary. If
   `npx` or the download fails, Krate prints a warning and the client falls back
-  to docfind/JSON — the build never fails.
+  to the built-in JSON search index - the build never fails.
 - **Scoped indexing.** The docs content wrapper is tagged with
   `data-pagefind-body`, so page chrome (navbar, sidebar, table of contents, the
   search dialog) is not indexed. Use `pagefind.excludeSelectors` for extras.
-- **Reusing Krate's UI.** Pagefind's search API is driven by Krate's existing
-  modal, so the look, `Ctrl/Cmd+K`, keyboard navigation, and `.krate-search-*`
-  theming are identical across engines. Pagefind's own component UI is not used.
+- **Reusing Krate's UI.** Pagefind's search API is driven by the theme's
+  existing search component, so the look, `Ctrl/Cmd+K`, keyboard navigation, and
+  `.krate-docs-search-*` theming are identical across engines. Pagefind's own
+  component UI is not used.
 
-> `krate build --watch` incremental rebuilds do not re-run the Pagefind
-> indexer — run a full `krate build` to refresh the index.
+:::note
+`krate build --watch` incremental rebuilds do not re-run the Pagefind indexer -
+run a full `krate build` to refresh the index.
+:::
 
 ### docfind
 
@@ -137,7 +124,9 @@ self-contained, pure-Go build:
 docs({ search: { engine: "docfind" } })
 ```
 
-See [No subprocess, no temp files](#no-subprocess-no-temp-files) below.
+The index is built in-process and embedded into a WASM module - no CLI
+dependency and no temp files. See
+[Contributing -> Architecture](/docs/contributing/architecture/#docs-search).
 
 ### json
 
@@ -159,16 +148,16 @@ keywords: [reactive, createSignal, createEffect, createMemo, state]
 
 Keywords are weighted highest, then title words, then body phrases.
 
-## No subprocess, no temp files (docfind)
-
-The docfind index build runs inside the krate process. The Rust builder module is
-compiled once and `go:embed`-ed into the krate binary; documents are passed
-through WASM memory directly. There's no `docfind` CLI dependency at build time
-and no `documents.json` written to disk.
-
 ## Customizing the UI
 
-The search UI lives in `dist/docs/search/search.js` and `search.css` after a
-build. The trigger/dialog markup is generated by the docs plugin
-(`.krate/gen/docs/SearchBar.tsx`); you can restyle it by overriding the
-`.krate-search-*` classes in your own stylesheet.
+The search assets live in `dist/docs/search/` after a build. Search is a theme
+concern: `@krate/base-docs-theme` renders its `DocsSearch` component
+(combobox input, keyboard navigation, live result count) and styles it with the
+`.krate-docs-search-*` classes. Override those classes from your own stylesheet,
+or render your own search UI against the headless `window.__krateSearch` API.
+`Ctrl+K` (`Cmd+K` on macOS) focuses the search box by default. Set
+`search.hotkey` (for example `"/"`) to change the shortcut, or `"off"` to
+disable it.
+
+With [i18n](/docs/guides/internationalization/) enabled the index spans every
+locale and results are limited to the language of the page being viewed.

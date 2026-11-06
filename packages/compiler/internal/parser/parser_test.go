@@ -175,7 +175,7 @@ func TestImport(t *testing.T) {
 }
 
 func TestIfStatement(t *testing.T) {
-	prog, errs := parse(t, "if (x > 0) { return 1; } else { return 2; }")
+	prog, errs := parse(t, "if (x > 0) { y = 1; } else { y = 2; }")
 	if len(errs) > 0 {
 		t.Fatalf("unexpected errors: %v", errs)
 	}
@@ -575,4 +575,38 @@ func containsStr(s, substr string) bool {
 		}
 	}
 	return false
+}
+
+func TestMinifiedStringAfterIdentifierAndBrace(t *testing.T) {
+	for _, src := range []string{
+		`import{a}from"./b.js";export const z=a+1;`,
+		`export{a as b}from"x";`,
+		`var a,c,d;if(a){b=1}"x"==c&&d();`,
+	} {
+		if _, errs := parse(t, src); len(errs) > 0 {
+			t.Errorf("%s: %v", src, errs)
+		}
+	}
+}
+
+func TestJSXAttributeNamedExtends(t *testing.T) {
+	for _, src := range []string{
+		`x = <T extends={1}/>;`,
+		`x = <div extends="a" />;`,
+		`x = <div extends />;`,
+		`x = <my-el extends=""></my-el>;`,
+	} {
+		if _, errs := parse(t, src); len(errs) > 0 {
+			t.Errorf("%s: %v", src, errs)
+		}
+	}
+	// Real type parameter lists still parse in .ts-style generic arrows.
+	for _, src := range []string{
+		`const f = <T extends object>(x: T) => x;`,
+		`const g = <T extends {a: 1}>(x: T) => x;`,
+	} {
+		if _, errs := parse(t, src); len(errs) > 0 {
+			t.Errorf("%s: %v", src, errs)
+		}
+	}
 }

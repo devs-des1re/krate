@@ -47,7 +47,7 @@ func traceHook(name, hook string, elapsed time.Duration, err error) {
 // package's reset sequence so trace lines and build output nest cleanly.
 const cReset = "\033[0m"
 
-// Plugin is the unified plugin interface. Every plugin — built-in or community —
+// Plugin is the unified plugin interface. Every plugin - built-in or community -
 // implements this single interface. Plugins declare which lifecycle hooks they
 // use via Hooks(). Only non-nil hooks are called.
 type Plugin interface {
@@ -133,7 +133,7 @@ type BuildHookCtx struct {
 	OutDir         string           `json:"outDir"`
 	Config         interface{}      `json:"config,omitempty"` // *config.Config
 	Pages          []string         `json:"pages"`
-	GeneratedPages *[]GeneratedPage `json:"generatedPages,omitempty"` // mutable — append generated pages here
+	GeneratedPages *[]GeneratedPage `json:"generatedPages,omitempty"` // mutable - append generated pages here
 	DevMode        bool             `json:"devMode"`
 }
 
@@ -146,7 +146,7 @@ type ParseHookCtx struct {
 // MarkdownHookCtx is passed to AfterMarkdownParse hook after markdown rendering.
 type MarkdownHookCtx struct {
 	Page  string `json:"page"`
-	HTML  string `json:"html"` // mutable — plugin can modify rendered HTML
+	HTML  string `json:"html"` // mutable - plugin can modify rendered HTML
 	Title string `json:"title"`
 	Route string `json:"route"`
 }
@@ -155,10 +155,10 @@ type MarkdownHookCtx struct {
 // but before layout wrapping. All pointer fields are mutable.
 type RenderHookCtx struct {
 	Page     string `json:"page"`
-	HTML     string `json:"html"`     // mutable — plugin can modify rendered HTML
-	HeadHTML string `json:"headHTML"` // mutable — plugin can inject head content
+	HTML     string `json:"html"`     // mutable - plugin can modify rendered HTML
+	HeadHTML string `json:"headHTML"` // mutable - plugin can inject head content
 	HasJS    bool   `json:"hasJS"`
-	RawCSS   string `json:"rawCSS"` // mutable — plugin can inject additional CSS
+	RawCSS   string `json:"rawCSS"` // mutable - plugin can inject additional CSS
 }
 
 // PageHookCtx is passed to AfterPage hook after a page is fully built
@@ -166,9 +166,11 @@ type RenderHookCtx struct {
 type PageHookCtx struct {
 	Page     string `json:"page"`
 	OutName  string `json:"outName"`
-	HTML     string `json:"html"`     // mutable — plugin can modify final HTML
-	HeadHTML string `json:"headHTML"` // mutable — plugin can inject head content
+	HTML     string `json:"html"`     // mutable - plugin can modify final HTML
+	HeadHTML string `json:"headHTML"` // mutable - plugin can inject head content
 	HasJS    bool   `json:"hasJS"`
+	// IsErrorPage marks 404/500 pages, which are not part of the site's URL space.
+	IsErrorPage bool `json:"isErrorPage,omitempty"`
 }
 
 // BuildResultHookCtx is passed to AfterBuild hook after all pages are built.
@@ -188,6 +190,8 @@ type PageResult struct {
 	HTML     string `json:"html"`
 	HeadHTML string `json:"headHTML"`
 	HasJS    bool   `json:"hasJS"`
+	// IsErrorPage marks 404/500 pages, which are not part of the site's URL space.
+	IsErrorPage bool `json:"isErrorPage,omitempty"`
 }
 
 // ---------------------------------------------------------------------------
@@ -445,13 +449,26 @@ func DefaultContributedCollections(cfg *config.Config) map[string]content.Collec
 // Community plugin helpers
 // ---------------------------------------------------------------------------
 
+// HasPerPageHooks reports whether any registered native plugin implements a
+// hook that runs per page (AfterParse/AfterMarkdownParse/AfterRender/AfterPage).
+// When true, page output may depend on plugin side effects the disk build cache
+// cannot replay, so callers disable page-level caching.
+func HasPerPageHooks() bool {
+	for _, p := range DefaultRegistry.Sorted() {
+		h := p.Hooks()
+		if h.AfterParse != nil || h.AfterMarkdownParse != nil || h.AfterRender != nil || h.AfterPage != nil {
+			return true
+		}
+	}
+	return false
+}
+
 // RunCommunityPlugins runs all configured community plugins for the given hook.
 // pluginConfig is the full plugins list from config; hookName identifies which
 // hook is being executed; hookCtx is the JSON-serializable context for the hook.
 // Community plugins are JavaScript/TypeScript modules (config plugins[].module
 // points to a .js/.mjs/.cjs/.ts/.tsx file) executed inside the embedded QuickJS
 // runtime; esbuild transpiles TS entries before evaluation.
-//
 // The optional env carries build-wide context (pages dir, dev flag, resolved
 // config) that the richer `krate` object exposes. When omitted it is derived
 // from hookCtx where possible.

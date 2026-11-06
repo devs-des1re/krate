@@ -1,11 +1,13 @@
 :root {
-  --bg: #0b0e14;
-  --bg-soft: #11151f;
-  --card: #161b28;
-  --border: #232a3a;
-  --text: #e6e9f0;
-  --text-muted: #98a2b8;
+  --bg: #0a0a0a;
+  --bg-soft: #111111;
+  --card: #171717;
+  --border: #262626;
+  --text: #e5e5e5;
+  --text-muted: #a3a3a3;
   --accent: #00add8;
+  --accent-strong: #007a99;
+  --accent-strong-hover: #006b87;
   --accent-soft: rgba(0, 173, 216, 0.12);
   --radius: 10px;
   --max-width: 1080px;
@@ -49,7 +51,7 @@ code {
   padding: 0.1em 0.35em;
 }
 
-/* ─── Layout shell ─────────────────────────────────────────────── */
+/* Layout shell */
 
 .site-shell {
   min-height: 100vh;
@@ -87,7 +89,7 @@ code {
   width: 26px;
   height: 26px;
   border-radius: 7px;
-  background: var(--accent);
+  background: var(--accent-strong);
   color: #fff;
   font-weight: 800;
 }
@@ -121,7 +123,7 @@ code {
   justify-content: space-between;
 }
 
-/* ─── Hero ─────────────────────────────────────────────────────── */
+/* Hero */
 
 .hero {
   max-width: var(--max-width);
@@ -162,7 +164,7 @@ code {
   margin-bottom: 2.5rem;
 }
 
-/* ─── Buttons ──────────────────────────────────────────────────── */
+/* Buttons */
 
 .btn {
   display: inline-block;
@@ -175,12 +177,12 @@ code {
 }
 
 .btn-primary {
-  background: var(--accent);
+  background: var(--accent-strong);
   color: #fff;
 }
 
 .btn-primary:hover {
-  background: #00c0ee;
+  background: var(--accent-strong-hover);
   text-decoration: none;
 }
 
@@ -195,7 +197,7 @@ code {
   text-decoration: none;
 }
 
-/* ─── Demo card ────────────────────────────────────────────────── */
+/* Demo card */
 
 .demo {
   max-width: var(--max-width);
@@ -229,7 +231,7 @@ code {
   min-width: 44px;
 }
 
-/* ─── 404 ──────────────────────────────────────────────────────── */
+/* 404 */
 
 .not-found {
   max-width: var(--max-width);

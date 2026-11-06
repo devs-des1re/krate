@@ -123,6 +123,32 @@ func TestJSBudget(t *testing.T) {
 	}
 }
 
+func TestHydrationAndIslandBudgets(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.HydrationBudgetBytes = 100
+	cfg.IslandBudgetBytes = 100
+	cfg.RouteBudgetBytes = 100
+	page := Page{Route: "/", HTML: doc(`<h1>x</h1>`, ""), JSBytes: 200, HydrationBytes: 200, IslandBytes: 200, CSSBytes: 200}
+	fs := runOne(t, page, cfg)
+	for _, rule := range []string{"perf/hydration-budget", "perf/island-budget", "perf/route-budget"} {
+		if !hasRule(fs, rule) {
+			t.Errorf("expected %s finding, got %+v", rule, fs)
+		}
+	}
+}
+
+func TestBudgetConfig(t *testing.T) {
+	cfg, err := FromMap(map[string]any{
+		"budget": map[string]any{"js": 10, "hydration": 20, "islandJS": 30, "route": 40},
+	}, "/root", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.JSBudgetBytes != 10*1024 || cfg.HydrationBudgetBytes != 20*1024 || cfg.IslandBudgetBytes != 30*1024 || cfg.RouteBudgetBytes != 40*1024 {
+		t.Fatalf("budgets = js:%d hydration:%d island:%d route:%d", cfg.JSBudgetBytes, cfg.HydrationBudgetBytes, cfg.IslandBudgetBytes, cfg.RouteBudgetBytes)
+	}
+}
+
 func TestImageDims(t *testing.T) {
 	cfg := DefaultConfig()
 	page := Page{Route: "/", HTML: doc(`<img src="/a.png" alt="a">`, "")}
@@ -217,5 +243,62 @@ func TestFromMapAbsentInactive(t *testing.T) {
 	}
 	if len(fs) != 0 {
 		t.Errorf("inactive run should produce no findings, got %+v", fs)
+	}
+}
+
+func TestFromMapFailOnRejectsUnknownValues(t *testing.T) {
+	for _, bad := range []any{"bogus", "warnings", "", "off", "OFF", " nope "} {
+		_, err := FromMap(map[string]any{"failOn": bad}, "/root", nil)
+		if err == nil {
+			t.Errorf("failOn %q: want an error, got none", bad)
+			continue
+		}
+		msg := err.Error()
+		if !strings.Contains(msg, "checks.failOn") || !strings.Contains(msg, `"error"`) || !strings.Contains(msg, `"warning"`) {
+			t.Errorf("failOn %q: error should name the key and list valid values, got %q", bad, msg)
+		}
+	}
+	if _, err := FromMap(map[string]any{"failOn": float64(1)}, "/root", nil); err == nil {
+		t.Error("failOn: a non-string value should be an error")
+	}
+}
+
+func TestFromMapFailOnValidValues(t *testing.T) {
+	for in, want := range map[string]Severity{
+		"error": Error, "warning": Warning, "Warning": Warning, "ERROR": Error, " warn ": Warning,
+	} {
+		cfg, err := FromMap(map[string]any{"failOn": in}, "/root", nil)
+		if err != nil {
+			t.Errorf("failOn %q: %v", in, err)
+			continue
+		}
+		if cfg.FailOn != want {
+			t.Errorf("failOn %q = %v, want %v", in, cfg.FailOn, want)
+		}
+	}
+	// Absent failOn keeps the default.
+	cfg, err := FromMap(map[string]any{"seo": "warning"}, "/root", nil)
+	if err != nil || cfg.FailOn != Error {
+		t.Errorf("default failOn = %v, %v; want error", cfg.FailOn, err)
+	}
+}
+
+func TestFromMapSeverityStringsAreStrict(t *testing.T) {
+	for name, m := range map[string]map[string]any{
+		"category": {"a11y": "loud"},
+		"rule":     {"rules": map[string]any{"a11y/img-alt": "fatal"}},
+	} {
+		if _, err := FromMap(m, "/root", nil); err == nil {
+			t.Errorf("%s: unknown severity accepted", name)
+		}
+	}
+}
+
+func TestFromMapRejectsNonStringListEntries(t *testing.T) {
+	if _, err := FromMap(map[string]any{"ignore": []any{"seo/og", 7.0}}, "/root", nil); err == nil || !strings.Contains(err.Error(), "checks.ignore[1]") {
+		t.Errorf("ignore: err = %v", err)
+	}
+	if _, err := FromMap(map[string]any{"custom": []any{"a.ts", true}}, "/root", nil); err == nil || !strings.Contains(err.Error(), "checks.custom[1]") {
+		t.Errorf("custom: err = %v", err)
 	}
 }

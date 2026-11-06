@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // Tool is a callable MCP tool. InputSchema is a hand-written JSON Schema
@@ -15,6 +16,8 @@ type Tool struct {
 	Title       string
 	Description string
 	InputSchema map[string]any
+	// OutputSchema describes structuredContent when a tool returns one.
+	OutputSchema map[string]any
 	// Annotations describe tool behavior so clients can auto-approve safe
 	// calls and warn on destructive ones (readOnlyHint/destructiveHint/
 	// idempotentHint/openWorldHint, protocol 2025-03-26+).
@@ -26,8 +29,9 @@ type Tool struct {
 // IsError marks an application-level failure (the tool ran but the operation
 // failed), distinct from a protocol error.
 type ToolResult struct {
-	Content []Content
-	IsError bool
+	Content    []Content
+	Structured any
+	IsError    bool
 }
 
 // Content is a single MCP content block. Only text and resource are needed.
@@ -58,7 +62,7 @@ func JSONResult(v any) (ToolResult, *rpcError) {
 	if err != nil {
 		return ToolResult{}, Errorf("encoding result: %v", err)
 	}
-	return TextResult(string(data)), nil
+	return ToolResult{Content: []Content{TextContent(string(data))}, Structured: v}, nil
 }
 
 // marshalJSON encodes indented JSON with HTML escaping disabled so page source,
@@ -108,6 +112,9 @@ type PromptArgument struct {
 	Name        string
 	Description string
 	Required    bool
+	// Default substitutes an omitted optional argument so rendered prompts
+	// never leak unresolved {{placeholders}}.
+	Default string
 }
 
 // Prompt is a curated, templated workflow surfaced via prompts/list and
@@ -134,11 +141,25 @@ type completionFn func(ctx context.Context, value string) ([]string, error)
 // render returns the prompt's messages after argument substitution and any
 // dynamic resolution.
 func (p *Prompt) render(args map[string]any) (map[string]any, *rpcError) {
+	values := make(map[string]any, len(args)+len(p.Arguments))
+	for key, value := range args {
+		values[key] = value
+	}
+	for _, arg := range p.Arguments {
+		v, ok := values[arg.Name]
+		empty := !ok || strings.TrimSpace(fmt.Sprint(v)) == ""
+		if empty && arg.Required {
+			return nil, &rpcError{Code: codeInvalidParams, Message: "missing required prompt argument: " + arg.Name}
+		}
+		if empty && arg.Default != "" {
+			values[arg.Name] = arg.Default
+		}
+	}
 	msgs := make([]PromptMessage, len(p.Messages))
 	copy(msgs, p.Messages)
 	for i, m := range msgs {
 		if m.Content.Type == "text" {
-			msgs[i].Content.Text = renderTemplateText(m.Content.Text, args)
+			msgs[i].Content.Text = renderTemplateText(m.Content.Text, values)
 		}
 	}
 	if p.Resolve != nil {
@@ -198,6 +219,9 @@ func (s *Server) callTool(raw json.RawMessage, op *pendingOp) (any, *rpcError) {
 	var params struct {
 		Name      string         `json:"name"`
 		Arguments map[string]any `json:"arguments"`
+		Meta      struct {
+			ProgressToken any `json:"progressToken"`
+		} `json:"_meta"`
 	}
 	if len(raw) > 0 {
 		if err := json.Unmarshal(raw, &params); err != nil {
@@ -214,7 +238,46 @@ func (s *Server) callTool(raw json.RawMessage, op *pendingOp) (any, *rpcError) {
 	if params.Arguments == nil {
 		params.Arguments = map[string]any{}
 	}
-	result, rerr := tool.Handler(op.ctx, params.Arguments)
+	if params.Meta.ProgressToken != nil {
+		token := params.Meta.ProgressToken
+		op.progressToken = token
+		op.ctx = context.WithValue(op.ctx, progressKey{}, progressFn(func(progress, total float64, message string) {
+			s.writeProgress(token, progress, total, message)
+		}))
+	}
+	started := time.Now()
+	var result ToolResult
+	var rerr *rpcError
+	func() {
+		defer func() {
+			if rec := recover(); rec != nil {
+				rerr = &rpcError{Code: codeInternalError, Message: fmt.Sprintf("tool %s panicked: %v", params.Name, rec)}
+			}
+		}()
+		result, rerr = tool.Handler(op.ctx, params.Arguments)
+	}()
+	readOnly, _ := tool.Annotations["readOnlyHint"].(bool)
+	apply, _ := params.Arguments["apply"].(bool)
+	rec := auditRecord{
+		Event:      "tool_call",
+		Tool:       params.Name,
+		ReadOnly:   readOnly,
+		Apply:      apply,
+		Status:     "ok",
+		DurationMS: time.Since(started).Milliseconds(),
+		Args:       auditArgs(params.Arguments),
+		Paths:      auditPaths(params.Arguments),
+	}
+	if rerr != nil {
+		rec.Status = "error"
+		rec.Error = rerr.Message
+	} else if result.IsError {
+		rec.Status = "error"
+		if len(result.Content) > 0 {
+			rec.Error = result.Content[0].Text
+		}
+	}
+	s.audit(rec)
 	if rerr != nil {
 		return nil, rerr
 	}
@@ -222,10 +285,14 @@ func (s *Server) callTool(raw json.RawMessage, op *pendingOp) (any, *rpcError) {
 	if content == nil {
 		content = []Content{}
 	}
-	return map[string]any{
+	out := map[string]any{
 		"content": content,
 		"isError": result.IsError,
-	}, nil
+	}
+	if result.Structured != nil {
+		out["structuredContent"] = result.Structured
+	}
+	return out, nil
 }
 
 func (s *Server) readResource(raw json.RawMessage) (any, *rpcError) {
@@ -314,7 +381,7 @@ func expandURITemplate(tmpl, uri string) (map[string]string, bool) {
 }
 
 func splitTemplateSegments(tmpl string) []string {
-	// "krate://page/{route}" → ["krate:", "", "page", "{route}"]
+	// "krate://page/{route}" -> ["krate:", "", "page", "{route}"]
 	return splitPath(tmpl)
 }
 
@@ -426,27 +493,46 @@ func argBool(args map[string]any, key string, def bool) bool {
 	return def
 }
 
-// argStringSlice extracts a []string argument (strings or []any of strings).
-func argStringSlice(args map[string]any, key string) []string {
-	switch v := args[key].(type) {
-	case []string:
-		return v
-	case []any:
-		out := make([]string, 0, len(v))
-		for _, item := range v {
-			if s, ok := item.(string); ok {
-				out = append(out, s)
-			}
-		}
-		return out
+func argInt(args map[string]any, key string, def int) int {
+	if v, ok := args[key].(float64); ok {
+		return int(v)
 	}
-	return nil
+	if v, ok := args[key].(int); ok {
+		return v
+	}
+	return def
 }
 
 // argStringMap extracts a map[string]any argument.
 func argStringMap(args map[string]any, key string) map[string]any {
 	if m, ok := args[key].(map[string]any); ok {
 		return m
+	}
+	return nil
+}
+
+// argStringList extracts a string array. A single string is accepted for
+// convenience.
+func argStringList(args map[string]any, key string) []string {
+	raw, ok := args[key]
+	if !ok {
+		return nil
+	}
+	switch v := raw.(type) {
+	case string:
+		if v = strings.TrimSpace(v); v != "" {
+			return []string{v}
+		}
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			if s, ok := item.(string); ok && strings.TrimSpace(s) != "" {
+				out = append(out, strings.TrimSpace(s))
+			}
+		}
+		return out
+	case []string:
+		return v
 	}
 	return nil
 }

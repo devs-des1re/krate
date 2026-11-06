@@ -1,7 +1,7 @@
 ---
 title: Testing
-order: 10
-description: Test Krate apps — build checks, types, and browserless component tests.
+order: 13
+description: Test Krate apps - build checks, types, and browserless component tests.
 ---
 
 # Testing
@@ -93,7 +93,7 @@ Static pages are plain HTML, so most assertions are just string/DOM checks on
 
 `src/api/*.ts` handlers are ordinary functions. With the embedded QuickJS
 runtime they run in-process; for Node semantics, test the compiled
-`dist/api/*.js` directly with Node.
+`dist/.krate/api-node/*.js` directly with Node.
 
 ## See also
 

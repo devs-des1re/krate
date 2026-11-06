@@ -1,53 +1,47 @@
 import './switch.css';
-import { createSignal, createEffect } from '@krate/runtime';
+import '../visually-hidden/visually-hidden.css';
 
 export interface SwitchProps {
-  checked?: boolean;
-  defaultChecked?: boolean;
-  onCheckedChange?: (checked: boolean) => void;
-  disabled?: boolean;
+  /** Accessible label for the switch. */
+  label?: string;
+  children?: any;
+  /** Name the switch is submitted under in a form. */
   name?: string;
+  /** Submitted value when on (default "on"). */
   value?: string;
+  /** Initial state. The switch is uncontrolled: the browser owns it afterwards. */
+  defaultChecked?: boolean;
+  disabled?: boolean;
+  required?: boolean;
+  /** Put on the input, so `<Label htmlFor>` can point at it. */
   id?: string;
+  class?: string;
+  /** Alias of `class`. */
+  className?: string;
 }
 
+/**
+ * Switch. Zero JS: a native checkbox with role=switch inside a label, styled
+ * with `:checked`. It submits with a form under `name`/`value`, is named by the
+ * label text and operable with Space.
+ */
 export function Switch(props: SwitchProps) {
-  var [checked, setChecked] = createSignal(props.defaultChecked || false);
-
-  createEffect(function () {
-    if (props.checked !== undefined) {
-      setChecked(props.checked);
-    }
-  });
-
-  function toggle() {
-    if (props.disabled) return;
-    var next = !checked();
-    setChecked(next);
-    if (props.onCheckedChange) {
-      props.onCheckedChange(next);
-    }
-  }
-
-  function handleKeyDown(e: KeyboardEvent) {
-    if (e.key === " " || e.key === "Enter") {
-      e.preventDefault();
-      toggle();
-    }
-  }
-
   return (
-    <button
-      class={"krate-switch" + (checked() ? " krate-switch-checked" : "")}
-      role="switch"
-      type="button"
-      aria-checked={checked() ? "true" : "false"}
-      data-state={checked() ? "checked" : "unchecked"}
-      disabled={props.disabled}
-      onClick={toggle}
-      onKeyDown={handleKeyDown}
-    >
+    <label class={"krate-switch" + (props.class ? " " + props.class : "") + (props.className ? " " + props.className : "")}>
+      <input
+        class="krate-switch-input"
+        type="checkbox"
+        role="switch"
+        id={props.id}
+        name={props.name}
+        value={props.value}
+        defaultChecked={props.defaultChecked}
+        disabled={props.disabled}
+        required={props.required}
+      />
       <span class="krate-switch-thumb" />
-    </button>
+      <span class="krate-visually-hidden">{props.label}</span>
+      {props.children}
+    </label>
   );
 }

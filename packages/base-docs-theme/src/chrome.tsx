@@ -15,6 +15,8 @@ interface SidebarItem {
 interface SidebarSectionProps {
   item: SidebarItem;
   currentPath: string;
+  /** Ancestor-derived key used to persist this section's open/closed state. */
+  parentKey?: string;
 }
 
 function sectionHasActive(item: SidebarItem, currentPath: string): boolean {
@@ -36,34 +38,35 @@ function SidebarSection(props: SidebarSectionProps) {
   const isCollapsible = item.collapsible;
   const containsActive = sectionHasActive(item, currentPath);
   const open = !isCollapsible || item.expanded || containsActive;
+  const navKey = (props.parentKey ? props.parentKey + "/" : "") + (item.indexURL || item.title);
 
   if (!hasChildren && item.url) {
     return (
-      <a
-        class={`sidebar-link${containsActive ? ' active' : ''}`}
+      <Link
+        className={`sidebar-link${containsActive ? ' active' : ''}`}
         href={item.url}
       >
         {item.icon && <span class="sidebar-icon"><Icon name={item.icon} width="16" height="16" /></span>}
         <span class="sidebar-label">{item.title}</span>
         {item.badge && <span class={`sidebar-badge${item.badge.variant ? " sidebar-badge-" + item.badge.variant : ""}`}>{item.badge.text}</span>}
-      </a>
+      </Link>
     );
   }
 
   const sectionClass = `sidebar-section${isCollapsible ? ' sidebar-collapsible' : ' sidebar-section-static'}${open ? ' open' : ' collapsed'}${containsActive ? ' active' : ''}`;
 
   return (
-    <div class={sectionClass}>
+    <div class={sectionClass} data-nav-key={navKey}>
       <div class="sidebar-section-row">
         {item.indexURL ? (
-          <a
-            class={`sidebar-section-link${item.indexURL === currentPath ? ' active' : ''}`}
+          <Link
+            className={`sidebar-section-link${item.indexURL === currentPath ? ' active' : ''}`}
             href={item.indexURL}
           >
             {item.icon && <span class="sidebar-icon"><Icon name={item.icon} width="16" height="16" /></span>}
             <span class="sidebar-label">{item.title}</span>
             {item.badge && <span class={`sidebar-badge${item.badge.variant ? " sidebar-badge-" + item.badge.variant : ""}`}>{item.badge.text}</span>}
-          </a>
+          </Link>
         ) : (
           <span class="sidebar-section-link">
             {item.icon && <span class="sidebar-icon"><Icon name={item.icon} width="16" height="16" /></span>}
@@ -84,7 +87,7 @@ function SidebarSection(props: SidebarSectionProps) {
       </div>
       <div class="sidebar-section-children">
         {item.children && item.children.map((child) => (
-          <SidebarSection item={child} currentPath={currentPath} />
+          <SidebarSection item={child} currentPath={currentPath} parentKey={navKey} />
         ))}
       </div>
     </div>
@@ -145,12 +148,51 @@ export function SidebarNav(props: SidebarNavProps) {
       }
     }
 
+    // Folder (section) open/closed state persists across reloads + SPA
+    // navigation, keyed by the section's ancestor path.
+    var STORAGE_PREFIX = "krate-docs-nav:";
+    function readNavState(key: string): string | null {
+      try {
+        return window.localStorage.getItem(STORAGE_PREFIX + key);
+      } catch (e) {
+        return null;
+      }
+    }
+    function writeNavState(key: string, open: boolean) {
+      try {
+        window.localStorage.setItem(STORAGE_PREFIX + key, open ? "open" : "closed");
+      } catch (e) {
+        /* storage unavailable (private mode) - ignore */
+      }
+    }
+    function restoreNavState() {
+      var sections = el.querySelectorAll(".sidebar-collapsible[data-nav-key]");
+      for (var i = 0; i < sections.length; i++) {
+        var section = sections[i] as HTMLElement;
+        // Always reveal the section that contains the current page.
+        if (section.classList.contains("active")) {
+          setSectionOpen(section, true);
+          continue;
+        }
+        var key = section.getAttribute("data-nav-key");
+        if (!key) continue;
+        var stored = readNavState(key);
+        if (stored === "open") setSectionOpen(section, true);
+        else if (stored === "closed") setSectionOpen(section, false);
+      }
+    }
+
     function onClick(e: MouseEvent) {
       var target = e.target as HTMLElement;
       var toggle = target.closest(".sidebar-section-toggle") as HTMLElement | null;
       if (toggle) {
         var section = toggle.closest(".sidebar-collapsible") as HTMLElement | null;
-        if (section) setSectionOpen(section, !section.classList.contains("open"));
+        if (section) {
+          var willOpen = !section.classList.contains("open");
+          setSectionOpen(section, willOpen);
+          var key = section.getAttribute("data-nav-key");
+          if (key) writeNavState(key, willOpen);
+        }
         return;
       }
       var link = target.closest("a[href]") as HTMLElement | null;
@@ -159,6 +201,7 @@ export function SidebarNav(props: SidebarNavProps) {
 
     el.addEventListener("click", onClick);
     refreshActive();
+    restoreNavState();
   });
 
   return (
@@ -216,7 +259,7 @@ export function TOCNav(props: TOCNavProps) {
     var currentDir = "down";
     var lastScrollTop = 0;
 
-    // ─── SVG rail indicator ─────────────────────────────────────────────
+    // SVG rail indicator
     var indicatorSvg: SVGSVGElement | null = null;
     var railPath: SVGPathElement | null = null;
     var linePath: SVGPathElement | null = null;
@@ -228,6 +271,10 @@ export function TOCNav(props: TOCNavProps) {
     var animEnd = 0;
     var targetStart = 0;
     var targetEnd = 0;
+    // The rail geometry depends on the link layout only, not on scroll
+    // position, so it is measured once and again when the nav resizes.
+    var railPoints: RailPoint[] = [];
+    var railDirty = true;
 
     function tocDepth(link: HTMLElement): number {
       var raw = parseInt(link.getAttribute("data-depth") || "2", 10);
@@ -237,6 +284,13 @@ export function TOCNav(props: TOCNavProps) {
 
     function ensureIndicatorSvg() {
       if (indicatorSvg) return;
+      // SPA navigation re-runs this component against the kept <nav> element,
+      // so a previous mount's manually-appended indicator would otherwise
+      // accumulate. Remove any stale indicator before creating a fresh one.
+      var stale = nav.querySelectorAll(".toc-indicator-svg");
+      for (var s = 0; s < stale.length; s++) {
+        stale[s].remove();
+      }
       var ns = "http://www.w3.org/2000/svg";
       var svg = document.createElementNS(ns, "svg");
       svg.setAttribute("class", "toc-indicator-svg");
@@ -318,24 +372,16 @@ export function TOCNav(props: TOCNavProps) {
       }
     }
 
-    function updateLineCoords() {
-      if (!links.length || !indicatorSvg || !railPath || !linePath) return;
+    // Measures the links and rebuilds the rail path. Reads layout, so it runs
+    // only when the geometry may have changed (railDirty), not on every scroll
+    // frame.
+    function rebuildRail(): boolean {
+      if (!indicatorSvg || !railPath || !linePath) return false;
       var navRect = nav.getBoundingClientRect();
-      var railPoints: RailPoint[] = [];
-      var targetLinks: HTMLElement[] = [];
-      var activeLink = activeId ? byId[activeId] : null;
-
+      railPoints = [];
       for (var i = 0; i < links.length; i++) {
         railPoints.push(pointForLink(links[i], navRect));
-        var linkId = links[i].getAttribute("data-id") || "";
-        if (visibleHeadingIds[linkId]) targetLinks.push(links[i]);
       }
-
-      if (activeLink && targetLinks.indexOf(activeLink) === -1) targetLinks.push(activeLink);
-      targetLinks.sort(function (a, b) {
-        return a.getBoundingClientRect().top - b.getBoundingClientRect().top;
-      });
-
       var height = Math.max(nav.scrollHeight, navRect.height, 1);
       indicatorSvg.setAttribute("viewBox", "0 0 34 " + height.toFixed(1));
       indicatorSvg.style.height = height + "px";
@@ -343,39 +389,82 @@ export function TOCNav(props: TOCNavProps) {
       var railD = generateCurvedPath(railPoints);
       railPath.setAttribute("d", railD);
       linePath.setAttribute("d", railD);
-
       try {
         currentPathLength = linePath.getTotalLength();
       } catch (err) {
         currentPathLength = 0;
       }
-      if (!currentPathLength || !targetLinks.length) {
+      // A hidden nav (closed mobile drawer) measures as empty: measure again
+      // once it has a size.
+      railDirty = navRect.height === 0;
+      return true;
+    }
+
+    // The rail only runs downwards, so y is non-decreasing along the path and
+    // the length at a given y can be found by bisection instead of sampling.
+    function pathY(len: number): number {
+      return (linePath as SVGPathElement).getPointAtLength(len).y;
+    }
+
+    // First length whose y reaches minY, or 0 when the path never does.
+    function firstLengthAtOrBelow(minY: number): number {
+      var total = currentPathLength;
+      if (pathY(0) >= minY) return 0;
+      if (pathY(total) < minY) return 0;
+      var lo = 0;
+      var hi = total;
+      for (var n = 0; n < 14; n++) {
+        var mid = (lo + hi) / 2;
+        if (pathY(mid) >= minY) hi = mid;
+        else lo = mid;
+      }
+      return hi;
+    }
+
+    // Last length whose y is still within maxY, or the full length when none is.
+    function lastLengthAtOrAbove(maxY: number): number {
+      var total = currentPathLength;
+      if (pathY(0) > maxY) return total;
+      if (pathY(total) <= maxY) return total;
+      var lo = 0;
+      var hi = total;
+      for (var n = 0; n < 14; n++) {
+        var mid = (lo + hi) / 2;
+        if (pathY(mid) <= maxY) lo = mid;
+        else hi = mid;
+      }
+      return lo;
+    }
+
+    function updateLineCoords() {
+      if (!links.length || !indicatorSvg || !railPath || !linePath) return;
+      if (railDirty || !railPoints.length) rebuildRail();
+
+      if (!currentPathLength) {
         linePath.style.strokeDasharray = "0 1";
-        circleEl.classList.remove("visible");
+        if (circleEl) circleEl.classList.remove("visible");
         return;
       }
 
-      var targetPoints: RailPoint[] = [];
-      for (var j = 0; j < targetLinks.length; j++) {
-        targetPoints.push(pointForLink(targetLinks[j], navRect));
-      }
-      var startY = targetPoints[0].yStart;
-      var endY = targetPoints[targetPoints.length - 1].yEnd;
-
-      targetStart = 0;
-      targetEnd = currentPathLength;
-      var foundStart = false;
-      var steps = Math.max(80, Math.min(240, Math.round(currentPathLength / 2)));
-      for (var step = 0; step <= steps; step++) {
-        var len = (step / steps) * currentPathLength;
-        var pt = linePath.getPointAtLength(len);
-        if (!foundStart && pt.y >= startY - 1) {
-          targetStart = len;
-          foundStart = true;
+      // Links are in document order, so index order is top-to-bottom order.
+      var activeLink = activeId ? byId[activeId] : null;
+      var first = -1;
+      var last = -1;
+      for (var i = 0; i < links.length; i++) {
+        var linkId = links[i].getAttribute("data-id") || "";
+        if (visibleHeadingIds[linkId] || links[i] === activeLink) {
+          if (first < 0) first = i;
+          last = i;
         }
-        if (pt.y <= endY + 1) targetEnd = len;
       }
-      targetEnd = Math.max(targetStart, targetEnd);
+      if (first < 0) {
+        linePath.style.strokeDasharray = "0 1";
+        if (circleEl) circleEl.classList.remove("visible");
+        return;
+      }
+
+      targetStart = firstLengthAtOrBelow(railPoints[first].yStart - 1);
+      targetEnd = Math.max(targetStart, lastLengthAtOrAbove(railPoints[last].yEnd + 1));
 
       if (!isAnimating) {
         if (animStart === 0 && animEnd === 0) {
@@ -420,7 +509,7 @@ export function TOCNav(props: TOCNavProps) {
       return current ? current.id : "";
     }
 
-    function setActive(id: string) {
+    function setActive(id: string, deferLine?: boolean) {
       if (!id) {
         updateLineCoords();
         return;
@@ -436,6 +525,7 @@ export function TOCNav(props: TOCNavProps) {
         if (firstText === "" && links[i].textContent) firstText = links[i].textContent.trim();
       }
       if (label && !label.textContent && firstText) label.textContent = firstText;
+      if (deferLine) return;
       updateLineCoords();
     }
 
@@ -456,6 +546,7 @@ export function TOCNav(props: TOCNavProps) {
       scheduleUpdate();
     }
     function onResize() {
+      railDirty = true;
       scheduleUpdate();
     }
     function onHashChange() {
@@ -483,7 +574,26 @@ export function TOCNav(props: TOCNavProps) {
     if (tocCurrent) tocCurrent.textContent = (links[0].textContent || "On this page").trim();
     refreshVisible();
     var initial = window.location.hash ? decodeURIComponent(window.location.hash.slice(1)) : computeActive();
-    setActive(initial || (headings[0] && headings[0].id));
+    // Labels and classes now; the rail indicator is decorative and measures
+    // layout, so it is drawn once the page is idle rather than during hydration.
+    setActive(initial || (headings[0] && headings[0].id), true);
+    var drawRail = function () {
+      updateLineCoords();
+    };
+    if (typeof window.requestIdleCallback === "function") window.requestIdleCallback(drawRail, { timeout: 400 });
+    else window.setTimeout(drawRail, 50);
+
+    // The nav changes size when a drawer opens or fonts load.
+    if ("ResizeObserver" in window) {
+      var navObserver = new ResizeObserver(function () {
+        railDirty = true;
+        scheduleUpdate();
+      });
+      navObserver.observe(nav);
+      onCleanup(function () {
+        navObserver.disconnect();
+      });
+    }
 
     if ("IntersectionObserver" in window) {
       var observer = new IntersectionObserver(scheduleUpdate, {
@@ -536,14 +646,14 @@ export function Breadcrumbs(props: BreadcrumbsProps) {
   if (!items || items.length === 0) return <span />;
 
   return (
-    <nav class="breadcrumbs">
+    <nav class="breadcrumbs" aria-label="Breadcrumb">
       {items.map((item, i) => (
         <span>
           {i > 0 && <span class="sep"> / </span>}
           {item.isLast ? (
             <span class="current">{item.label}</span>
           ) : (
-            <a href={`/docs${item.url}`}>{item.label}</a>
+            <Link href={item.url}>{item.label}</Link>
           )}
         </span>
       ))}
@@ -571,16 +681,16 @@ export function PrevNext(props: PrevNextProps) {
   return (
     <div class="docs-nav">
       {hasPrev && (
-        <a class="nav-prev" href={prevLink}>
-          <span class="nav-direction">Previous</span>
+        <Link className="nav-prev" href={prevLink}>
+          <span class="nav-label">Previous</span>
           <span class="nav-title">{prevTitle}</span>
-        </a>
+        </Link>
       )}
       {hasNext && (
-        <a class="nav-next" href={nextLink}>
-          <span class="nav-direction">Next</span>
+        <Link className="nav-next" href={nextLink}>
+          <span class="nav-label">Next</span>
           <span class="nav-title">{nextTitle}</span>
-        </a>
+        </Link>
       )}
     </div>
   );
@@ -601,9 +711,9 @@ export function SocialLinks(props: SocialLinksProps) {
   if (!links || links.length === 0) return <span />;
 
   return (
-    <span>
+    <span class="social-links-list">
       {links.map((link) => (
-        <a class="social-link" href={link.url}>
+        <a class="social-link" href={link.url} aria-label={link.name} title={link.name}>
           <Icon name={link.icon} width="20" height="20" />
         </a>
       ))}

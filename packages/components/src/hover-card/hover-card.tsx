@@ -1,93 +1,135 @@
 import './hover-card.css';
-import { createSignal, createEffect, onCleanup } from '@krate/runtime';
+import { createContext, onMount, Slot } from '@krate/runtime';
+
+const HoverCardCtx = createContext<string>('');
 
 export interface HoverCardProps {
   children?: any;
-  openDelay?: number;
-  closeDelay?: number;
+  /** Optional id for the content. Without it the trigger is linked to the content when the page loads. */
+  id?: string;
+  class?: string;
+  /** Alias of `class`. */
+  className?: string;
 }
 
+/**
+ * Hover card. Shows on hover and keyboard focus with CSS. The trigger is linked
+ * to the card with `aria-describedby`, and Escape hides the card while the
+ * pointer or focus is on it.
+ *
+ * ```tsx
+ * <HoverCard>
+ *   <HoverCard.Trigger>@user</HoverCard.Trigger>
+ *   <HoverCard.Content>Profile summary</HoverCard.Content>
+ * </HoverCard>
+ * ```
+ *
+ * To attach the card to a real link, use `<HoverCard.Trigger asChild>` around it.
+ */
 export function HoverCard(props: HoverCardProps) {
-  var openDelay = props.openDelay || 200;
-  var closeDelay = props.closeDelay || 150;
-  var [open, setOpen] = createSignal(false);
-  var openTimer: any = null;
-  var closeTimer: any = null;
+  var root: HTMLElement | null = null;
+  var given = props.id || "";
 
-  function handleMouseOver(e: MouseEvent) {
-    var related = e.relatedTarget as HTMLElement;
-    var root = (e.target as HTMLElement).closest("[data-krate-hover-card]") as HTMLElement;
+  // Without an explicit `id`, link the trigger to the content on mount: the
+  // ids must be unique per instance and are not known when the page is built.
+  onMount(function () {
     if (!root) return;
-    if (related && root.contains(related)) return;
-    var oDelay = Number(root.getAttribute("data-open-delay")) || 200;
-    clearTimeout(closeTimer);
-    openTimer = setTimeout(function () {
-      setOpen(true);
-    }, oDelay);
-  }
-
-  function handleMouseOut(e: MouseEvent) {
-    var related = e.relatedTarget as HTMLElement;
-    var root = (e.target as HTMLElement).closest("[data-krate-hover-card]") as HTMLElement;
-    if (!root) return;
-    if (related && root.contains(related)) return;
-    var cDelay = Number(root.getAttribute("data-close-delay")) || 150;
-    clearTimeout(openTimer);
-    closeTimer = setTimeout(function () {
-      setOpen(false);
-    }, cDelay);
-  }
-
-  onCleanup(function () {
-    clearTimeout(openTimer);
-    clearTimeout(closeTimer);
+    var trigger = root.querySelector(".krate-hover-card-trigger") as HTMLElement | null;
+    var content = root.querySelector(".krate-hover-card-content") as HTMLElement | null;
+    if (!trigger || !content) return;
+    if (!content.id) content.id = "krate-hover-card-" + Math.random().toString(36).slice(2, 8);
+    trigger.setAttribute("aria-describedby", content.id);
   });
 
+  function onEnter(e: Event) {
+    var root = e.currentTarget as HTMLElement;
+    root.removeAttribute("data-dismissed");
+    var onKey = function (ev: KeyboardEvent) {
+      if (ev.key === "Escape") root.setAttribute("data-dismissed", "true");
+    };
+    document.addEventListener("keydown", onKey);
+    (root as any).__krateCardKey = onKey;
+  }
+
+  function onLeave(e: Event) {
+    var root = e.currentTarget as HTMLElement;
+    var onKey = (root as any).__krateCardKey;
+    if (onKey) document.removeEventListener("keydown", onKey);
+    (root as any).__krateCardKey = null;
+    root.removeAttribute("data-dismissed");
+  }
+
+  function onKeyDown(e: KeyboardEvent) {
+    if (e.key === "Escape") (e.currentTarget as HTMLElement).setAttribute("data-dismissed", "true");
+  }
+
+  function onBlur(e: FocusEvent) {
+    var root = e.currentTarget as HTMLElement;
+    if (!root.contains(e.relatedTarget as Node | null)) root.removeAttribute("data-dismissed");
+  }
+
   return (
-    <div
-      class="krate-hover-card"
-      data-krate-hover-card="true"
-      data-state={open() ? "open" : "closed"}
-      data-open-delay={openDelay}
-      data-close-delay={closeDelay}
-      onMouseOver={handleMouseOver}
-      onMouseOut={handleMouseOut}
-    >
-      {props.children}
-    </div>
+    <HoverCardCtx.Provider value={given}>
+      <span
+        class={"krate-hover-card" + (props.class ? " " + props.class : "") + (props.className ? " " + props.className : "")}
+        ref={function (el: Element) { root = el as HTMLElement; }}
+        onMouseEnter={onEnter}
+        onMouseLeave={onLeave}
+        onKeyDown={onKeyDown}
+        onBlur={onBlur}
+      >
+        {props.children}
+      </span>
+    </HoverCardCtx.Provider>
   );
 }
 
 export interface HoverCardTriggerProps {
   children?: any;
+  /** Attach the card to the single child element (a link or button) instead of a focusable span. */
+  asChild?: boolean;
+  class?: string;
+  /** Alias of `class`. */
+  className?: string;
 }
 
+/** @deprecated Use `HoverCard.Trigger` instead. */
 export function HoverCardTrigger(props: HoverCardTriggerProps) {
+  var id = HoverCardCtx.use();
+  var className = "krate-hover-card-trigger";
+  if (props.class) className += " " + props.class;
+  if (props.className) className += " " + props.className;
+  if (props.asChild) {
+    return <Slot class={className} aria-describedby={id || undefined}>{props.children}</Slot>;
+  }
   return (
-    <div class="krate-hover-card-trigger">
+    <span class={className} tabIndex={0} aria-describedby={id || undefined}>
       {props.children}
-    </div>
+    </span>
   );
 }
 
 export interface HoverCardContentProps {
   children?: any;
-  align?: 'start' | 'center' | 'end';
-  side?: 'top' | 'bottom';
+  class?: string;
+  /** Alias of `class`. */
+  className?: string;
 }
 
+/** @deprecated Use `HoverCard.Content` instead. */
 export function HoverCardContent(props: HoverCardContentProps) {
-  var children = props.children || "";
-  var align = props.align || "center";
-  var side = props.side || "bottom";
-
-  var className = "krate-hover-card-content krate-hover-card-content-" + side;
-  if (align === "end") className += " krate-hover-card-align-end";
-  else if (align === "center") className += " krate-hover-card-align-center";
-
+  var id = HoverCardCtx.use();
   return (
-    <div class={className}>
-      {children}
-    </div>
+    <span class={"krate-hover-card-content" + (props.class ? " " + props.class : "") + (props.className ? " " + props.className : "")} role="group" id={id || undefined}>
+      {props.children}
+    </span>
   );
 }
+
+export interface HoverCard {
+  Trigger: typeof HoverCardTrigger;
+  Content: typeof HoverCardContent;
+}
+
+HoverCard.Trigger = HoverCardTrigger;
+HoverCard.Content = HoverCardContent;

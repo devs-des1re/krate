@@ -5,8 +5,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 
+	"github.com/kratejs/krate/packages/compiler/internal/astprint"
 	"github.com/kratejs/krate/packages/compiler/internal/check"
 )
 
@@ -41,13 +43,15 @@ func (b *Builder) runQualityChecks(results []*PageResult, runtimeJSFile string) 
 	}
 
 	pages := b.checkPages(results, runtimeJSFile)
+	b.attachPrograms(pages, cfg)
+	cfg.Routes = routeSet(pages)
 	findings, err := check.Run(cfg, pages)
 	if err != nil {
 		return fmt.Errorf("running checks: %w", err)
 	}
 	if len(findings) == 0 {
 		if b.Verbose {
-			fmt.Printf("  %s✓%s Quality checks passed (%d pages)\n", cGreen, cReset, len(pages))
+			printf("  %s+%s Quality checks passed (%d pages)\n", cGreen, cReset, len(pages))
 		}
 		return nil
 	}
@@ -69,7 +73,7 @@ func (b *Builder) runQualityChecks(results []*PageResult, runtimeJSFile string) 
 	if len(shown) > 0 {
 		fmt.Print(check.FormatWith(shown, fopts))
 	}
-	fmt.Printf("  %s⚡%s Checks: %s\n", cCyan, cReset, check.Summary(errs, warns, fopts))
+	printf("  %s*%s Checks: %s\n", cCyan, cReset, check.Summary(errs, warns, fopts))
 
 	if check.Failing(findings, cfg.FailOn) {
 		return fmt.Errorf("quality checks failed (%d error(s))", errs)
@@ -86,13 +90,20 @@ func (b *Builder) checkPages(results []*PageResult, runtimeJSFile string) []chec
 		if r == nil || r.IsErrorPage {
 			continue
 		}
-		jsBytes := runtimeBytes + len(r.HydrationJS)
+		hydrationBytes := len(r.HydrationJS)
+		jsBytes := hydrationBytes
+		if pageNeedsRuntime(r) {
+			jsBytes += runtimeBytes
+		}
 		pages = append(pages, check.Page{
-			Route:     routeFromOutName(r.OutName),
-			RelSource: r.SourcePath,
-			HTML:      r.FinalHTML,
-			JSBytes:   jsBytes,
-			Program:   r.Program,
+			Route:          routeFromOutName(r.OutName),
+			RelSource:      r.SourcePath,
+			HTML:           r.FinalHTML,
+			JSBytes:        jsBytes,
+			HydrationBytes: hydrationBytes,
+			IslandBytes:    islandBytesForJSText(b.Cfg.OutDir, r.HydrationJS),
+			CSSBytes:       len(r.CSS),
+			Program:        r.Program,
 		})
 	}
 	return pages
@@ -120,11 +131,44 @@ func (b *Builder) CheckSite(useDefaults bool) ([]check.Finding, check.Config, er
 	if err != nil {
 		return nil, cfg, err
 	}
+	b.attachPrograms(pages, cfg)
+	cfg.Routes = routeSet(pages)
 	findings, err := check.Run(cfg, pages)
 	if err != nil {
 		return nil, cfg, err
 	}
 	return findings, cfg, nil
+}
+
+// attachPrograms gives AST-based rules a parsed program for every page. Pages
+// replayed from the build cache, and every page under `krate check` (which only
+// reads dist/), carry no in-memory AST; without this their AST rules and
+// custom-rule `page.ast` would silently see null. Custom rules always get the
+// freshly parsed source so cold, warm and `krate check` runs see the same shape.
+func (b *Builder) attachPrograms(pages []check.Page, cfg check.Config) {
+	for i := range pages {
+		p := &pages[i]
+		if p.RelSource == "" || (p.Program != nil && len(cfg.Custom) == 0) {
+			continue
+		}
+		switch strings.ToLower(filepath.Ext(p.RelSource)) {
+		case ".tsx", ".ts", ".jsx", ".js":
+		default:
+			continue
+		}
+		src := p.RelSource
+		if !filepath.IsAbs(src) {
+			src = filepath.Join(b.Root, filepath.FromSlash(src))
+		}
+		data, err := os.ReadFile(src)
+		if err != nil {
+			continue
+		}
+		prog, perrs, _ := astprint.Parse(string(data))
+		if len(perrs) == 0 && prog != nil {
+			p.Program = prog
+		}
+	}
 }
 
 // loadBuiltPages walks the output directory collecting each page's final HTML
@@ -162,12 +206,21 @@ func (b *Builder) loadBuiltPages() ([]check.Page, error) {
 		if err != nil {
 			return nil
 		}
-		jsBytes := runtimeBytes + pageJSBytes(filepath.Dir(path))
+		hydrationBytes := pageJSBytes(filepath.Dir(path))
+		jsBytes := hydrationBytes
+		html := string(data)
+		// A page that does not link the runtime chunk does not load it.
+		if rt := manifest.runtimeJS(); rt != "" && strings.Contains(html, rt) {
+			jsBytes += runtimeBytes
+		}
 		pages = append(pages, check.Page{
-			Route:     route,
-			RelSource: manifest.sourceFor(route),
-			HTML:      string(data),
-			JSBytes:   jsBytes,
+			Route:          route,
+			RelSource:      manifest.sourceFor(route),
+			HTML:           html,
+			JSBytes:        jsBytes,
+			HydrationBytes: hydrationBytes,
+			IslandBytes:    islandBytesForPage(b.Cfg.OutDir, filepath.Dir(path), html),
+			CSSBytes:       pageCSSBytes(b.Cfg.OutDir, html),
 		})
 		return nil
 	})
@@ -175,6 +228,87 @@ func (b *Builder) loadBuiltPages() ([]check.Page, error) {
 		return nil, err
 	}
 	return pages, nil
+}
+
+var islandChunkRe = regexp.MustCompile(`chunks/island_[A-Za-z0-9]+\.js`)
+var islandSharedRe = regexp.MustCompile(`\./(isl-[A-Za-z0-9]+\.js)`)
+
+// islandChunkBytes is the size of an island entry plus the shared chunks it
+// imports (each file counted once through seen).
+func islandChunkBytes(outDir, rel string, seen map[string]bool) int {
+	if seen[rel] {
+		return 0
+	}
+	seen[rel] = true
+	path := filepath.Join(outDir, filepath.FromSlash(rel))
+	total := fileSize(path)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return total
+	}
+	for _, m := range islandSharedRe.FindAllStringSubmatch(string(data), -1) {
+		total += islandChunkBytes(outDir, "chunks/"+m[1], seen)
+	}
+	return total
+}
+
+var cssLinkRe = regexp.MustCompile(`(?i)<link[^>]+href=["']([^"']+\.css)["']`)
+
+// islandBytesForJSText sums the generated island chunks referenced by a page
+// hydration script. Island URLs are already resolved to /chunks/... paths.
+func islandBytesForJSText(outDir, js string) int {
+	seen := map[string]bool{}
+	total := 0
+	for _, rel := range islandChunkRe.FindAllString(js, -1) {
+		total += islandChunkBytes(outDir, rel, seen)
+	}
+	return total
+}
+
+// islandBytesForPage handles `krate check`, where the hydration script is on
+// disk rather than in memory.
+func islandBytesForPage(outDir, pageDir, html string) int {
+	seen := map[string]bool{}
+	total := 0
+	add := func(src string) {
+		for _, rel := range islandChunkRe.FindAllString(src, -1) {
+			total += islandChunkBytes(outDir, rel, seen)
+		}
+	}
+	add(html)
+	entries, err := os.ReadDir(pageDir)
+	if err != nil {
+		return total
+	}
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".js") || strings.HasSuffix(e.Name(), ".map") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(pageDir, e.Name()))
+		if err == nil {
+			add(string(data))
+		}
+	}
+	return total
+}
+
+// pageCSSBytes sums same-origin stylesheet links from the final document.
+func pageCSSBytes(outDir, html string) int {
+	seen := map[string]bool{}
+	total := 0
+	for _, m := range cssLinkRe.FindAllStringSubmatch(html, -1) {
+		href := m[1]
+		if strings.HasPrefix(href, "http://") || strings.HasPrefix(href, "https://") || strings.HasPrefix(href, "//") {
+			continue
+		}
+		href = strings.TrimPrefix(href, "/")
+		if seen[href] {
+			continue
+		}
+		seen[href] = true
+		total += fileSize(filepath.Join(outDir, filepath.FromSlash(href)))
+	}
+	return total
 }
 
 // routeFromRel converts a dist-relative directory to a URL route.
@@ -265,7 +399,7 @@ func (m manifestInfo) sourceFor(route string) string {
 // error (e.g. a plugin-only build); callers fall back to route-derived data.
 func readManifestPages(outDir string) (manifestInfo, error) {
 	var m manifestInfo
-	data, err := os.ReadFile(filepath.Join(outDir, "manifest.json"))
+	data, err := os.ReadFile(ResolveManifestPath(outDir, "manifest.json"))
 	if err != nil {
 		return m, nil
 	}
@@ -273,4 +407,21 @@ func readManifestPages(outDir string) (manifestInfo, error) {
 		return m, err
 	}
 	return m, nil
+}
+
+// routeSet builds the normalized route inventory (with and without trailing
+// slashes) used by the broken-link rule.
+func routeSet(pages []check.Page) map[string]bool {
+	set := map[string]bool{}
+	for _, p := range pages {
+		r := p.Route
+		if r == "" {
+			r = "/"
+		}
+		trimmed := strings.TrimSuffix(r, "/")
+		set[r] = true
+		set[trimmed] = true
+		set[trimmed+"/"] = true
+	}
+	return set
 }

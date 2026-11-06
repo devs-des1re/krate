@@ -1,4 +1,4 @@
-import { defineConfig, docs, sitemap } from '@krate/core';
+import { defineConfig, defineContent, docs, sitemap } from '@krate/core';
 import { baseDocsTheme } from '@krate/base-docs-theme';
 
 export default defineConfig({
@@ -7,6 +7,8 @@ export default defineConfig({
   pagesDir: "src/pages",
   publicDir: "public",
   minify: true,
+
+  viewTransitions: "auto",
 
   devServer: {
     port: 3000,
@@ -18,28 +20,84 @@ export default defineConfig({
     headingAnchors: true,
     admonitions: true,
     codeHighlight: true,
+    mermaid: true,
   },
 
-  seo: {
-    baseUrl: "https://krate.js.org",
-    siteName: "Krate",
+  // Canonical site metadata (supersedes `seo`).
+  site: {
+    url: "https://krate.js.org",
+    name: "Krate",
     description: "A Go-native static site generator with signal-based reactivity.",
+    image: "https://krate.js.org/og.png",
+    titleTemplate: "%s | Krate",
+    twitter: "kratejs",
+    themeColor: "#0a0a0a",
+    locale: "en",
+  },
+
+  // Build-time precompression + deploy adapter for Cloudflare Pages.
+  compress: { brotli: true, gzip: true },
+  deploy: { target: "cloudflare" },
+
+  redirects: [
+    { source: "/docs/guides/contributing/", destination: "/docs/contributing/", permanent: true },
+    { source: "/docs/guides/diagrams/", destination: "/docs/core-concepts/markdown/", permanent: true },
+  ],
+
+  content: defineContent({
+    blog: {
+      dir: "src/content/blog",
+      schema: {
+        title: { type: "string", required: true },
+        description: { type: "string", required: true },
+        date: { type: "date", required: true },
+        author: "string",
+        tags: "string[]",
+        order: { type: "number", required: true },
+        status: { type: "string", enum: ["draft", "published"], default: "draft" },
+      },
+    },
+  }),
+
+  // Per-route budgets calibrated from the current docs output with headroom.
+  checks: {
+    a11y: "error",
+    seo: "error",
+    perf: "warning",
+    budget: { js: 180, hydration: 90, islandJS: 20, route: 450 },
+    failOn: "error",
   },
 
   plugins: [
     sitemap({ baseUrl: "https://krate.js.org", changeFreq: "daily", priority: "0.8" }),
+    { name: "robots", options: { allow: "/" } },
+    {
+      name: "feed",
+      options: {
+        baseUrl: "https://krate.js.org",
+        title: "Krate Docs",
+        description: "Guides and reference for the Krate Go-native web framework.",
+      },
+    },
     docs({
       contentDir: "src/content/docs",
       title: "Krate Docs",
-      theme: baseDocsTheme(),
-      editLinkBase: "https://github.com/kratejs/krate/blob/main/packages/web",
+      theme: baseDocsTheme({
+        feedback: { repo: "kratejs/krate", label: "Was this page helpful?" },
+      }),
+      editLink: { pattern: "https://github.com/kratejs/krate/blob/main/packages/web/:path" },
+      sidebar: "auto",
+      toc: true,
+      pagination: true,
       search: {
         enabled: true,
         engine: "pagefind",
         maxResults: 8,
+        placeholder: "Search the docs",
+        hotkey: "mod+k",
       },
       links: [
-        { icon: "lucide:github", url: "https://github.com/kratejs/krate" },
+        { icon: "lucide:github", url: "https://github.com/kratejs/krate", name: "GitHub" },
       ],
     }),
   ],

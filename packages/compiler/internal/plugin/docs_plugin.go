@@ -1,11 +1,13 @@
 package plugin
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -13,6 +15,7 @@ import (
 	"github.com/kratejs/krate/packages/compiler/internal/config"
 	"github.com/kratejs/krate/packages/compiler/internal/content"
 	"github.com/kratejs/krate/packages/compiler/internal/docs"
+	"github.com/kratejs/krate/packages/compiler/internal/escape"
 	"github.com/kratejs/krate/packages/compiler/internal/markdown"
 	"github.com/kratejs/krate/packages/compiler/internal/resolver"
 )
@@ -22,10 +25,139 @@ type DocsPluginOptions struct {
 	Title        string             `json:"title"`
 	Layout       string             `json:"layout"`
 	Theme        json.RawMessage    `json:"theme"` // string (path or npm specifier) or DocsThemeDescriptor
-	Sidebar      []docs.SidebarItem `json:"sidebar"`
+	Sidebar      SidebarConfig      `json:"sidebar"`
 	Links        []SocialLink       `json:"links"`
 	Search       *DocsSearchOptions `json:"search"`
-	EditLinkBase string             `json:"editLinkBase"`
+	EditLinkBase string             `json:"editLinkBase"` // legacy
+	EditLink     EditLinkConfig     `json:"editLink"`
+	// LastUpdated fills each page's "last updated" date from git history when
+	// frontmatter omits it (default: true). Set false to skip git lookups.
+	LastUpdated *bool `json:"lastUpdated,omitempty"`
+	// TOC toggles the table of contents (default true).
+	TOC *bool `json:"toc,omitempty"`
+	// Breadcrumbs toggles breadcrumbs (default true).
+	Breadcrumbs *bool `json:"breadcrumbs,omitempty"`
+	// Pagination toggles prev/next links (default true).
+	Pagination *bool `json:"pagination,omitempty"`
+
+	// titleSlot is set from the resolved theme: the layout renders the page's
+	// leading <h1> itself (props.titleHTML), so the plugin removes it from the
+	// content and passes it separately.
+	titleSlot bool
+}
+
+func (o *DocsPluginOptions) TOCEnabled() bool         { return o.TOC == nil || *o.TOC }
+func (o *DocsPluginOptions) BreadcrumbsEnabled() bool { return o.Breadcrumbs == nil || *o.Breadcrumbs }
+func (o *DocsPluginOptions) PaginationEnabled() bool  { return o.Pagination == nil || *o.Pagination }
+
+// SidebarConfig configures the docs sidebar. It accepts:
+//   - "auto" (default): build from the filesystem/frontmatter
+//   - "none": no sidebar
+//   - an array of DocsSidebarItem: an explicit override
+//   - { from: "file", file: "sidebar.json" }: load a JSON sidebar file
+type SidebarConfig struct {
+	Mode  string
+	Items []docs.SidebarItem
+	File  string
+}
+
+func (s *SidebarConfig) UnmarshalJSON(data []byte) error {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		return nil
+	}
+	switch trimmed[0] {
+	case '"':
+		var mode string
+		if err := json.Unmarshal(data, &mode); err != nil {
+			return err
+		}
+		s.Mode = mode
+	case '[':
+		if err := json.Unmarshal(data, &s.Items); err != nil {
+			return err
+		}
+	case '{':
+		var obj struct {
+			From string `json:"from"`
+			File string `json:"file"`
+		}
+		if err := json.Unmarshal(data, &obj); err != nil {
+			return err
+		}
+		if obj.From == "file" || obj.File != "" {
+			s.Mode = "file"
+			s.File = obj.File
+		} else {
+			s.Mode = "auto"
+		}
+	default:
+		return fmt.Errorf("sidebar must be a string, an array, or an object")
+	}
+	return nil
+}
+
+// Resolve returns the sidebar to render, given the auto-built tree.
+func (s SidebarConfig) Resolve(generated []docs.SidebarItem, contentDir string) []docs.SidebarItem {
+	switch strings.ToLower(strings.TrimSpace(s.Mode)) {
+	case "none", "off", "false":
+		return nil
+	case "file":
+		file := s.File
+		if file == "" {
+			file = "sidebar.json"
+		}
+		p := file
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(contentDir, p)
+		}
+		data, err := os.ReadFile(p)
+		if err != nil {
+			return generated
+		}
+		var items []docs.SidebarItem
+		if json.Unmarshal(data, &items) != nil {
+			return generated
+		}
+		return items
+	}
+	if len(s.Items) > 0 {
+		return s.Items
+	}
+	return generated
+}
+
+// EditLinkConfig configures "Edit this page" links. Pattern is a URL template
+// with `:path` replaced by the page's source path relative to the project root
+// (e.g. "https://github.com/org/repo/edit/main/:path").
+type EditLinkConfig struct {
+	Base    string `json:"base,omitempty"`
+	Pattern string `json:"pattern,omitempty"`
+}
+
+// editURL resolves a page's "Edit this page" URL: frontmatter `editUrl` wins,
+// then `editLink.pattern` (`:path` template), then `editLink.base` /
+// legacy `editLinkBase` + the source path.
+func (o *DocsPluginOptions) editURL(root string, page docs.Page) string {
+	if page.EditURL != "" {
+		return page.EditURL
+	}
+	base := o.EditLink.Base
+	if base == "" {
+		base = o.EditLinkBase
+	}
+	if base == "" && o.EditLink.Pattern == "" {
+		return ""
+	}
+	rel, err := filepath.Rel(root, page.SourcePath)
+	if err != nil {
+		return ""
+	}
+	relSlash := filepath.ToSlash(rel)
+	if o.EditLink.Pattern != "" {
+		return strings.ReplaceAll(o.EditLink.Pattern, ":path", relSlash)
+	}
+	return strings.TrimSuffix(base, "/") + "/" + relSlash
 }
 
 // DocsThemeDescriptor mirrors the shape a docs theme factory returns
@@ -37,18 +169,55 @@ type DocsThemeDescriptor struct {
 	Module  string                 `json:"module,omitempty"`
 	Layout  string                 `json:"layout,omitempty"`
 	Options map[string]interface{} `json:"options,omitempty"`
+	// TitleSlot declares that the layout renders props.titleHTML (the page's
+	// leading <h1>) itself, which lets it place the description below the title.
+	TitleSlot bool `json:"titleSlot,omitempty"`
 }
 
 type SocialLink struct {
 	Icon string `json:"icon"`
 	URL  string `json:"url"`
+	// Name labels the icon link for assistive tech (aria-label/title). Derived
+	// from the icon id when omitted so icon-only links are never anonymous.
+	Name string `json:"name,omitempty"`
 }
 
 func init() {
-	Register(&DocsPlugin{})
+	_ = Register(&DocsPlugin{})
 }
 
 type DocsPlugin struct{}
+
+// labelFromIcon derives an accessible label from an icon id ("lucide:github" ->
+// "Github"), used as a fallback when a social link has no explicit name.
+func labelFromIcon(icon string) string {
+	name := icon
+	if i := strings.LastIndex(icon, ":"); i >= 0 {
+		name = icon[i+1:]
+	}
+	name = strings.ReplaceAll(name, "-", " ")
+	name = strings.ReplaceAll(name, "_", " ")
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return "Link"
+	}
+	return strings.ToUpper(name[:1]) + name[1:]
+}
+
+// socialLinksWithNames returns a copy of the configured links with a derived
+// accessible name filled in when none was set. Copying keeps the shared
+// opts.Links immutable: pages are generated concurrently, so mutating the
+// caller's slice in place races (the race detector catches it).
+func socialLinksWithNames(links []SocialLink) []SocialLink {
+	out := make([]SocialLink, len(links))
+	copy(out, links)
+	for i := range out {
+		if out[i].Name == "" {
+			out[i].Name = labelFromIcon(out[i].Icon)
+		}
+	}
+	return out
+}
 
 func (p *DocsPlugin) Name() string { return "docs" }
 func (p *DocsPlugin) Order() int   { return 10 }
@@ -127,45 +296,81 @@ func (p *DocsPlugin) beforeBuild(ctx *BuildHookCtx) error {
 		return nil
 	}
 
-	scanCfg := docs.Config{
-		ContentDir: opts.ContentDir,
-		Root:       ctx.Root,
-		MDConfig:   cfg.Markdown,
-	}
+	locales, defaultLocale := resolveLocales(cfg.I18n)
+	versions, currentVersion := resolveVersions(cfg.Versions)
 
-	pages, err := docs.Scan(scanCfg)
-	if err != nil {
-		return fmt.Errorf("scanning docs: %w", err)
+	type docsBundle struct {
+		locale, version string
+		pages           []docs.Page
+		sections        []docs.SidebarItem
 	}
-	if len(pages) == 0 {
+	var bundles []docsBundle
+	var allPages []docs.Page
+	localeAlts := map[string]map[string]string{}  // version\x00path -> locale -> URL
+	versionAlts := map[string]map[string]string{} // locale\x00path -> version -> URL
+	versionRoot := map[string]string{}            // locale\x00version -> landing URL
+
+	gitLast := opts.LastUpdated == nil || *opts.LastUpdated
+	exclude := excludedSegments(locales, defaultLocale, versions, currentVersion)
+	for _, loc := range locales {
+		for _, ver := range versions {
+			dir := docsLocaleDir(opts.ContentDir, loc, defaultLocale, ver, currentVersion)
+			ps, err := docs.Scan(docs.Config{
+				ContentDir:     dir,
+				Root:           ctx.Root,
+				MDConfig:       cfg.Markdown,
+				GitLastUpdated: gitLast,
+			})
+			if err != nil {
+				return fmt.Errorf("scanning docs: %w", err)
+			}
+			ps = filterExcludedPages(ps, exclude)
+			ps = filterDraftPages(ps, ctx.DevMode)
+			for i := range ps {
+				ps[i].Locale = loc
+				ps[i].Version = ver
+				ps[i].URL = docsURL(loc, defaultLocale, ver, currentVersion, ps[i].Path)
+				lk := ver + "\x00" + ps[i].Path
+				if localeAlts[lk] == nil {
+					localeAlts[lk] = map[string]string{}
+				}
+				localeAlts[lk][loc] = ps[i].URL
+				vk := loc + "\x00" + ps[i].Path
+				if versionAlts[vk] == nil {
+					versionAlts[vk] = map[string]string{}
+				}
+				versionAlts[vk][ver] = ps[i].URL
+			}
+			sec := docs.BuildSidebarTree(ps)
+			sec = opts.Sidebar.Resolve(sec, filepath.Join(ctx.Root, opts.ContentDir))
+			// The version's landing URL (its index, else its first page) backs
+			// the version switcher when a page has no equivalent in that version.
+			versionRoot[loc+"\x00"+ver] = firstSidebarURL(sec)
+			bundles = append(bundles, docsBundle{loc, ver, ps, sec})
+			allPages = append(allPages, ps...)
+		}
+	}
+	if len(allPages) == 0 {
 		return nil
 	}
 
-	// Draft pages are excluded from production builds but rendered in dev.
-	// Filtering here keeps them out of the nav tree, search index, and output
-	// directory when they shouldn't ship.
-	pages = filterDraftPages(pages, ctx.DevMode)
-	if len(pages) == 0 {
-		return nil
-	}
+	// Sidebar assets + the search index use the default locale/current version.
+	defaultBundle := bundles[0]
+	p.writeAssets(ctx, defaultBundle.sections, allPages, opts)
 
-	sections := docs.BuildSidebarTree(pages)
-
-	p.writeAssets(ctx, sections, pages, opts)
-
-	// Search bar + search index (docfind WASM, embedded in-process; or the
-	// opt-in Pagefind bundle indexed in AfterBuild)
+	// Search index (built across every locale/version).
 	searchEnabled, searchEngine, searchMaxResults := searchConfig(opts)
 	if searchEnabled {
-		if err := p.buildSearchAssets(ctx, pages, searchEngine, searchMaxResults, pagefindOptions(opts)); err != nil {
+		if err := p.buildSearchAssets(ctx, allPages, searchEngine, searchMaxResults, pagefindOptions(opts)); err != nil {
 			fmt.Fprintf(os.Stderr, "  Docs search warning: %v (falling back to JSON search)\n", err)
 		}
 	}
 
-	genDir := filepath.Join(ctx.Root, ".krate", "gen", "docs")
+	genRoot := filepath.Join(ctx.Root, ".krate", "gen")
+	genDir := filepath.Join(genRoot, "docs")
 
-	os.RemoveAll(genDir)
-	os.MkdirAll(genDir, 0755)
+	os.RemoveAll(genRoot)
+	_ = os.MkdirAll(genDir, 0755)
 
 	// Resolve the docs layout/theme once up front. The result is either a bare
 	// npm specifier (kept as-is so CSS/sub-components flow through the bundler
@@ -175,14 +380,14 @@ func (p *DocsPlugin) beforeBuild(ctx *BuildHookCtx) error {
 		return err
 	}
 
-	// Generate the SearchBar component once into the gen dir (shared by all pages)
-	if searchEnabled {
-		os.WriteFile(filepath.Join(genDir, "SearchBar.tsx"), []byte(generateSearchBarTSX()), 0644)
-	}
+	// Search is a THEME concern: the plugin emits the index + `search.js`
+	// (which exposes the headless `window.__krateSearch` API), and the theme
+	// renders its own UI (e.g. `<DocsSearch />`) wherever it likes.
 
 	var themeOptions json.RawMessage
 	if theme != nil {
 		themeOptions = theme.options
+		opts.titleSlot = theme.titleSlot
 	}
 
 	type pageGenResult struct {
@@ -190,46 +395,53 @@ func (p *DocsPlugin) beforeBuild(ctx *BuildHookCtx) error {
 		route   string
 	}
 
-	resultsCh := make(chan pageGenResult, len(pages))
+	resultsCh := make(chan pageGenResult, len(allPages))
 	var wg sync.WaitGroup
 
-	for i, page := range pages {
-		var prevTitle, prevLink, nextTitle, nextLink string
-		if i > 0 {
-			prevTitle = pages[i-1].Title
-			prevLink = docs.PageURL(pages[i-1].Path)
-		}
-		if i < len(pages)-1 {
-			nextTitle = pages[i+1].Title
-			nextLink = docs.PageURL(pages[i+1].Path)
-		}
-
-		wg.Add(1)
-		go func(page docs.Page, prevTitle, prevLink, nextTitle, nextLink string) {
-			defer wg.Done()
-
-			tocItems := pageTocItems(page)
-			breadcrumbs := docs.BuildBreadcrumbs(page.Path)
-
-			tsxPath := filepath.Join(genDir, page.Path+".tsx")
-			fileLayoutRel := theme.importSpecifier(filepath.Dir(tsxPath))
-			var searchBarRel string
-			if searchEnabled {
-				searchBarRel = searchBarImportRel(tsxPath, genDir)
+	for _, b := range bundles {
+		for i, page := range b.pages {
+			var prevTitle, prevLink, nextTitle, nextLink string
+			if i > 0 {
+				prevTitle = b.pages[i-1].Title
+				prevLink = b.pages[i-1].URL
 			}
-			tsxSource := p.generateTSX(ctx, page, fileLayoutRel, searchBarRel, sections, tocItems, breadcrumbs, prevTitle, prevLink, nextTitle, nextLink, opts, themeOptions, cfg.Markdown)
-
-			os.MkdirAll(filepath.Dir(tsxPath), 0755)
-			os.WriteFile(tsxPath, []byte(tsxSource), 0644)
-
-			route := docs.NormalizePagePath(page.Path)
-			if route == "" {
-				route = "docs"
-			} else {
-				route = "docs/" + route
+			if i < len(b.pages)-1 {
+				nextTitle = b.pages[i+1].Title
+				nextLink = b.pages[i+1].URL
 			}
-			resultsCh <- pageGenResult{tsxPath: tsxPath, route: route}
-		}(page, prevTitle, prevLink, nextTitle, nextLink)
+
+			li := docsLocaleInfo{
+				Locale:         page.Locale,
+				DefaultLocale:  defaultLocale,
+				Version:        page.Version,
+				CurrentVersion: currentVersion,
+				Locales:        localeSwitchLinksWithLabels(locales, defaultLocale, localeAlts[page.Version+"\x00"+page.Path], cfg.I18n.LocaleLabels, localeRoots(locales, page.Version, versionRoot)),
+				Versions:       versionSwitchLinksWithLabels(versions, currentVersion, page.Locale, defaultLocale, versionAlts[page.Locale+"\x00"+page.Path], versionRoot, cfg.Versions.Labels),
+				VersionBanner:  cfg.Versions.Enabled() && cfg.Versions.BannerEnabled() && page.Version != currentVersion,
+			}
+
+			// The build derives a generated page's route from its path under
+			// .krate/gen, so the file path must mirror the final route exactly
+			// (e.g. route "fr/docs/getting-started" -> .krate/gen/fr/docs/getting-started.tsx).
+			route := docsRoute(page.Locale, defaultLocale, page.Version, currentVersion, page.Path)
+			tsxPath := filepath.Join(genRoot, filepath.FromSlash(route)+".tsx")
+
+			wg.Add(1)
+			go func(page docs.Page, b docsBundle, li docsLocaleInfo, prevTitle, prevLink, nextTitle, nextLink string) {
+				defer wg.Done()
+
+				tocItems := pageTocItems(page)
+				breadcrumbs := docs.BuildBreadcrumbsTitled(page.Locale, defaultLocale, page.Path, b.pages)
+
+				fileLayoutRel := theme.importSpecifier(filepath.Dir(tsxPath))
+				tsxSource := p.generateTSX(ctx, cfg, page, fileLayoutRel, searchEnabled, b.sections, tocItems, breadcrumbs, prevTitle, prevLink, nextTitle, nextLink, li, opts, themeOptions, cfg.Markdown, docs.DocsBasePath)
+
+				_ = os.MkdirAll(filepath.Dir(tsxPath), 0755)
+				_ = os.WriteFile(tsxPath, []byte(tsxSource), 0644)
+
+				resultsCh <- pageGenResult{tsxPath: tsxPath, route: route}
+			}(page, b, li, prevTitle, prevLink, nextTitle, nextLink)
+		}
 	}
 
 	go func() {
@@ -241,6 +453,10 @@ func (p *DocsPlugin) beforeBuild(ctx *BuildHookCtx) error {
 		if ctx.GeneratedPages != nil {
 			*ctx.GeneratedPages = append(*ctx.GeneratedPages, GeneratedPage{Path: res.tsxPath, Route: res.route})
 		}
+	}
+
+	if err := p.generateTaxonomyPages(ctx, cfg, genRoot, theme, opts, docs.DocsBasePath, searchEnabled, themeOptions, defaultBundle.pages, defaultBundle.sections); err != nil {
+		return fmt.Errorf("generating tag/category pages: %w", err)
 	}
 
 	return nil
@@ -256,31 +472,16 @@ func trimComponentExt(s string) string {
 	return s
 }
 
-func resolveLayoutImport(genDir, root, layout string) string {
-	if layout == "" {
-		return ""
-	}
-	layoutPath := filepath.Join(root, trimComponentExt(layout))
-	rel, err := filepath.Rel(genDir, layoutPath)
-	if err != nil {
-		return layout
-	}
-	rel = filepath.ToSlash(rel)
-	if !strings.HasPrefix(rel, ".") {
-		rel = "./" + rel
-	}
-	return rel
-}
-
 // resolvedDocsTheme is the outcome of resolving the docs plugin's layout/theme
 // option. Exactly one of module/spec is set:
-//   - module: absolute layout file path — emit a relative import from each page.
-//   - spec:   bare npm specifier — keep it as-is so the theme's CSS and
+//   - module: absolute layout file path - emit a relative import from each page.
+//   - spec: bare npm specifier - keep it as-is so the theme's CSS and
 //     sub-components flow through the bundler's node_modules resolution.
 type resolvedDocsTheme struct {
-	module  string
-	spec    string
-	options json.RawMessage
+	module    string
+	spec      string
+	options   json.RawMessage
+	titleSlot bool
 }
 
 // importSpecifier returns the import path used by a generated page at genDir to
@@ -359,7 +560,6 @@ func themeLayoutConflict(root, layout, themeName, themePath string) error {
 // resolveDocsTheme resolves the docs plugin's layout/theme options into an
 // importable layout component. It honors both the legacy `layout` option and
 // the `theme` alias:
-//
 //   - theme (""| nothing) + layout -> root-relative file, like today.
 //   - theme "./path" (or "/abs")  -> alias of layout; error if both are set and
 //     resolve to different components.
@@ -421,9 +621,9 @@ func (p *DocsPlugin) resolveDocsTheme(root string, opts *DocsPluginOptions) (*re
 			return nil, err
 		}
 		if filepath.IsAbs(mod) {
-			return &resolvedDocsTheme{module: trimComponentExt(mod), options: options}, nil
+			return &resolvedDocsTheme{module: trimComponentExt(mod), options: options, titleSlot: desc.TitleSlot}, nil
 		}
-		return &resolvedDocsTheme{module: filepath.Join(root, trimComponentExt(mod)), options: options}, nil
+		return &resolvedDocsTheme{module: filepath.Join(root, trimComponentExt(mod)), options: options, titleSlot: desc.TitleSlot}, nil
 	}
 
 	// Bare npm specifier module.
@@ -433,7 +633,7 @@ func (p *DocsPlugin) resolveDocsTheme(root string, opts *DocsPluginOptions) (*re
 	if entry := resolver.NodeModule(root, mod); entry == "" {
 		return nil, fmt.Errorf("docs plugin: theme descriptor module %q not found in node_modules", mod)
 	}
-	return &resolvedDocsTheme{spec: mod, options: options}, nil
+	return &resolvedDocsTheme{spec: mod, options: options, titleSlot: desc.TitleSlot}, nil
 }
 
 // marshalJSONArray marshals a slice as a JSON array literal, emitting `[]`
@@ -504,21 +704,35 @@ func applyNavOverride(override *docs.NavOverride, autoTitle, autoLink string) (t
 	return title, link, link != ""
 }
 
-func (p *DocsPlugin) generateTSX(ctx *BuildHookCtx, page docs.Page, layoutRel, searchBarRel string, sections []docs.SidebarItem, tocItems []docs.TOCItem, breadcrumbs []docs.Breadcrumb, prevTitle, prevLink, nextTitle, nextLink string, opts *DocsPluginOptions, themeOptions json.RawMessage, mdConfig markdown.Config) string {
+func (p *DocsPlugin) generateTSX(ctx *BuildHookCtx, cfg *config.Config, page docs.Page, layoutRel string, searchEnabled bool, sections []docs.SidebarItem, tocItems []docs.TOCItem, breadcrumbs []docs.Breadcrumb, prevTitle, prevLink, nextTitle, nextLink string, li docsLocaleInfo, opts *DocsPluginOptions, themeOptions json.RawMessage, mdConfig markdown.Config, routeBase string) string {
 	prevTitle, prevLink, prevOk := applyNavOverride(page.Prev, prevTitle, prevLink)
 	nextTitle, nextLink, nextOk := applyNavOverride(page.Next, nextTitle, nextLink)
+	if !opts.PaginationEnabled() {
+		prevTitle, prevLink, nextTitle, nextLink = "", "", "", ""
+		prevOk, nextOk = false, false
+	}
+	if !opts.TOCEnabled() {
+		tocItems = nil
+	}
+	if !opts.BreadcrumbsEnabled() {
+		breadcrumbs = nil
+	}
 	siteTitle := opts.Title
-	socialLinks := opts.Links
+	socialLinks := socialLinksWithNames(opts.Links)
 
 	var sb strings.Builder
 	sb.WriteString("// Auto-generated by krate docs plugin\n")
 
 	var mdxImports []string
 	var segments []markdown.MDXSegment
+	var rawSrc string
+	var mdxFrontmatter string
 	if data, err := os.ReadFile(page.SourcePath); err == nil {
-		src := string(data)
-		mdxImports = markdown.ExtractImports(src)
-		_, segments = markdown.ParseMDXSegments(src, mdConfig)
+		rawSrc = string(data)
+		res := markdown.Compile(rawSrc, mdConfig, markdown.Options{MDX: strings.HasSuffix(page.SourcePath, ".mdx")})
+		mdxImports = res.ESM
+		segments = res.Segments
+		mdxFrontmatter = markdown.FrontmatterDecl(res.Frontmatter, res.ESM)
 	}
 	useCode := markdown.HasCodeSegments(segments)
 	useAside := markdown.HasAsideSegments(segments)
@@ -527,18 +741,32 @@ func (p *DocsPlugin) generateTSX(ctx *BuildHookCtx, page docs.Page, layoutRel, s
 		sb.WriteString(imp)
 		sb.WriteString("\n")
 	}
+	if segmentsReference(segments, "frontmatter") {
+		sb.WriteString(mdxFrontmatter)
+	}
+
+	// Auto-import the built-in components referenced by the page: Code/Aside
+	// segments plus the components lowered from :::directives.
+	imported := map[string]bool{}
+	addImport := func(name string) {
+		if imported[name] {
+			return
+		}
+		imported[name] = true
+		sb.WriteString("import { " + name + " } from \"@krate/components\";\n")
+	}
 	if useCode {
-		sb.WriteString("import { Code } from \"@krate/components\";\n")
+		addImport("Code")
 	}
 	if useAside {
-		sb.WriteString("import { Aside } from \"@krate/components\";\n")
+		addImport("Aside")
+	}
+	for _, comp := range markdown.DirectiveComponents(rawSrc) {
+		addImport(comp)
 	}
 
 	if layoutRel != "" {
 		sb.WriteString(fmt.Sprintf("import DocsLayout from \"%s\";\n", layoutRel))
-	}
-	if searchBarRel != "" {
-		sb.WriteString(fmt.Sprintf("import SearchBar from \"%s\";\n", searchBarRel))
 	}
 
 	sb.WriteString("\n")
@@ -547,7 +775,11 @@ func (p *DocsPlugin) generateTSX(ctx *BuildHookCtx, page docs.Page, layoutRel, s
 	if len(page.CustomSidebar) > 0 {
 		sidebarItems = page.CustomSidebar
 	}
-	enriched := docs.EnrichSidebarItems(sidebarItems, page.Path)
+	bp := cfg.BaseURLPath()
+	enriched := prefixSidebarURLs(docs.EnrichSidebarItemsURL(sidebarItems, page.URL), bp)
+	breadcrumbs = prefixBreadcrumbURLs(breadcrumbs, bp)
+	prevLink, nextLink = prefixURL(bp, prevLink), prefixURL(bp, nextLink)
+	li.Locales, li.Versions = prefixAltLinks(li.Locales, bp), prefixAltLinks(li.Versions, bp)
 	sidebarJSON := marshalJSONArray(enriched)
 	tocJSON := marshalJSONArray(tocItems)
 	breadcrumbsJSON := marshalJSONArray(breadcrumbs)
@@ -556,6 +788,47 @@ func (p *DocsPlugin) generateTSX(ctx *BuildHookCtx, page docs.Page, layoutRel, s
 	siteTitleJSON, _ := json.Marshal(siteTitle)
 	currentPathJSON, _ := json.Marshal(page.Path)
 	templateJSON, _ := json.Marshal(page.Template)
+	routeBaseJSON, _ := json.Marshal(bp + strings.TrimRight(routeBase, "/"))
+
+	// Per-page document language (the shell ships lang="en"; the build applies
+	// this override server-side so crawlers/no-JS see the right language).
+	if li.Locale != "" {
+		langJSON, _ := json.Marshal(li.Locale)
+		sb.WriteString("export const lang = ")
+		sb.WriteString(string(langJSON))
+		sb.WriteString(";\n\n")
+	}
+
+	// Final HTML of each markdown segment. A theme that declares a title slot
+	// gets the leading <h1> separately and the content without it.
+	segHTML := make([]string, len(segments))
+	for i, seg := range segments {
+		if seg.HTML == "" {
+			continue
+		}
+		html := applyMarkdownTransformPlugins(cfg, ctx, page, seg.HTML)
+		if mdConfig.HeadingAnchors {
+			html = docs.InjectHeadingAnchors(html)
+		}
+		segHTML[i] = html
+	}
+	var wholeHTML string
+	if len(segments) == 0 {
+		wholeHTML = applyMarkdownTransformPlugins(cfg, ctx, page, page.Content)
+		if mdConfig.HeadingAnchors {
+			wholeHTML = docs.InjectHeadingAnchors(wholeHTML)
+		}
+	}
+	titleHTML := ""
+	if opts.titleSlot && page.Template != "hero" {
+		if len(segments) > 0 {
+			if segments[0].HTML != "" && segments[0].JSX == "" {
+				titleHTML, segHTML[0] = splitLeadingTitle(segHTML[0])
+			}
+		} else {
+			titleHTML, wholeHTML = splitLeadingTitle(wholeHTML)
+		}
+	}
 
 	sb.WriteString("export default function DocPage() {\n")
 	sb.WriteString("  const docsProps = {\n")
@@ -565,6 +838,12 @@ func (p *DocsPlugin) generateTSX(ctx *BuildHookCtx, page docs.Page, layoutRel, s
 	sb.WriteString("    siteTitle: ")
 	sb.WriteString(string(siteTitleJSON))
 	sb.WriteString(",\n")
+	if opts.Search != nil && (opts.Search.Placeholder != "" || opts.Search.Hotkey != "") {
+		searchJSON, _ := json.Marshal(map[string]string{"placeholder": opts.Search.Placeholder, "hotkey": opts.Search.Hotkey})
+		sb.WriteString("    search: ")
+		sb.WriteString(string(searchJSON))
+		sb.WriteString(",\n")
+	}
 	sb.WriteString("    sidebarItems: ")
 	sb.WriteString(string(sidebarJSON))
 	sb.WriteString(",\n")
@@ -574,6 +853,29 @@ func (p *DocsPlugin) generateTSX(ctx *BuildHookCtx, page docs.Page, layoutRel, s
 	sb.WriteString("    breadcrumbs: ")
 	sb.WriteString(string(breadcrumbsJSON))
 	sb.WriteString(",\n")
+
+	// i18n / versioning context for the theme (LocaleSwitcher, VersionSwitcher,
+	// old-version banner). Emitted only when actually configured.
+	if li.Locale != "" || li.Version != "" || len(li.Locales) > 1 || len(li.Versions) > 1 {
+		propLI := li
+		if len(propLI.Locales) <= 1 {
+			propLI.Locales = nil
+		}
+		if len(propLI.Versions) <= 1 {
+			propLI.Versions = nil
+		}
+		liJSON, _ := json.Marshal(propLI)
+		sb.WriteString("    i18n: ")
+		sb.WriteString(string(liJSON))
+		sb.WriteString(",\n")
+	}
+
+	if titleHTML != "" {
+		titleJSON, _ := json.Marshal(titleHTML)
+		sb.WriteString("    titleHTML: ")
+		sb.WriteString(string(titleJSON))
+		sb.WriteString(",\n")
+	}
 
 	if page.Description != "" {
 		descriptionJSON, _ := json.Marshal(page.Description)
@@ -603,12 +905,7 @@ func (p *DocsPlugin) generateTSX(ctx *BuildHookCtx, page docs.Page, layoutRel, s
 		sb.WriteString(",\n")
 	}
 
-	editUrl := page.EditURL
-	if editUrl == "" && opts.EditLinkBase != "" {
-		if rel, err := filepath.Rel(ctx.Root, page.SourcePath); err == nil {
-			editUrl = strings.TrimSuffix(opts.EditLinkBase, "/") + "/" + filepath.ToSlash(rel)
-		}
-	}
+	editUrl := opts.editURL(ctx.Root, page)
 	if editUrl != "" {
 		editUrlJSON, _ := json.Marshal(editUrl)
 		sb.WriteString("    editUrl: ")
@@ -620,6 +917,36 @@ func (p *DocsPlugin) generateTSX(ctx *BuildHookCtx, page docs.Page, layoutRel, s
 		tagsJSON := marshalJSONArray(page.Tags)
 		sb.WriteString("    tags: ")
 		sb.WriteString(string(tagsJSON))
+		sb.WriteString(",\n")
+		sb.WriteString("    tagLinks: ")
+		sb.WriteString(string(marshalJSONArray(taxonomyLinks(bp+routeBase, "tags", page.Tags))))
+		sb.WriteString(",\n")
+	}
+	if len(page.Categories) > 0 {
+		catsJSON := marshalJSONArray(page.Categories)
+		sb.WriteString("    categories: ")
+		sb.WriteString(string(catsJSON))
+		sb.WriteString(",\n")
+		sb.WriteString("    categoryLinks: ")
+		sb.WriteString(string(marshalJSONArray(taxonomyLinks(bp+routeBase, "categories", page.Categories))))
+		sb.WriteString(",\n")
+	}
+	if page.Date != "" {
+		dateJSON, _ := json.Marshal(page.Date)
+		sb.WriteString("    date: ")
+		sb.WriteString(string(dateJSON))
+		sb.WriteString(",\n")
+	}
+	if page.Updated != "" {
+		updatedJSON, _ := json.Marshal(page.Updated)
+		sb.WriteString("    lastUpdated: ")
+		sb.WriteString(string(updatedJSON))
+		sb.WriteString(",\n")
+	}
+	if len(page.Authors) > 0 {
+		authorsJSON := marshalJSONArray(page.Authors)
+		sb.WriteString("    authors: ")
+		sb.WriteString(string(authorsJSON))
 		sb.WriteString(",\n")
 	}
 
@@ -652,6 +979,10 @@ func (p *DocsPlugin) generateTSX(ctx *BuildHookCtx, page docs.Page, layoutRel, s
 	sb.WriteString(string(currentPathJSON))
 	sb.WriteString(",\n")
 
+	sb.WriteString("    routeBase: ")
+	sb.WriteString(string(routeBaseJSON))
+	sb.WriteString(",\n")
+
 	if len(strings.TrimSpace(string(themeOptions))) > 2 {
 		sb.WriteString("    options: ")
 		sb.WriteString(string(themeOptions))
@@ -661,36 +992,74 @@ func (p *DocsPlugin) generateTSX(ctx *BuildHookCtx, page docs.Page, layoutRel, s
 	sb.WriteString("  };\n")
 	sb.WriteString("  return (\n")
 	sb.WriteString("    <>\n")
-	if searchBarRel != "" {
-		sb.WriteString("      <SearchBar />\n")
-	}
 
 	// Per-page <Head>: meta description/OG tags plus any frontmatter head tags.
 	// Krate merges multiple <Head> blocks (page + layout), so emitting ours
 	// alongside the layout's title composition works.
 	sb.WriteString("      <Head>\n")
-	if page.Description != "" {
-		sb.WriteString("        <meta name=\"description\" content=\"")
-		sb.WriteString(jsAttrEscape(page.Description))
-		sb.WriteString("\" />\n")
-		sb.WriteString("        <meta property=\"og:description\" content=\"")
-		sb.WriteString(jsAttrEscape(page.Description))
-		sb.WriteString("\" />\n")
+	// Load the headless search module (defines `window.__krateSearch`) so the
+	// theme's search UI can query the index. The theme owns all markup/styles.
+	if searchEnabled {
+		sb.WriteString("        <script src=\"" + bp + "/docs/search/search.js\" defer={true}></script>\n")
 	}
+	// hreflang alternates for every configured locale (absolute when seo.baseUrl
+	// is set, so crawlers can match translations).
+	if len(li.Locales) > 0 {
+		for _, alt := range li.Locales {
+			// Only real translations are alternates; a fallback entry points at
+			// the locale's home page, which is not an equivalent of this page.
+			if alt.Code == "" || alt.Fallback {
+				continue
+			}
+			sb.WriteString("        <link rel=\"alternate\" hreflang=")
+			sb.WriteString(jsxAttrExpr(alt.Code))
+			sb.WriteString(" href=")
+			sb.WriteString(jsxAttrExpr(absoluteDocsURL(cfg, alt.URL)))
+			sb.WriteString(" />\n")
+		}
+	}
+	if page.Description != "" {
+		sb.WriteString("        <meta name=\"description\" content=")
+		sb.WriteString(jsxAttrExpr(page.Description))
+		sb.WriteString(" />\n")
+		sb.WriteString("        <meta property=\"og:description\" content=")
+		sb.WriteString(jsxAttrExpr(page.Description))
+		sb.WriteString(" />\n")
+	}
+	sb.WriteString(docsHeadExtras(cfg, page, opts.Title))
 	for _, ht := range page.Head {
 		sb.WriteString("        ")
 		sb.WriteString(headTagJSX(ht))
 		sb.WriteString("\n")
 	}
+	// Pre-paint theme script: apply the persisted/preferred colour scheme before
+	// the stylesheet paints, so the page never flashes the wrong theme. Runs
+	// before the hydration bundle; the layout later reconciles the signal.
+	themeKey := "theme"
+	if len(themeOptions) > 0 {
+		var to struct {
+			ThemeStorageKey string `json:"themeStorageKey"`
+		}
+		if json.Unmarshal(themeOptions, &to) == nil && to.ThemeStorageKey != "" {
+			themeKey = to.ThemeStorageKey
+		}
+	}
+	keyJSON, _ := json.Marshal(themeKey)
+	prepaint := "(function(){try{var k=" + string(keyJSON) +
+		";var s=localStorage.getItem(k);if(s!=='dark'&&s!=='light'){s=window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';}" +
+		"document.documentElement.setAttribute('data-theme',s);}catch(e){}})();"
+	sb.WriteString("        <script>{`")
+	sb.WriteString(escapeTemplateLit(prepaint))
+	sb.WriteString("`}</script>\n")
 	sb.WriteString("      </Head>\n")
 
 	sb.WriteString("      <DocsLayout {...docsProps} >")
 	if len(segments) > 0 {
 		sb.WriteString("\n      <div class=\"md-content\" data-pagefind-body>\n")
-		for _, seg := range segments {
-			if seg.HTML != "" {
+		for i, seg := range segments {
+			if segHTML[i] != "" {
 				sb.WriteString("        <div dangerouslySetInnerHTML={{__html: `")
-				sb.WriteString(escapeTemplateLit(seg.HTML))
+				sb.WriteString(escapeTemplateLit(segHTML[i]))
 				sb.WriteString("`}} />\n")
 			}
 			if seg.JSX != "" {
@@ -700,7 +1069,7 @@ func (p *DocsPlugin) generateTSX(ctx *BuildHookCtx, page docs.Page, layoutRel, s
 			}
 			if seg.Code != nil {
 				sb.WriteString("        ")
-				sb.WriteString(markdown.BuildCodeJSX(seg.Code.Lang, seg.Code.Code))
+				sb.WriteString(markdown.BuildCodeJSXMeta(seg.Code.Lang, seg.Code.Meta, seg.Code.Code))
 				sb.WriteString("\n")
 			}
 			if seg.Aside != nil {
@@ -711,9 +1080,8 @@ func (p *DocsPlugin) generateTSX(ctx *BuildHookCtx, page docs.Page, layoutRel, s
 		}
 		sb.WriteString("      </div>\n")
 	} else {
-		content := page.Content
 		sb.WriteString("<div class=\"md-content\" data-pagefind-body dangerouslySetInnerHTML={{__html: `")
-		sb.WriteString(escapeTemplateLit(content))
+		sb.WriteString(escapeTemplateLit(wholeHTML))
 		sb.WriteString("`}} />")
 	}
 
@@ -725,20 +1093,62 @@ func (p *DocsPlugin) generateTSX(ctx *BuildHookCtx, page docs.Page, layoutRel, s
 	return sb.String()
 }
 
+// leadingTitleRe matches a heading 1 at the very start of rendered markdown.
+var leadingTitleRe = regexp.MustCompile(`(?s)\A\s*(<h1\b[^>]*>.*?</h1>)\s*`)
+
+// splitLeadingTitle separates a leading <h1> element from the rest of the
+// rendered markdown. It returns ("", html) when the content does not start with
+// one.
+func splitLeadingTitle(html string) (title, rest string) {
+	m := leadingTitleRe.FindStringSubmatchIndex(html)
+	if m == nil {
+		return "", html
+	}
+	return html[m[2]:m[3]], html[m[1]:]
+}
+
+// applyMarkdownTransformPlugins runs the configured `markdown.plugins` modules
+// over a docs page's rendered HTML. The same modules run for .md/.mdx page files
+// via the normal AfterMarkdownParse dispatch; docs pages are generated TSX, so
+// they are applied here instead.
+func applyMarkdownTransformPlugins(cfg *config.Config, ctx *BuildHookCtx, page docs.Page, html string) string {
+	if html == "" || len(cfg.Markdown.Plugins) == 0 {
+		return html
+	}
+	var plugins []config.PluginConfig
+	for _, p := range cfg.Plugins {
+		if strings.HasPrefix(p.Name, "markdown-transform-") {
+			plugins = append(plugins, p)
+		}
+	}
+	if len(plugins) == 0 {
+		return html
+	}
+	mdCtx := &MarkdownHookCtx{Page: page.SourcePath, HTML: html, Title: page.Title, Route: page.URL}
+	env := CommunityEnv{PagesDir: cfg.PagesDir, Config: cfg}
+	if err := RunCommunityPlugins("AfterMarkdownParse", plugins, ctx.Root, ctx.OutDir, mdCtx, env); err != nil {
+		fmt.Fprintf(os.Stderr, "  Warning: markdown plugin (docs/%s): %v\n", page.Path, err)
+		return html
+	}
+	return mdCtx.HTML
+}
+
 func escapeTemplateLit(s string) string {
+	// Order matters: escape backslashes first so the escapes introduced for the
+	// backtick and interpolation below are not themselves doubled.
+	s = strings.ReplaceAll(s, "\\", "\\\\")
 	s = strings.ReplaceAll(s, "`", "\\`")
 	s = strings.ReplaceAll(s, "${", "\\${")
 	return s
 }
 
-// jsAttrEscape escapes a value for use inside a double-quoted JSX attribute in
-// generated TSX. The krate lexer reads JSX attribute strings verbatim (no HTML
-// entity decoding), so only the two delimiters that would break the token are
-// escaped — exactly like a double-quoted JS string.
-func jsAttrEscape(s string) string {
-	s = strings.ReplaceAll(s, "\\", "\\\\")
-	s = strings.ReplaceAll(s, "\"", "\\\"")
-	return s
+// jsxAttrExpr renders an attribute value as a JS string EXPRESSION (`{ "..." }`).
+// The krate lexer reads JSX attribute strings verbatim (no escape decoding), so
+// a value containing a quote would otherwise need a backslash that survives into
+// the AST. An expression-based string literal is decoded by UnescapeJSString,
+// so quotes/ampersands/backslashes round-trip exactly.
+func jsxAttrExpr(s string) string {
+	return "{" + escape.JSStringDQ(s) + "}"
 }
 
 func isVoidHeadTag(tag string) bool {
@@ -764,9 +1174,8 @@ func headTagJSX(t docs.HeadTag) string {
 	for _, k := range keys {
 		sb.WriteString(" ")
 		sb.WriteString(k)
-		sb.WriteString("=\"")
-		sb.WriteString(jsAttrEscape(t.Attrs[k]))
-		sb.WriteString("\"")
+		sb.WriteString("=")
+		sb.WriteString(jsxAttrExpr(t.Attrs[k]))
 	}
 	if isVoidHeadTag(t.Tag) {
 		sb.WriteString(" />")
@@ -780,11 +1189,92 @@ func headTagJSX(t docs.HeadTag) string {
 
 func (p *DocsPlugin) writeAssets(ctx *BuildHookCtx, sections []docs.SidebarItem, pages []docs.Page, opts *DocsPluginOptions) {
 	outDir := filepath.Join(ctx.OutDir, "docs")
-	os.MkdirAll(filepath.Join(outDir, "data"), 0755)
+	_ = os.MkdirAll(filepath.Join(outDir, "data"), 0755)
 
 	sidebarData, _ := json.Marshal(sections)
-	os.WriteFile(filepath.Join(outDir, "data/sidebar.json"), sidebarData, 0644)
+	_ = os.WriteFile(filepath.Join(outDir, "data/sidebar.json"), sidebarData, 0644)
 
-	searchData, _ := json.Marshal(docs.BuildSearchIndex(pages))
-	os.WriteFile(filepath.Join(outDir, "data/search-index.json"), searchData, 0644)
+	basePath := ""
+	if cfg, ok := ctx.Config.(*config.Config); ok {
+		basePath = cfg.BaseURLPath()
+	}
+	searchData, _ := json.Marshal(docs.BuildSearchIndexBase(pages, basePath))
+	_ = os.WriteFile(filepath.Join(outDir, "data/search-index.json"), searchData, 0644)
+}
+
+// segmentsReference reports whether any JSX segment mentions the identifier.
+func segmentsReference(segs []markdown.MDXSegment, ident string) bool {
+	for _, s := range segs {
+		if s.JSX != "" && strings.Contains(s.JSX, ident) {
+			return true
+		}
+	}
+	return false
+}
+
+// absoluteDocsURL returns the absolute (when seo.baseUrl is set) or
+// base-path-prefixed form of a docs URL path.
+func absoluteDocsURL(cfg *config.Config, urlPath string) string {
+	bp := cfg.BaseURLPath()
+	if cfg.SEO.BaseURL != "" {
+		return CanonicalURL(cfg.SEO.BaseURL, bp, urlPath)
+	}
+	return bp + urlPath
+}
+
+// prefixURL prepends the site base path to a root-relative URL.
+func prefixURL(bp, u string) string {
+	if bp == "" || !strings.HasPrefix(u, "/") || strings.HasPrefix(u, "//") {
+		return u
+	}
+	return bp + u
+}
+
+func prefixSidebarURLs(items []docs.SidebarItem, bp string) []docs.SidebarItem {
+	if bp == "" || len(items) == 0 {
+		return items
+	}
+	out := make([]docs.SidebarItem, len(items))
+	for i, it := range items {
+		it.URL = prefixURL(bp, it.URL)
+		it.IndexURL = prefixURL(bp, it.IndexURL)
+		it.Children = prefixSidebarURLs(it.Children, bp)
+		out[i] = it
+	}
+	return out
+}
+
+func prefixBreadcrumbURLs(items []docs.Breadcrumb, bp string) []docs.Breadcrumb {
+	if bp == "" || len(items) == 0 {
+		return items
+	}
+	out := make([]docs.Breadcrumb, len(items))
+	for i, it := range items {
+		it.URL = prefixURL(bp, it.URL)
+		out[i] = it
+	}
+	return out
+}
+
+func prefixAltLinks(links []altLink, bp string) []altLink {
+	if bp == "" || len(links) == 0 {
+		return links
+	}
+	out := make([]altLink, len(links))
+	for i, l := range links {
+		l.URL = prefixURL(bp, l.URL)
+		out[i] = l
+	}
+	return out
+}
+
+// localeRoots maps each locale to its landing URL for a version.
+func localeRoots(locales []string, version string, versionRoot map[string]string) map[string]string {
+	out := make(map[string]string, len(locales))
+	for _, l := range locales {
+		if u := versionRoot[l+"\x00"+version]; u != "" {
+			out[l] = u
+		}
+	}
+	return out
 }

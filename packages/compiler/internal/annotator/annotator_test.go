@@ -6,10 +6,12 @@ import (
 	"testing"
 
 	"github.com/kratejs/krate/packages/compiler/ast"
+	"github.com/kratejs/krate/packages/compiler/internal/bundler"
 	"github.com/kratejs/krate/packages/compiler/internal/config"
 	"github.com/kratejs/krate/packages/compiler/internal/irtree"
 	"github.com/kratejs/krate/packages/compiler/internal/lexer"
 	"github.com/kratejs/krate/packages/compiler/internal/parser"
+	"github.com/kratejs/krate/packages/compiler/internal/tsstrip"
 )
 
 func parseProg(t *testing.T, src string) *ast.Program {
@@ -29,7 +31,7 @@ func entryTier(t *testing.T, ann *irtree.Annotations) irtree.ComponentTier {
 	return ann.ComponentTiers[ann.EntryPoint]
 }
 
-// ─── Tier classification priority ───────────────────────────────────────────
+// Tier classification priority
 
 func TestClassifyDirectivePriority(t *testing.T) {
 	src := `// @server
@@ -83,11 +85,11 @@ export default function App() { return <Button label="x" />; }`
 	}
 }
 
-// ─── Per-module source classification ───────────────────────────────────────
+// Per-module source classification
 
 func TestClassifyExportedConstArrow(t *testing.T) {
 	// `export const Live = () => ...` lands in ExportStmt.Declaration as a
-	// VarStmt — it must be collected just like `const Live = () => ...`.
+	// VarStmt - it must be collected just like `const Live = () => ...`.
 	src := `export const Live = ({ name }: any) => <p>live {name}</p>;
 export default function App() { return <Live name="world" />; }`
 	ann := Annotate(parseProg(t, src), &config.Config{}, "src/Live.tsx", src)
@@ -202,7 +204,7 @@ func TestMergeModuleFunctionsCollectsSignals(t *testing.T) {
 	}
 }
 
-// ─── Streaming / Suspense detection ─────────────────────────────────────────
+// Streaming / Suspense detection
 
 func TestDetectSuspenseUsage(t *testing.T) {
 	src := `import { Suspense } from '@krate/runtime/server';
@@ -261,13 +263,13 @@ function Other() { return <div/>; }`
 	}
 }
 
-// ─── Import-binding aliases ──────────────────────────────────────────────────
+// Import-binding aliases
 
 func TestMergeImportAliasesMapsLocalBindingToDeclaredDefault(t *testing.T) {
 	dir := t.TempDir()
 	entryFile := filepath.Join(dir, "entry.tsx")
 	themeFile := filepath.Join(dir, "theme", "layout.tsx")
-	os.MkdirAll(filepath.Dir(themeFile), 0755)
+	_ = os.MkdirAll(filepath.Dir(themeFile), 0755)
 
 	// The theme's component is named NightLayout, but the page imports it as
 	// DocsLayout. Without aliasing, the resolver (which keys merged module
@@ -279,8 +281,8 @@ export default function Page() {
 	themeSrc := `export default function NightLayout(props: any) {
   return <div class="docs-page">{props.pageTitle}</div>;
 }`
-	os.WriteFile(entryFile, []byte(pageSrc), 0644)
-	os.WriteFile(themeFile, []byte(themeSrc), 0644)
+	_ = os.WriteFile(entryFile, []byte(pageSrc), 0644)
+	_ = os.WriteFile(themeFile, []byte(themeSrc), 0644)
 
 	entryMod := ModuleSource{Program: parseProg(t, pageSrc), Path: entryFile, RawSource: pageSrc}
 	themeMod := ModuleSource{Program: parseProg(t, themeSrc), Path: themeFile, RawSource: themeSrc}
@@ -297,7 +299,7 @@ export default function Page() {
 	MergeImportAliases(ann, []ModuleSource{themeMod}, entryMod)
 
 	if _, ok := ann.Functions["DocsLayout"]; !ok {
-		t.Fatalf("expected alias DocsLayout → NightLayout to be resolvable after MergeImportAliases")
+		t.Fatalf("expected alias DocsLayout -> NightLayout to be resolvable after MergeImportAliases")
 	}
 	if !ann.UsedComponents["DocsLayout"] {
 		t.Error("expected the aliased component to be walked as used from the entry")
@@ -307,10 +309,116 @@ export default function Page() {
 func TestBuildImportAliasesIgnoresUnresolvableBindings(t *testing.T) {
 	dir := t.TempDir()
 	aFile := filepath.Join(dir, "a.tsx")
-	os.WriteFile(aFile, []byte(`import Sidebar from "./missing/layout";`), 0644)
+	_ = os.WriteFile(aFile, []byte(`import Sidebar from "./missing/layout";`), 0644)
 	mod := ModuleSource{Program: parseProg(t, `import Sidebar from "./missing/layout";`), Path: aFile, RawSource: ""}
 	aliases := BuildImportAliases([]ModuleSource{mod, mod})
 	if len(aliases) != 0 {
 		t.Errorf("expected no aliases for an unresolvable import, got %v", aliases)
+	}
+}
+
+// An async function component is a server component: TierRuntime regardless
+// of its declaration form, and even when no directive or convention applies.
+func TestClassifyAsyncComponentsAsRuntime(t *testing.T) {
+	src := `async function Comments() { return <ul></ul>; }
+const Likes = async () => <b>1</b>;
+function Plain() { return <i>x</i>; }
+export default async function Page() { return <div><Comments /><Likes /><Plain /></div>; }`
+	ann := Annotate(parseProg(t, src), &config.Config{}, "page.tsx", src)
+	for name, want := range map[string]irtree.ComponentTier{
+		"Page":     irtree.TierRuntime,
+		"Comments": irtree.TierRuntime,
+		"Likes":    irtree.TierRuntime,
+		"Plain":    irtree.TierClient,
+	} {
+		if got := ann.ComponentTiers[name]; got != want {
+			t.Errorf("%s: tier %v, want %v", name, got, want)
+		}
+	}
+	if !ann.Functions["Likes"].Async {
+		t.Error("async arrow components must keep the Async flag")
+	}
+}
+
+func tiersOf(t *testing.T, raw string) map[string]irtree.ComponentTier {
+	t.Helper()
+	prog, errs := tsstrip.Parse("page.tsx", raw, tsstrip.Options{})
+	if len(errs) > 0 {
+		t.Fatal(errs)
+	}
+	return Annotate(prog, &config.Config{}, "page.tsx", raw).ComponentTiers
+}
+
+func TestTierDecoratorClassifiesOneComponent(t *testing.T) {
+	tiers := tiersOf(t, `@static
+const Badge = () => <b>x</b>;
+function Plain() { return <i>x</i>; }
+export default function Page() { return <main><Badge /><Plain /></main>; }
+`)
+	if tiers["Badge"] != irtree.TierStatic {
+		t.Errorf("Badge = %v", tiers["Badge"])
+	}
+	if tiers["Plain"] != irtree.TierClient || tiers["Page"] != irtree.TierClient {
+		t.Errorf("decorator leaked: %v", tiers)
+	}
+}
+
+func TestTierDecoratorBeatsFileDirective(t *testing.T) {
+	tiers := tiersOf(t, `// @server
+@client
+function Counter() { return <i>x</i>; }
+export default function Page() { return <main><Counter /></main>; }
+`)
+	if tiers["Counter"] != irtree.TierClient || tiers["Page"] != irtree.TierServer {
+		t.Errorf("tiers = %v", tiers)
+	}
+}
+
+// Only comments carry file directives: an `@server/*` alias in an import or a
+// decorator on one component must not classify the whole file.
+func TestFileDirectiveIgnoresCode(t *testing.T) {
+	for _, src := range []string{
+		`import { a } from "@server/lib";`,
+		"@server\nfunction Helper() {}",
+		`const s = "@static";`,
+		"// see @serverless docs",
+	} {
+		if got := detectDirectiveTierFromSource(src); got != irtree.TierUnknown {
+			t.Errorf("%q classified as %v", src, got)
+		}
+	}
+	for src, want := range map[string]irtree.ComponentTier{
+		"// @server\nimport a from 'a';":      irtree.TierServer,
+		"/** @static */\nexport const a = 1;": irtree.TierStatic,
+		"import a from 'a';\n// @runtime":     irtree.TierRuntime,
+		"// @client - runs in the browser\n":  irtree.TierClient,
+		"// @server\n// @static\n":            irtree.TierStatic,
+	} {
+		if got := detectDirectiveTierFromSource(src); got != want {
+			t.Errorf("%q = %v, want %v", src, got, want)
+		}
+	}
+}
+
+// Two builds in one process, each with its own tsconfig alias for the same
+// specifier, must each resolve to their own project's module.
+func TestBuildImportAliasesUseTheModulesOwnResolver(t *testing.T) {
+	run := func(t *testing.T, declared string) map[string]string {
+		dir := t.TempDir()
+		_ = os.MkdirAll(filepath.Join(dir, "src", "ui"), 0755)
+		layout := filepath.Join(dir, "src", "ui", "layout.tsx")
+		_ = os.WriteFile(layout, []byte("export default function "+declared+"() { return <div/>; }"), 0644)
+		entry := filepath.Join(dir, "src", "page.tsx")
+		res := bundler.NewImportResolver([]string{"@/*"}, [][]string{{"./*"}}, filepath.Join(dir, "src"))
+		src := `import Page from "@/ui/layout"; export default function P() { return <Page/>; }`
+		return BuildImportAliases([]ModuleSource{
+			{Program: parseProg(t, src), Path: entry, Resolver: res},
+			{Program: parseProg(t, "export default function "+declared+"() { return <div/>; }"), Path: layout, Resolver: res},
+		})
+	}
+	a := run(t, "Alpha")
+	b := run(t, "Beta")
+	if a["Page"] != "Alpha" || b["Page"] != "Beta" {
+		t.Errorf("aliases leaked between builds: a=%v b=%v", a, b)
 	}
 }

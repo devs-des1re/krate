@@ -30,67 +30,87 @@ export function reconcile<T>(
   }
 
   if (keyFn) {
-    // Keyed reconciliation
-    const keyMap = new Map<string | number, Node>();
+    // Keyed reconciliation: reuse the existing node for a key still present
+    // (preserving DOM state such as focus/scroll), create nodes only for new
+    // keys, then drop stale nodes and reorder.
+    const existingByKey = new Map<string | number, Node>();
     for (const child of existing) {
       const key = (child as any).__k;
-      if (key != null) keyMap.set(key, child);
+      if (key != null && !existingByKey.has(key)) existingByKey.set(key, child);
     }
 
     const newNodes: Node[] = [];
-    const usedKeys = new Set<string | number>();
-
     for (let i = 0; i < items.length; i++) {
-      const item = items[i];
-      const key = keyFn(item);
-      usedKeys.add(key);
-
-      const newNode = mapFn(item, i);
-      (newNode as any).__k = key;
-      newNodes.push(newNode);
+      const key = keyFn(items[i]);
+      let node = existingByKey.get(key);
+      if (node) {
+        // Consume the key so a later duplicate key falls back to a fresh node.
+        existingByKey.delete(key);
+      } else {
+        node = mapFn(items[i], i);
+        (node as any).__k = key;
+      }
+      newNodes.push(node);
     }
 
-    // Remove nodes whose keys are no longer present
-    for (const [key, child] of keyMap) {
-      if (!usedKeys.has(key) && child.parentNode === parent) {
+    // Remove nodes whose keys are no longer present.
+    for (const child of existingByKey.values()) {
+      if (child.parentNode === parent) {
         disposeNode(child);
         parent.removeChild(child);
       }
     }
 
-    // Reorder: insert nodes in the correct order before endMarker
-    for (let i = 0; i < newNodes.length; i++) {
-      const newNode = newNodes[i];
-      // Find the node that should be before this one
+    // Place nodes in order. Newly created nodes (not yet attached) are gathered
+    // into consecutive runs and inserted as a single DocumentFragment, so a
+    // block of new items costs one DOM mutation instead of one per node. Reused
+    // nodes are moved individually only when they are out of position.
+    let i = 0;
+    while (i < newNodes.length) {
       const prevNode = i === 0 ? startMarker : newNodes[i - 1];
-      if (newNode !== prevNode.nextSibling) {
-        parent.insertBefore(newNode, prevNode.nextSibling);
+      if (newNodes[i].parentNode !== parent) {
+        const frag = document.createDocumentFragment();
+        const ref = prevNode.nextSibling;
+        do {
+          frag.appendChild(newNodes[i]);
+          i++;
+        } while (i < newNodes.length && newNodes[i].parentNode !== parent);
+        parent.insertBefore(frag, ref);
+      } else {
+        if (newNodes[i] !== prevNode.nextSibling) {
+          parent.insertBefore(newNodes[i], prevNode.nextSibling);
+        }
+        i++;
       }
     }
   } else {
-    // Unkeyed: simple index-based reconciliation
-    const maxLen = Math.max(existing.length, items.length);
+    // Unkeyed: index-based reconciliation. Existing nodes are replaced in
+    // place, excess nodes are dropped, and the new tail is appended as a single
+    // DocumentFragment insert.
+    const existingLen = existing.length;
+    const replacementLen = Math.min(existingLen, items.length);
 
-    for (let i = 0; i < maxLen; i++) {
-      if (i < items.length) {
-        const newNode = mapFn(items[i], i);
-        if (i < existing.length) {
-          // Replace existing node
-          if (existing[i] !== newNode) {
-            disposeNode(existing[i]);
-            parent.replaceChild(newNode, existing[i]);
-          }
-        } else {
-          // Append new node before endMarker
-          parent.insertBefore(newNode, endMarker);
-        }
-      } else if (i < existing.length) {
-        // Remove excess existing nodes
-        if (existing[i].parentNode === parent) {
-          disposeNode(existing[i]);
-          parent.removeChild(existing[i]);
-        }
+    for (let i = 0; i < replacementLen; i++) {
+      const newNode = mapFn(items[i], i);
+      if (existing[i] !== newNode) {
+        disposeNode(existing[i]);
+        parent.replaceChild(newNode, existing[i]);
       }
+    }
+
+    for (let i = items.length; i < existingLen; i++) {
+      if (existing[i].parentNode === parent) {
+        disposeNode(existing[i]);
+        parent.removeChild(existing[i]);
+      }
+    }
+
+    if (items.length > existingLen) {
+      const frag = document.createDocumentFragment();
+      for (let i = existingLen; i < items.length; i++) {
+        frag.appendChild(mapFn(items[i], i));
+      }
+      parent.insertBefore(frag, endMarker);
     }
   }
 }
@@ -135,7 +155,7 @@ export function conditional(
   });
 }
 
-// ─── Tree reconciliation (SPA navigation) ───────────────────────────────────
+// Tree reconciliation (SPA navigation)
 // Diffs a live DOM subtree against a freshly-parsed one, patching only what
 // changed. Unchanged nodes are kept in place so their state survives navigation:
 // element listeners attached at hydration (`__krate_<event>` props), media
@@ -152,6 +172,8 @@ function nodeKey(n: Node): string | null {
     const el = n as Element;
     const dk = el.getAttribute('data-k');
     if (dk) return dk;
+    const kc = el.getAttribute('data-kc');
+    if (kc) return 'kc:' + kc;
     const id = el.getAttribute('id');
     if (id) return '#' + id;
   }
@@ -169,8 +191,9 @@ function syncAttributes(oldEl: Element, newEl: Element): void {
       oldEl.setAttribute(name, value);
     }
   }
-  // Pass 2: remove attributes no longer present.
-  for (let i = 0; i < oldEl.attributes.length; i++) {
+  // Pass 2: remove attributes no longer present. Iterate backwards because
+  // removing an attribute shifts the live NamedNodeMap left.
+  for (let i = oldEl.attributes.length - 1; i >= 0; i--) {
     const name = oldEl.attributes[i].name;
     if (!newNames.has(name)) {
       oldEl.removeAttribute(name);
@@ -212,6 +235,16 @@ function reconcileNode(oldNode: Node, newNode: Node): Node {
   const oldEl = oldNode as Element;
   const newEl = newNode as Element;
   if (nodeKey(oldEl) !== nodeKey(newEl)) return replaceNode(oldEl, newEl);
+  // A <template>'s content is not in childNodes, so it cannot be diffed in
+  // place; replace it whenever its markup changed (conditional branches are
+  // carried in <template data-kc> elements).
+  if (oldEl.tagName === 'TEMPLATE') {
+    if ((oldEl as HTMLTemplateElement).innerHTML !== (newEl as HTMLTemplateElement).innerHTML) {
+      return replaceNode(oldEl, newEl);
+    }
+    syncAttributes(oldEl, newEl);
+    return oldEl;
+  }
 
   syncAttributes(oldEl, newEl);
   reconcileChildren(oldEl, newEl);
@@ -291,7 +324,7 @@ function reconcileChildren(parent: Node, newParent: Node): void {
         parent.insertBefore(placedNode, anchor);
       }
     } else {
-      // Keyed but not present in old tree → insert new
+      // Keyed but not present in old tree -> insert new
       placedNode = document.importNode(newChild, true);
       parent.insertBefore(placedNode, anchor);
     }
@@ -324,6 +357,7 @@ export function reconcileTrees(oldRoot: Node, newRoot: Node): void {
   if (oldEl.tagName !== newEl.tagName) {
     const imported = document.importNode(newRoot, true);
     if (oldEl.parentNode) {
+      disposeNode(oldEl);
       oldEl.parentNode.replaceChild(imported, oldEl);
     }
     return;

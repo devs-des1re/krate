@@ -20,7 +20,7 @@ import (
 
 // writeTestPlugin writes a JS plugin module into a temp project and returns
 // the project root, output dir, and a config pointing at it.
-func writeTestPlugin(t *testing.T, code string) (root, outDir string, cfg config.PluginConfig) {
+func writeTestPlugin(t testing.TB, code string) (root, outDir string, cfg config.PluginConfig) {
 	t.Helper()
 	root = t.TempDir()
 	outDir = filepath.Join(root, "dist")
@@ -259,7 +259,7 @@ export default {
 };
 `)
 
-	// Plugin only implements AfterRender — running AfterPage should be a no-op.
+	// Plugin only implements AfterRender - running AfterPage should be a no-op.
 	ctx := &PageHookCtx{Page: "p.tsx", OutName: "p", HTML: "orig", HeadHTML: ""}
 	if err := RunCommunityPlugins("AfterPage", []config.PluginConfig{cfg}, root, outDir, ctx); err != nil {
 		t.Fatalf("RunCommunityPlugins: %v", err)
@@ -293,6 +293,34 @@ export default {
 	}
 	if !contains(string(data), "<h1>hi</h1>") {
 		t.Errorf("generated route missing content: %q", data)
+	}
+}
+
+func TestJSPluginRouteTitleIsEscaped(t *testing.T) {
+	root, outDir, cfg := writeTestPlugin(t, `
+export default {
+  name: "routes-plugin",
+  order: 10,
+  hooks: {
+    GenerateRoutes(ctx, options, krate) {
+      return { routes: [{ path: "generated/hello", title: "Q&A </title><script>x()</script>", content: "<h1>hi</h1>" }] };
+    },
+  },
+};
+`)
+	ctx := &BuildHookCtx{Root: root, OutDir: outDir, Pages: nil}
+	if err := RunCommunityPlugins("GenerateRoutes", []config.PluginConfig{cfg}, root, outDir, ctx); err != nil {
+		t.Fatalf("RunCommunityPlugins: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(outDir, "generated", "hello", "index.html"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(string(data), "<title>Q&amp;A &lt;/title&gt;&lt;script&gt;x()&lt;/script&gt;</title>") {
+		t.Errorf("route title was not escaped: %q", data)
+	}
+	if contains(string(data), "<script>x()") {
+		t.Errorf("route title injected markup: %q", data)
 	}
 }
 
@@ -719,7 +747,7 @@ export default {
 
 	// Verbose on: krate.log and console.log now appear, still prefixed.
 	SetVerbose(true)
-	stdout, stderr = captureOutput(t, func() {
+	stdout, _ = captureOutput(t, func() {
 		if err := RunCommunityPlugins("BeforeBuild", []config.PluginConfig{cfg}, root, outDir, ctx); err != nil {
 			t.Fatalf("RunCommunityPlugins (verbose): %v", err)
 		}
@@ -749,7 +777,7 @@ func TestHookTrace(t *testing.T) {
 	}
 
 	SetVerbose(true)
-	stdout, stderr = captureOutput(t, func() {
+	_, stderr = captureOutput(t, func() {
 		traceHook("demo", "BeforeBuild", 12*time.Millisecond, nil)
 		traceHook("demo", "AfterRender", 3*time.Millisecond, errTraceTest)
 	})

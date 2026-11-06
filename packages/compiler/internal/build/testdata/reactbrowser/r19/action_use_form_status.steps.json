@@ -1,0 +1,6 @@
+{
+  "steps": [
+    { "op": "click", "sel": "#submit", "then": "#submit:has-text('saving')" },
+    { "op": "eval", "js": "window.__release()", "then": "text=subscribed ada" }
+  ]
+}

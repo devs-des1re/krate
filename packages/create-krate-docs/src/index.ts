@@ -4,11 +4,15 @@ import {
   mkdirSync,
   readdirSync,
   readFileSync,
+  copyFileSync,
   writeFileSync,
 } from 'node:fs';
-import { basename, dirname, join, relative, resolve } from 'node:path';
+import { basename, dirname, extname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
+import { escapeDisplayName } from './escape.js';
+import { commandSpec } from './spawn.js';
+import { krateRange } from './version.js';
 import { createInterface } from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 
@@ -40,7 +44,7 @@ interface Options {
 }
 
 const HELP = `
-${c.bold}create-krate-docs${c.reset} — scaffold a new Krate documentation site
+${c.bold}create-krate-docs${c.reset} - scaffold a new Krate documentation site
 
 ${c.bold}Usage${c.reset}
   ${c.cyan}create-krate-docs${c.reset} [project-directory] [options]
@@ -155,9 +159,17 @@ async function promptProjectName(): Promise<string> {
   }
 }
 
+const SKIP_DIRS = new Set(['node_modules', 'dist', '.krate']);
+const TEXT_EXT = new Set([
+  '', '.json', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.cjs', '.md', '.mdx',
+  '.css', '.html', '.htm', '.svg', '.txt', '.yml', '.yaml', '.toml', '.xml',
+  '.map', '.webmanifest', '.go', '.mod', '.sum',
+]);
+
 function walkDir(dir: string): string[] {
   const out: string[] = [];
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    if (entry.isDirectory() && SKIP_DIRS.has(entry.name)) continue;
     const full = join(dir, entry.name);
     if (entry.isDirectory()) out.push(...walkDir(full));
     else out.push(full);
@@ -179,11 +191,17 @@ function copyTemplate(
     // a dotless `gitignore` file and we restore the leading dot here.
     const destRel = basename(rel) === 'gitignore' ? join(dirname(rel), '.gitignore') : rel;
     const dest = join(destDir, destRel);
-    let content = readFileSync(src, 'utf-8');
-    for (const [key, value] of Object.entries(vars)) {
-      content = content.split(key).join(value);
-    }
     mkdirSync(dirname(dest), { recursive: true });
+    if (!TEXT_EXT.has(extname(src).toLowerCase())) {
+      copyFileSync(src, dest);
+      continue;
+    }
+    let content = readFileSync(src, 'utf-8');
+    const ext = extname(src);
+    for (const [key, value] of Object.entries(vars)) {
+      const v = key === '__PROJECT_DISPLAY_NAME__' ? escapeDisplayName(ext, value) : value;
+      content = content.split(key).join(v);
+    }
     writeFileSync(dest, content);
   }
 }
@@ -197,7 +215,11 @@ function installDependencies(pm: PackageManager, dir: string): void {
   process.stdout.write(
     `\n${c.bold}Installing dependencies with ${pm}...${c.reset}\n\n`,
   );
-  const result = spawnSync(pm, ['install'], { stdio: 'inherit', cwd: dir });
+  const spec = commandSpec(pm, ['install']);
+  const result = spawnSync(spec.command, spec.args, { stdio: 'inherit', cwd: dir, shell: spec.shell });
+  if (result.error) {
+    fail(`Could not run \`${pm} install\` (${result.error.message}). Run it manually.`);
+  }
   if (result.status !== 0) {
     fail(`Dependency installation failed. Run \`${pm} install\` manually.`);
   }
@@ -246,6 +268,7 @@ async function main(): Promise<void> {
   copyTemplate(templateDir, targetDir, {
     __PROJECT_NAME__: validName,
     __PROJECT_DISPLAY_NAME__: toDisplayName(projectName),
+    __KRATE_VERSION__: krateRange(pkg.version),
   });
 
   const installed = !skipInstall;

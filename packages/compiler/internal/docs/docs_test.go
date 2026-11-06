@@ -308,6 +308,24 @@ func TestSidebarTreeNavConfig(t *testing.T) {
 	}
 }
 
+// TestBuildBreadcrumbsAbsoluteURLs verifies breadcrumb URLs include the docs
+// base path (like sidebar and prev/next links) rather than being base-relative.
+func TestBuildBreadcrumbsAbsoluteURLs(t *testing.T) {
+	crumbs := BuildBreadcrumbs("guides/react-compatibility")
+	if len(crumbs) != 2 {
+		t.Fatalf("crumbs = %+v", crumbs)
+	}
+	if crumbs[0].URL != "/docs/guides/" {
+		t.Errorf("crumb[0].URL = %q, want /docs/guides/", crumbs[0].URL)
+	}
+	if crumbs[1].URL != "/docs/guides/react-compatibility/" {
+		t.Errorf("crumb[1].URL = %q, want /docs/guides/react-compatibility/", crumbs[1].URL)
+	}
+	if !crumbs[1].IsLast {
+		t.Error("final crumb should be last")
+	}
+}
+
 func containsTitle(items []SidebarItem, title string) bool {
 	for _, it := range items {
 		if it.Title == title {
@@ -330,4 +348,30 @@ func sliceEq(a, b []string) bool {
 		}
 	}
 	return true
+}
+
+// Entities in rendered content must not reach the search index: the UI escapes
+// snippets itself, so a stored &quot; would be shown literally.
+func TestBuildSearchIndexStoresPlainText(t *testing.T) {
+	content := `<p>Call <code>say(&quot;hi&quot;)</code> and don&#39;t panic &amp; carry on.</p><pre><code>x &lt; y</code></pre>`
+	for name, c := range map[string]string{"short": content, "long": content + strings.Repeat("<p>filler text</p>", 80)} {
+		entries := BuildSearchIndex([]Page{{Title: "T", Path: "t", Content: c}})
+		got := entries[0].Content
+		for _, bad := range []string{"&quot;", "&#39;", "&amp;", "&lt;"} {
+			if strings.Contains(got, bad) {
+				t.Errorf("%s: index still contains %s: %q", name, bad, got)
+			}
+		}
+		for _, want := range []string{`say("hi")`, "don't panic & carry on", "x < y"} {
+			if !strings.Contains(got, want) {
+				t.Errorf("%s: index missing %q: %q", name, want, got)
+			}
+		}
+	}
+	// Truncation keeps multi-byte characters whole.
+	long := "<p>" + strings.Repeat("\u00e9", 600) + "</p>"
+	got := BuildSearchIndex([]Page{{Title: "T", Path: "t", Content: long}})[0].Content
+	if len([]rune(got)) != 500 || strings.ContainsRune(got, '\ufffd') {
+		t.Errorf("truncation split a rune: %d runes", len([]rune(got)))
+	}
 }

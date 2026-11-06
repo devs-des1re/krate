@@ -1,0 +1,10 @@
+{
+  "ready": "#todos",
+  "steps": [
+    { "op": "press", "sel": "#title", "key": "Enter" },
+    { "op": "waitFor", "sel": "#error" },
+    { "op": "fill", "sel": "#title", "text": "ship Krate" },
+    { "op": "press", "sel": "#title", "key": "Enter", "then": "#busy:has-text('saving')" },
+    { "op": "eval", "js": "window.__save()", "then": "#busy:has-text('ready')" }
+  ]
+}

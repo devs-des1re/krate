@@ -1,0 +1,6 @@
+{
+  "steps": [
+    { "op": "click", "sel": "#send", "then": "#thread li.sending" },
+    { "op": "eval", "js": "window.__release()", "then": "#thread li.sent:nth-child(2)" }
+  ]
+}

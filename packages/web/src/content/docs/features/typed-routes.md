@@ -1,14 +1,14 @@
 ---
 title: Typed Routes & Content
 description: End-to-end TypeScript safety for links, route params, and content collections.
-order: 12
+order: 14
 ---
 
 # Typed Routes & Content
 
 Krate knows every route and content entry at build time, so it generates
 TypeScript declarations for them. `<Link href>`, dynamic route params, and
-content collections become fully type-checked — with no configuration and no
+content collections become fully type-checked - with no configuration and no
 runtime cost.
 
 ## Generated files
@@ -23,7 +23,7 @@ Every `krate build` (and the standalone `krate types` command) writes:
 | `src/krate-content.d.ts` | Ambient types for the virtual `krate/content` module |
 | `.krate/gen/content.ts` | Codegen'd `krate/content` module (baked entries + `getCollection`) |
 
-All of these are generated — add them to `.gitignore` and regenerate in CI. The
+All of these are generated - add them to `.gitignore` and regenerate in CI. The
 `.krate/` directory is ignored by default; add `krate-env.d.ts` and
 `krate-content.d.ts` too.
 
@@ -84,7 +84,7 @@ export default defineConfig({
 });
 ```
 
-`defineContent` is an optional identity helper — a plain object works too:
+`defineContent` is an optional identity helper - a plain object works too:
 
 ```ts
 export default defineConfig({
@@ -99,7 +99,16 @@ Field specs are either a shorthand type string (`"string"`, `"number"`,
 an optional `required` flag. Unknown fields are ignored; omitted optional fields
 are fine.
 
-A **required** field that is missing — or a value of the wrong type — fails the
+- `enum: ["draft", "live"]` on a string field restricts the value and types it as
+  the union `"draft" | "live"`.
+- A field with a `default` is filled in for every entry, so it is not optional in
+  the generated type.
+- `date` accepts an ISO 8601 date or date-time (`2024-01-31`,
+  `2024-01-31T09:30:00Z`); anything else is a validation error.
+- Hidden files and folders (editor lock files such as `.#post.md`) are skipped.
+  Two files that share a slug (`post.md` and `post.mdx`) fail the build.
+
+A **required** field that is missing - or a value of the wrong type - fails the
 build (and `krate types` exits non-zero):
 
 ```text
@@ -151,7 +160,7 @@ export default function BlogIndex() {
 ```
 
 Because `getCollection` returns literal data at build time, it **folds into
-static HTML** — the example above ships zero client JavaScript for the list.
+static HTML** - the example above ships zero client JavaScript for the list.
 Supported operations include `filter`, `sort`, `find`, `slice`, and `map`
 (evaluated in the embedded engine at build time). Each entry exposes:
 
@@ -200,14 +209,16 @@ export default function BlogPost(props: { params?: { slug: string } }) {
 ```
 
 `generateStaticParams` bakes one static page per entry (`/blog/hello-collections`,
-…). The route parameter (`props.params.slug`) is substituted before rendering, so
-the `find(...)` lookup folds to the matching entry at build time — no runtime
+...). The route parameter (`props.params.slug`) is substituted before rendering, so
+the `find(...)` lookup folds to the matching entry at build time - no runtime
 data access.
 
-> Both places that run user TypeScript at build time resolve `krate/content`:
-> the Go bundler for page/component code, and `npx tsx` for
-> `generateStaticParams` (via the generated `.krate/tsconfig.json`, which also
-> carries your project's own path aliases).
+:::note
+Both places that run user TypeScript at build time resolve `krate/content`: the
+Go bundler for page/component code, and the esbuild bootstrap for
+`generateStaticParams` (which also carries your project's own path aliases).
+The bootstrap is emitted as ESM and run on the configured runtime.
+:::
 
 ## Static output & dynamic params
 
@@ -226,8 +237,8 @@ generateStaticParams.dynamicParams = false;   // only the baked slugs are valid
 With `dynamicParams = false`:
 
 - The build emits **only** the concrete pages from `generateStaticParams`
-  (`/blog/hello-collections`, …). The `[param]` fallback template is not written.
-- Requests for other params (`/blog/nope`) **404**, with no server required — the
+  (`/blog/hello-collections`, ...). The `[param]` fallback template is not written.
+- Requests for other params (`/blog/nope`) **404**, with no server required - the
   output is safe to host on any static CDN.
 
 The equivalent forms are `export const dynamicParams = false` or
@@ -245,10 +256,10 @@ export default defineConfig({
 
 This does two things:
 
-1. **Dynamic routes are closed by default** — every `[param]` route behaves as
+1. **Dynamic routes are closed by default** - every `[param]` route behaves as
    `dynamicParams = false` unless it opts back in with
    `export const dynamicParams = true`.
-2. **Request-time rendering is disabled** — pages that would have been SSR, ISR,
+2. **Request-time rendering is disabled** - pages that would have been SSR, ISR,
    or streaming are built as plain static pages.
 
 `output: "static"` is the way to guarantee that *only* statically renderable
@@ -256,7 +267,7 @@ routes exist in the build.
 
 ## The `krate types` command
 
-Generate declarations without running a full build — useful in CI and editors:
+Generate declarations without running a full build - useful in CI and editors:
 
 ```sh
 krate types          # writes .krate/types + src/krate-env.d.ts + src/krate-content.d.ts
@@ -266,25 +277,15 @@ krate types ./site   # explicit project directory
 A typical CI type-check:
 
 ```sh
-krate types && tsc --noEmit
+krate typecheck
 ```
 
-> `krate types` discovers routes from `src/pages` and validates content
-> collections, but it does not run plugins. For sites whose pages are generated
-> by a plugin (for example the [docs plugin](/docs/features/plugins/)), run
-> `krate build` to include those routes in the generated declarations.
+:::note
+`krate types` discovers routes from `src/pages` and validates content
+collections, but it does not run plugins. For sites whose pages are generated by
+a plugin (for example the [docs plugin](/docs/features/plugins/)), run
+`krate build` to include those routes in the generated declarations.
+:::
 
-## How it works
-
-- Routes come from the page tree (`src/pages/**`), including plugin-generated
-  pages and dynamic `[param]` segments. Error pages (`404`/`500`) are excluded.
-- Collection entries are discovered under each collection's `dir`; frontmatter
-  is parsed with the same mini-YAML parser used by the docs plugin, and each
-  entry's body is rendered through the markdown pipeline.
-- `getCollection(...)` chains are evaluated and inlined as literal arrays before
-  rendering, so collection-driven lists and single-entry reads bake into the
-  page.
-- Route/params types are advisory: `krate-env.d.ts` imports them and augments
-  the runtime. If generation fails, the build warns rather than stopping.
-- Content **schema violations are build errors**, because they indicate a
-  content bug.
+For how route and collection types are generated, see
+[Contributing -> Architecture](/docs/contributing/architecture/#typed-routes-content).

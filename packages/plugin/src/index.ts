@@ -1,8 +1,8 @@
 /**
- * @krate/plugin — TypeScript types and helpers for writing Krate plugins.
+ * @krate/plugin - TypeScript types and helpers for writing Krate plugins.
  *
  * Covers JS community plugins (typed hook contexts + outputs) and Go-plugin
- * npm descriptors (runtime + binaries). Helpers are compile-time no-ops — they
+ * npm descriptors (runtime + binaries). Helpers are compile-time no-ops - they
  * are erased when the plugin is bundled into Krate's embedded runtime.
  */
 
@@ -50,6 +50,12 @@ export type {
   PagefindOptions,
 } from "./docs.js";
 export { defineDocsTheme } from "./docs.js";
+export type {
+  MarkdownPluginContext,
+  MarkdownPluginDescriptor,
+  MarkdownTransform,
+} from "./markdown.js";
+export { defineMarkdownPlugin } from "./markdown.js";
 export type { PluginHookFn, PluginOutput } from "./output.js";
 export type { Krate } from "./krate.js";
 export {

@@ -1,5 +1,5 @@
 /**
- * Dev Error Overlay — shows a styled error overlay in development mode.
+ * Dev Error Overlay - shows a styled error overlay in development mode.
  * Catches unhandled errors and unhandled promise rejections,
  * displays them in a dismissable overlay with file/line info.
  */
@@ -16,7 +16,7 @@ function getOverlayStyle(): string {
 
 function getCardStyle(): string {
   return `
-    background:#1a1a2e;border:1px solid #e74c3c;border-radius:8px;
+    background:#171717;border:1px solid #e74c3c;border-radius:8px;
     padding:24px 32px;max-width:800px;max-height:80vh;overflow:auto;
     box-shadow:0 8px 32px rgba(231,76,60,0.3);width:90%;
   `;
@@ -27,11 +27,11 @@ function getTitleStyle(): string {
 }
 
 function getMessageStyle(): string {
-  return `color:#ecf0f1;font-size:14px;line-height:1.6;white-space:pre-wrap;word-break:break-word;`;
+  return `color:#e5e5e5;font-size:14px;line-height:1.6;white-space:pre-wrap;word-break:break-word;`;
 }
 
 function getStackStyle(): string {
-  return `color:#95a5a6;font-size:12px;line-height:1.5;margin-top:12px;white-space:pre-wrap;`;
+  return `color:#a3a3a3;font-size:12px;line-height:1.5;margin-top:12px;white-space:pre-wrap;`;
 }
 
 function getCloseBtnStyle(): string {
@@ -71,17 +71,17 @@ function showError(title: string, message: string, stack?: string): void {
 
   const source = stack ? parseStack(stack) : null;
   const sourceLink = source
-    ? `<div style="${getSourceLinkStyle()}" onclick="navigator.clipboard.writeText('${source.file}:${source.line}:${source.col}')">📋 ${source.file}:${source.line}:${source.col}</div>`
+    ? `<div style="${getSourceLinkStyle()}" onclick="navigator.clipboard.writeText('${source.file}:${source.line}:${source.col}')">[copy] ${source.file}:${source.line}:${source.col}</div>`
     : '';
 
   overlay.innerHTML = `
     <div style="${getCardStyle()};position:relative;">
-      <button style="${getCloseBtnStyle()}" onclick="document.getElementById('krate-error-overlay').remove();window.__krate_overlay_visible=false;">✕ Dismiss</button>
-      <div style="${getTitleStyle()}">⚡ ${title}</div>
+      <button style="${getCloseBtnStyle()}" onclick="document.getElementById('krate-error-overlay').remove();window.__krate_overlay_visible=false;">x Dismiss</button>
+      <div style="${getTitleStyle()}">* ${title}</div>
       <div style="${getMessageStyle()}">${escapeHTML(message)}</div>
       ${sourceLink}
       ${stack ? `<div style="${getStackStyle()}">${escapeHTML(stack)}</div>` : ''}
-      <div style="color:#7f8c8d;font-size:11px;margin-top:16px;">Press Esc to dismiss · Edit the file to fix, then the page will auto-reload</div>
+      <div style="color:#8a8a8a;font-size:11px;margin-top:16px;">Press Esc to dismiss - Edit the file to fix, then the page will auto-reload</div>
     </div>
   `;
 

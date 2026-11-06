@@ -1,17 +1,13 @@
 ---
 title: Configuration
 order: 3
-description: Every krate.config.ts option, type-checked with defineConfig.
-toc:
-  minLevel: 2
-  maxLevel: 3
-  label: Config sections
+description: The krate.config.ts entry point and a map of every option group.
 ---
 
 # Configuration
 
 Krate is configured with a `krate.config.ts` file at the project root, typed
-with `defineConfig` from `@krate/core`. Every supported key is type-checked —
+with `defineConfig` from `@krate/core`. Every supported key is type-checked -
 unknown or misspelled options become compile errors.
 
 ```typescript
@@ -31,163 +27,68 @@ export default defineConfig({
 });
 ```
 
-## Build options
+React syntax (`useState`, `useEffect`, `useRef`, JSX) is transpiled to Krate
+signals and effects automatically - no config is required. See
+[React Compatibility](/docs/guides/react-compatibility/).
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `entry` | `string` | `src/index.tsx` | Entry point |
-| `outDir` | `string` | `dist` | Output directory |
-| `pagesDir` | `string` | `src/pages` | Pages directory |
-| `publicDir` | `string` | `public` | Static assets directory |
-| `minify` | `boolean` | `true` | Enable all minification |
-| `sourcemap` | `boolean` | `false` | Write per-page sourcemaps (`index.<hash>.js.map`) |
+## Validation
 
-React syntax (`useState`, `useEffect`, `useRef`, JSX) is always transpiled to
-Krate signals and effects; no config is required. The former `emitReact` option
-is accepted but ignored.
+Beyond editor type-checking, the compiler validates the file when it loads it:
 
-## Runtime
+- An unknown key at any depth, including inside arrays of objects
+  (`redirects[].permanant`), is reported as a warning and ignored.
+- A value of the wrong type is an error that names the file, the key and the
+  expected type, for example
+  `krate.config.ts: devServer.port must be a number (got string)`.
+- A `pagesDir` that does not exist (with no `entry` to fall back to) is an error:
+  `pagesDir src/nope does not exist`.
+- In `krate dev`, editing `krate.config.*`, `tailwind.config.*`, `tsconfig.json`
+  or an `.env*` file reloads the configuration and restarts the dev server; an
+  invalid edit is reported and the running server is left alone.
 
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `runtime` | `"node" \| "bun" \| "deno"` | `node` | Runtime for the API routes sidecar |
+## What a config file can use
 
-## Dev server
+`krate.config.ts` runs in-process (esbuild plus an embedded JavaScript engine),
+not under Node, so it sees a subset of the Node API:
 
-```typescript
-devServer: {
-  port: 3000,
-  open: true,
-}
-```
+- `process.env` holds the shell environment overlaid with the project's `.env`
+  files (the shell wins), and `NODE_ENV` is `"development"` in `krate dev` and
+  `"production"` otherwise unless the shell sets it. `process.cwd()` is the
+  project root; `process.platform` and `process.argv` are available.
+- `node:path`, `node:url`, `node:fs` (`readFileSync`, `existsSync`, `readdirSync`,
+  `statSync`) and `node:os` (`platform`, `homedir`, `tmpdir`, `EOL`, `arch`,
+  `type`, `cpus`). Relative `fs` paths resolve against the project root.
+- `__dirname` and `__filename` for each module, `import.meta.url`,
+  `module.exports` (alone or beside imports), top-level `await`, `URL`,
+  `crypto.randomUUID` and a small `Buffer` (`from`, `alloc`, `concat`,
+  `toString` as utf8, base64 or hex).
 
-## Tailwind CSS
+`fs` is read-only, and `statSync` returns only `isFile()`, `isDirectory()` and
+`isSymbolicLink()` (no size or times). Any other built-in (`child_process`,
+`crypto`, `net`, `zlib`, `fs/promises`, ...), with or without the `node:`
+prefix, fails with an error that names it (`require("child_process")` reports
+`Module not found: child_process`). The global `crypto.randomUUID()` works; it
+is the import that does not. A named import of something the shims lack, such as
+`import { createRequire } from "node:module"`, reports esbuild's
+`No matching export in "krate-node:module"`. Compute such values in a script
+and read them from the environment, or move the logic into a plugin. Packages
+from `node_modules` are bundled as usual.
 
-```typescript
-tailwind: {
-  enabled: false,
-  scanDirs: ["src"],       // or content: ["./src/**/*.{tsx,mdx}"]
-  preflight: false,        // opt-in base reset
-  strict: false,           // warn on classes that produce no rule
-  darkMode: "media",       // "media" | "class" | "selector"
-  executeConfig: false,    // run tailwind.config via npx tsx instead of static parse
-}
-```
+## Option groups
 
-Krate's Tailwind is **Go-native** (no PostCSS, no Node at build time). A
-candidate scanner extracts Tailwind tokens from source files and maps them to
-rules from a built-in rule set. It supports variants (`hover:`, `focus:`,
-`group-*`, responsive breakpoints, `dark:`, arbitrary variants), arbitrary
-values (`w-[100px]`, `bg-[#ff0000]`), negatives, and color opacity modifiers
-(`bg-blue-500/50`). Output is deterministic. Configuration lives in
-`tailwind.config.ts` and is **statically parsed** by default; set
-`executeConfig: true` to execute it via `npx tsx`. `theme.extend` merges onto
-the defaults; top-level `theme` keys replace them.
+This page is a map; the [Config Reference](/docs/reference/config/) documents
+every key and its default.
 
-This is a documented subset of Tailwind: JS plugins and `@apply` are not
-supported, and unknown classes produce no rule (enable `strict` to surface
-them).
-
-## Markdown
-
-```typescript
-markdown: {
-  gfm: true,
-  headingAnchors: true,
-  admonitions: true,
-  codeHighlight: true,
-  math: false,
-}
-```
-
-## Content Security Policy
-
-```typescript
-csp: {
-  enabled: false,
-  directive: "",   // custom CSP string (empty = auto-generate)
-}
-```
-
-When enabled, krate computes SHA-256 hashes of inline scripts and styles and
-emits them in the CSP meta tag.
-
-## SSR / ISR / Streaming
-
-```typescript
-ssr: {
-  streaming: false,          // force all *static* pages to streaming SSR
-  ssrRuntime: "node",        // sidecar runtime: "node" | "bun" | "deno"
-  rendererPort: 0,           // renderer sidecar port (0 = default)
-  timeout: 5000,             // max render time (ms)
-  maxCacheSize: 128,         // ISR in-memory cache size
-  middlewareRuntime: "quickjs", // middleware.ts runtime
-  apiRuntime: "quickjs",        // API route runtime
-}
-```
-
-`ssrRuntime` picks which runtime launches the SSR sidecar that renders
-SSR/ISR/streaming regions: `"node"` (default) runs the staged driver with plain
-node, `"bun"` with `bun run`, and `"deno"` with the needed `--allow-*` flags.
-
-`middlewareRuntime` and `apiRuntime` select the runtime that executes
-middleware and API routes: `"quickjs"` (default) uses the embedded QuickJS
-runtime (no Node.js needed), while `"node"`, `"bun"`, or `"deno"` uses a
-sidecar process.
-
-Rendering modes themselves are opted into **per page** via
-`export const config = { isr | ssr | streaming, revalidate }` — see
-[Rendering](/docs/core-concepts/rendering/). `ssr.streaming: true` forces all
-static (SSG) pages into streaming mode; explicit per-page `isr`/`ssr` still win.
-
-## Redirects & rewrites
-
-```typescript
-redirects: [
-  { source: "/old-page", destination: "/new-page", permanent: true },
-],
-
-rewrites: [
-  { source: "/docs/:path*", destination: "/documentation/:path*" },
-],
-```
-
-Redirects produce `301`/`302` responses; rewrites map URLs to internal paths.
-
-## Component tiers
-
-```typescript
-serverComponents: ["DataTable"],  // names to treat as @server
-runtimeComponents: ["AuthCheck"], // names to treat as @runtime
-serverDirs: ["src/components/server"],
-runtimeDirs: ["src/components/runtime"],
-```
-
-## Plugins
-
-```typescript
-plugins: [
-  sitemap({ baseUrl: "https://example.com" }),
-  docs({ contentDir: "src/content/docs", title: "Docs" }),
-  demoPlugin({ greeting: "Hello!" }),
-]
-```
-
-Built-in plugins use factory functions (`sitemap`, `docs`); community plugins
-are imported from local modules and take their own options object. Plugins run
-in `order` sequence (lower first).
-
-## SEO & robots
-
-```typescript
-seo: {
-  baseUrl: "https://example.com",
-  siteName: "Krate",
-  description: "A modern static site generator",
-},
-robots: {
-  allow: "/",
-}
-```
-
-See the [Config Reference](/docs/reference/config/) for every supported key.
+| Group | Key(s) | Reference |
+|-------|--------|-----------|
+| Build | `entry`, `outDir`, `pagesDir`, `publicDir`, `minify`, `sourcemap` | [Build](/docs/reference/config/#build) |
+| Dev server | `devServer` | [Dev server](/docs/reference/config/#dev-server) |
+| Rendering | `viewTransitions`, `ppr`, `ssr`, `output` | [SSR / Streaming](/docs/reference/config/#ssr-streaming) |
+| CSS & Tailwind | `tailwind` | [Tailwind CSS](/docs/reference/config/#tailwind-css) |
+| Markdown | `markdown` | [Markdown](/docs/reference/config/#markdown) |
+| Content | `content`, `pathAliases`, `tsBaseDir` | [Content collections](/docs/reference/config/#content-collections) |
+| Server | `server`, `basePath`, `redirects`, `rewrites` | [Server](/docs/reference/config/#server) |
+| Security | `csp`, `cors` | [Content Security Policy](/docs/reference/config/#content-security-policy) |
+| SEO | `seo`, `robots` | [SEO & robots](/docs/reference/config/#seo-robots) |
+| Checks | `checks` | [Quality checks](/docs/reference/config/#quality-checks) |
+| Plugins | `plugins` | [Plugins](/docs/reference/config/#plugins) |

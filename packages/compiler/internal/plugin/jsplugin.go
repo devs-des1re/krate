@@ -3,8 +3,11 @@ package plugin
 import (
 	"encoding/json"
 	"fmt"
+	"hash/fnv"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 
@@ -16,74 +19,68 @@ import (
 )
 
 // jsPluginBundleCache memoizes the esbuild-bundled IIFE for each plugin module
-// path. Bundling happens once per file; a fresh QuickJS VM is still created for
-// every hook invocation because page builds run concurrently and a single VM is
-// not safe for concurrent use.
+// path. Bundling happens once per file; hook invocations run on a pooled VM.
 var jsPluginBundleCache sync.Map // absPath -> bundle string or error
 
-// pluginGlobal is the esbuild IIFE global that receives the bundled module
-// namespace. The plugin descriptor lives at __kratePlugin.default.
-const pluginGlobal = "__kratePlugin"
+// jsPluginBytecodeCache memoizes the compiled bytecode of a plugin bundle so a
+// repeated hook invocation (every docs page, every markdown plugin run) reuses
+// the parse instead of re-parsing the bundle inside the pooled VM. QuickJS
+// serialized bytecode is portable across VMs of the same library version, so one
+// compile is shared by every VM. Keyed by the plugin's esbuild global name
+// (unique per module path); the stored bundle is checked so a refreshed bundle
+// recompiles.
+type pluginBytecodeEntry struct {
+	bundle string
+	bc     []byte
+	err    error
+}
 
-// runJSPluginHook executes a JS community plugin hook inside an embedded
-// QuickJS VM — no subprocess, no stdin/stdout. The plugin module is bundled
-// with esbuild into a self-contained IIFE and evaluated in a fresh VM. Hooks
-// are invoked as fn(ctx, options, krate) where ctx is the JSON-serialized hook
-// context and the return value is a { files, routes, generatedPages, html,
-// headHTML, rawCSS } result object (optionally a Promise).
-func runJSPluginHook(hookName string, pc config.PluginConfig, root, outDir string, env CommunityEnv, hookCtx interface{}) error {
-	bundleCode, err := bundleJSPlugin(pc.Module, root)
-	if err != nil {
-		return err
+var jsPluginBytecodeCache sync.Map // globalName -> pluginBytecodeEntry
+
+// pluginBytecode compiles a plugin bundle once and returns the shared bytecode.
+func pluginBytecode(rt *jsruntime.Runtime, globalName, bundleCode string) ([]byte, error) {
+	if v, ok := jsPluginBytecodeCache.Load(globalName); ok {
+		if e, isEntry := v.(pluginBytecodeEntry); isEntry && e.bundle == bundleCode {
+			return e.bc, e.err
+		}
 	}
+	bc, err := rt.Compile(bundleCode, jsruntime.EvalGlobal)
+	jsPluginBytecodeCache.Store(globalName, pluginBytecodeEntry{bundle: bundleCode, bc: bc, err: err})
+	return bc, err
+}
 
-	rt, err := jsruntime.New()
-	if err != nil {
-		return fmt.Errorf("creating JS runtime: %w", err)
-	}
-	defer rt.Close()
+// pluginGlobalPrefix prefixes the per-module esbuild IIFE global. Each plugin
+// module is assigned its own global (keyed by its absolute path) so several
+// plugins can be loaded on one pooled VM without clobbering each other.
+const pluginGlobalPrefix = "__kratePlugin_"
 
-	rt.SetEnv(environ.Current)
+// pluginGlobalName returns the esbuild GlobalName for a plugin module.
+func pluginGlobalName(absPath string) string {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(absPath))
+	return pluginGlobalPrefix + strconv.FormatUint(uint64(h.Sum32()), 16)
+}
 
-	// Attribute all console/log output to this plugin.
-	rt.SetLogPrefix("[plugin:" + pc.Name + "]")
-
-	// Assemble the richer `krate` object's capabilities (resolve/read/emit/
-	// write/inject) and register their Go-backed host functions.
-	cap := newKrateCapabilities(root, outDir, env, hookName, hookCtx)
-	if err := registerKrateHostFuncs(rt, cap); err != nil {
-		return fmt.Errorf("registering krate capabilities: %w", err)
-	}
-
-	if _, err := rt.Execute(bundleCode); err != nil {
-		return fmt.Errorf("loading plugin bundle: %w", err)
-	}
-
-	ctxJSON, err := marshalHookContext(hookName, hookCtx)
-	if err != nil {
-		return fmt.Errorf("serializing hook context: %w", err)
-	}
-	optionsJSON, err := json.Marshal(pc.Options)
-	if err != nil {
-		return fmt.Errorf("serializing plugin options: %w", err)
-	}
-	krateJSON, err := json.Marshal(cap.metadata())
-	if err != nil {
-		return fmt.Errorf("serializing krate metadata: %w", err)
-	}
-
-	callScript := fmt.Sprintf(`
-(function() {
+// pluginInvokeJS defines __krateInvoke(global, hook, optionsJSON), the driver
+// every hook call goes through. It is evaluated once per VM, so the per-call
+// work is a function call with three short strings: the hook context and the
+// krate metadata are fetched with _krate_hookInput only when the plugin
+// implements the hook, and parsed with JSON.parse rather than lexed as
+// JavaScript.
+const pluginInvokeJS = `
+globalThis.__krateInvoke = function(g, hookName, optionsJSON) {
   try {
-    var mod = %[1]s || {};
+    if (!(g in globalThis)) throw new ReferenceError(g + ' is not defined');
+    var mod = globalThis[g] || {};
     var plugin = mod.default || mod;
-    if (typeof plugin === 'function') plugin = plugin(%[2]s);
-    // Hooks live on the descriptor's .hooks, the module's named `+"`hooks`"+` export
+    if (typeof plugin === 'function') plugin = plugin(JSON.parse(optionsJSON));
+    // Hooks live on the descriptor's .hooks, the module's named ` + "`hooks`" + ` export
     // (factory style), or the descriptor itself (single-hook shorthand).
     var hooks = (plugin && plugin.hooks) || mod.hooks || plugin || {};
-    var fn = hooks[%[4]s];
+    var fn = hooks[hookName];
     if (typeof fn !== 'function') return JSON.stringify({ skip: true });
-    var krate = %[5]s;
+    var input = JSON.parse(_krate_hookInput());
+    var krate = input.krate;
     krate.resolveFile = function(spec) { return _krate_resolveFile(String(spec)); };
     krate.readFile = function(spec) { return _krate_readFile(String(spec)); };
     krate.emitFile = function(path, content) { _krate_emitFile(String(path), String(content)); };
@@ -92,7 +89,7 @@ func runJSPluginHook(hookName string, pc config.PluginConfig, root, outDir strin
     krate.injectCSS = function(css) { return _krate_injectCSS(String(css)); };
     krate.log = function() { _krate_log(JSON.stringify(Array.prototype.slice.call(arguments))); };
     krate.warn = function() { _krate_warn(JSON.stringify(Array.prototype.slice.call(arguments))); };
-    var out = fn(%[3]s, %[2]s, krate);
+    var out = fn(input.ctx, JSON.parse(optionsJSON), krate);
     if (out && typeof out.then === 'function') {
       __krateResult = undefined;
       __krateError = '';
@@ -103,10 +100,112 @@ func runJSPluginHook(hookName string, pc config.PluginConfig, root, outDir strin
   } catch (e) {
     return JSON.stringify({ error: (e && e.message) || String(e) });
   }
-})()
-`, pluginGlobal, string(optionsJSON), string(ctxJSON), jsString(hookName), string(krateJSON))
+};
+`
 
-	res, err := rt.Execute(callScript)
+// pluginVM is a pooled QuickJS VM used for JS plugin hook invocations. Creating a
+// VM and injecting the polyfill bundle dominates a hook call, so VMs are reused.
+// The krate host functions are registered once (they read the current
+// invocation's capabilities from cap) and the log prefix/env are re-applied per
+// call. A VM is handed to one goroutine at a time (QuickJS VMs are not
+// concurrency-safe).
+type pluginVM struct {
+	rt  *jsruntime.Runtime
+	cap *krateCapabilities
+}
+
+// pluginVMPool holds idle plugin VMs, bounded to GOMAXPROCS.
+var pluginVMPool = make(chan *pluginVM, max(1, runtime.GOMAXPROCS(0)))
+
+// pluginVMPoolEnabled can be disabled with KRATE_NO_PLUGIN_VM_POOL (used for
+// before/after measurement, and as an escape hatch).
+func pluginVMPoolEnabled() bool { return os.Getenv("KRATE_NO_PLUGIN_VM_POOL") == "" }
+
+func acquirePluginVM() (*pluginVM, error) {
+	if pluginVMPoolEnabled() {
+		select {
+		case vm := <-pluginVMPool:
+			return vm, nil
+		default:
+		}
+	}
+	rt, err := jsruntime.New()
+	if err != nil {
+		return nil, err
+	}
+	vm := &pluginVM{rt: rt}
+	if err := registerKrateHostFuncs(vm); err != nil {
+		_ = rt.Close()
+		return nil, err
+	}
+	if _, err := rt.Execute(pluginInvokeJS); err != nil {
+		_ = rt.Close()
+		return nil, fmt.Errorf("installing plugin driver: %w", err)
+	}
+	return vm, nil
+}
+
+func releasePluginVM(vm *pluginVM, healthy bool) {
+	if vm == nil {
+		return
+	}
+	if !healthy || !pluginVMPoolEnabled() {
+		_ = vm.rt.Close()
+		return
+	}
+	vm.cap = nil
+	select {
+	case pluginVMPool <- vm:
+	default:
+		_ = vm.rt.Close()
+	}
+}
+
+// runJSPluginHook executes a JS community plugin hook inside an embedded
+// QuickJS VM - no subprocess, no stdin/stdout. The plugin module is bundled
+// with esbuild into a self-contained IIFE and evaluated in a pooled VM. Hooks
+// are invoked as fn(ctx, options, krate) where ctx is the JSON-serialized hook
+// context and the return value is a { files, routes, generatedPages, html,
+// headHTML, rawCSS } result object (optionally a Promise).
+func runJSPluginHook(hookName string, pc config.PluginConfig, root, outDir string, env CommunityEnv, hookCtx interface{}) error {
+	bundleCode, globalName, err := bundleJSPlugin(pc.Module, root)
+	if err != nil {
+		return err
+	}
+
+	vm, err := acquirePluginVM()
+	if err != nil {
+		return fmt.Errorf("creating JS runtime: %w", err)
+	}
+	healthy := false
+	defer func() { releasePluginVM(vm, healthy) }()
+	rt := vm.rt
+
+	_ = rt.SetEnv(environ.ScriptEnv())
+
+	// Attribute all console/log output to this plugin.
+	rt.SetLogPrefix("[plugin:" + pc.Name + "]")
+
+	// Assemble the richer `krate` object's capabilities (resolve/read/emit/
+	// write/inject). The Go-backed host functions read these from vm.cap, which
+	// is set before the hook runs and cleared when the VM is released.
+	cap := newKrateCapabilities(root, outDir, env, hookName, hookCtx)
+	vm.cap = cap
+
+	bc, err := pluginBytecode(rt, globalName, bundleCode)
+	if err != nil {
+		return fmt.Errorf("compiling plugin bundle: %w", err)
+	}
+	if _, err := rt.EvalBytecode(bc); err != nil {
+		return fmt.Errorf("loading plugin bundle: %w", err)
+	}
+
+	optionsJSON, err := json.Marshal(pc.Options)
+	if err != nil {
+		return fmt.Errorf("serializing plugin options: %w", err)
+	}
+
+	res, err := rt.Call("__krateInvoke", globalName, hookName, string(optionsJSON))
 	if err != nil {
 		return fmt.Errorf("invoking %s hook: %w", hookName, err)
 	}
@@ -118,14 +217,14 @@ func runJSPluginHook(hookName string, pc config.PluginConfig, root, outDir strin
 
 	if msg.Pending {
 		rt.DrainJobs()
-		readScript := fmt.Sprintf(`
+		readScript := `
 (function() {
   if (typeof __krateError === 'string' && __krateError) {
     return JSON.stringify({ error: __krateError });
   }
   return JSON.stringify({ result: __krateResult });
 })()
-`)
+`
 		res2, err := rt.Execute(readScript)
 		if err != nil {
 			return fmt.Errorf("resolving async %s hook: %w", hookName, err)
@@ -135,6 +234,9 @@ func runJSPluginHook(hookName string, pc config.PluginConfig, root, outDir strin
 		}
 	}
 
+	// All JS interaction is done; the VM is safe to return to the pool.
+	healthy = true
+
 	if msg.Skip {
 		return nil
 	}
@@ -143,7 +245,7 @@ func runJSPluginHook(hookName string, pc config.PluginConfig, root, outDir strin
 	}
 
 	var output communityOutput
-	if msg.Result != nil && len(msg.Result) > 0 {
+	if len(msg.Result) > 0 {
 		if err := json.Unmarshal(msg.Result, &output); err != nil {
 			return fmt.Errorf("invalid plugin result JSON: %w", err)
 		}
@@ -199,18 +301,19 @@ func decodePluginMessage(res any) (pluginCallMessage, error) {
 }
 
 // bundleJSPlugin bundles a JS plugin module into a self-contained IIFE that
-// assigns the module namespace to the pluginGlobal global. Results are cached
-// per absolute module path.
-func bundleJSPlugin(module, root string) (string, error) {
+// assigns the module namespace to its per-module global, returning the bundled
+// code and that global's name. Results are cached per absolute module path.
+func bundleJSPlugin(module, root string) (string, string, error) {
 	absPath, err := resolveJSPluginPath(module, root)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
+	globalName := pluginGlobalName(absPath)
 	if v, ok := jsPluginBundleCache.Load(absPath); ok {
 		if err, isErr := v.(error); isErr {
-			return "", err
+			return "", "", err
 		}
-		return v.(string), nil
+		return v.(string), globalName, nil
 	}
 
 	result := api.Build(api.BuildOptions{
@@ -218,7 +321,7 @@ func bundleJSPlugin(module, root string) (string, error) {
 		Bundle:      true,
 		Platform:    api.PlatformNode,
 		Format:      api.FormatIIFE,
-		GlobalName:  pluginGlobal,
+		GlobalName:  globalName,
 		LogLevel:    api.LogLevelError,
 		Write:       false,
 	})
@@ -231,17 +334,17 @@ func bundleJSPlugin(module, root string) (string, error) {
 		}
 		err := fmt.Errorf("plugin bundle error:\n%s", sb.String())
 		jsPluginBundleCache.Store(absPath, err)
-		return "", err
+		return "", "", err
 	}
 	if len(result.OutputFiles) == 0 {
 		err := fmt.Errorf("plugin bundle produced no output")
 		jsPluginBundleCache.Store(absPath, err)
-		return "", err
+		return "", "", err
 	}
 
 	bundle := string(result.OutputFiles[0].Contents)
 	jsPluginBundleCache.Store(absPath, bundle)
-	return bundle, nil
+	return bundle, globalName, nil
 }
 
 // resolveJSPluginPath resolves a plugin module path relative to the project

@@ -1,6 +1,6 @@
 ---
 title: Troubleshooting
-order: 8
+order: 10
 description: Common Krate errors and how to fix them.
 ---
 
@@ -19,8 +19,9 @@ before it.
 
 ## `config uses imports/requires but could not be executed`
 
-The compiler could not run `krate.config.ts` (it needs `npx tsx` and your
-installed dependencies). Run `npm install` in the project root, then retry.
+The compiler could not evaluate `krate.config.ts` in-process (esbuild plus the
+embedded JS runtime). This usually means a dependency is missing. Run
+`npm install` in the project root, then retry.
 
 ## `@krate/runtime` / `@krate/components` not found
 
@@ -38,7 +39,7 @@ renderer).
 
 - **Tailwind:** classes are collected from the files listed in `tailwind.content`
   (defaults to `src`). A class built dynamically (e.g. `"text-" + color`) cannot
-  be detected — use a full literal class name, or add the file to `content`.
+  be detected - use a full literal class name, or add the file to `content`.
 - **CSS Modules:** import the module and reference `styles.foo`; a bare class
   name in a `.module.css` import is scoped.
 
@@ -47,7 +48,7 @@ renderer).
 - The watcher ignores `dist`, `.krate`, `node_modules`, and `_`-prefixed files.
 - If you renamed a page, wait for the rebuild banner; a compile error blocks the
   reload (the browser shows a build-error overlay).
-- Check the terminal for `Watching … for changes`.
+- Check the terminal for `Watching ... for changes`.
 
 ## `krate check` fails on an intentional pattern
 
@@ -85,7 +86,7 @@ The SSR renderer uses `devServer.port + 10` (override with `ssr.rendererPort`).
 
 ## Generated JS is larger than expected
 
-- Run `krate check` — `perf/js-budget` reports per-route JS.
+- Run `krate check` - `perf/js-budget` reports per-route JS.
 - Move logic into a **server component** (`// @server` or `*.server.tsx`) so it
   ships no client JS.
 - Confirm you are not importing a large module into a client component.
@@ -93,4 +94,26 @@ The SSR renderer uses `devServer.port + 10` (override with `ssr.rendererPort`).
 ## Type errors on generated routes/content
 
 Run `krate types` to regenerate `.krate/types/*.d.ts`, then `npx tsc --noEmit`.
-Editors cache declarations — reload the TS server if types look stale.
+Editors cache declarations - reload the TS server if types look stale.
+
+## Imports
+
+- **`cannot resolve import`** - the build stops at the import statement when a
+  relative path, a `tsconfig` path alias or an npm package cannot be found.
+  Check the spelling and extension (`./util.js` finds `util.ts`), the
+  `baseUrl` and `paths` in `tsconfig.json`, or run `pnpm add <package>`.
+- **JSON, `?raw` and `?url`** - `import data from "./data.json"` (default,
+  named or namespace imports), `import text from "./note.txt?raw"` (the file as
+  a string) and `import logo from "./logo.svg?url"` (the hashed asset URL) are
+  inlined as constants, so they render in static HTML and are available to
+  client code. Invalid JSON is reported with its file, line and column.
+- **npm packages in client code** - functions imported from an npm package
+  (`import { format } from "date-fns"`) and called from handlers, effects or
+  expressions are bundled for the browser into the page script, tree-shaken and
+  resolved with the `browser` (and `development` or `production`) export
+  conditions. Node built-ins (`node:fs`) cannot run in the browser and are
+  reported where they are imported.
+- **`package.json` `imports`** (`#util`) resolve like Node. Workspace packages
+  that ship Krate TSX source are compiled as source.
+- **Source maps** - with `--sourcemap` the hydration script maps event
+  handlers and expression bindings back to their position in the `.tsx` file.

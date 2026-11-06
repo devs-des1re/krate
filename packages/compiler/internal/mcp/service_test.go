@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -106,7 +107,7 @@ func TestInitializeAndToolsList(t *testing.T) {
 	for _, tool := range tools {
 		names[tool.(map[string]any)["name"].(string)] = true
 	}
-	for _, want := range []string{"list_routes", "read_page", "read_content", "create_content", "edit_content", "create_page", "edit_ast", "edit_page", "build", "check", "search_docs"} {
+	for _, want := range []string{"list_routes", "read_page", "read_content", "create_content", "edit_content", "create_page", "edit_file", "build", "check", "search_docs", "list_files", "read_file", "create_file", "delete_file", "move_file", "create_component", "apply_patch", "batch_edit", "undo", "format_file", "search_project", "read_files", "get_diagnostics", "find_references", "impact", "list_changes", "get_history", "apply_fix", "run_task"} {
 		if !names[want] {
 			t.Errorf("missing tool %q", want)
 		}
@@ -186,35 +187,6 @@ func TestCreatePageDryRunThenApply(t *testing.T) {
 	_ = resps
 }
 
-func TestEditASTRefusesLossySource(t *testing.T) {
-	svc := newTestService(t, map[string]string{
-		"src/pages/typed.tsx": "interface Props { a: string }\nexport default function Page(props: Props) { return <h1>Hi</h1>; }",
-	})
-	resps := serve(t, svc, call("edit_ast", map[string]any{"route": "/typed", "ast": `{"kind":"Program","body":[]}`}))
-	text := toolText(t, resps[0])
-	if !strings.Contains(text, "refusing to edit") {
-		t.Fatalf("expected refusal for typed source, got %s", text)
-	}
-}
-
-func TestEditASTDryRun(t *testing.T) {
-	svc := newTestService(t, map[string]string{
-		"src/pages/plain.tsx": "export default function Page() { return <h1>Old</h1>; }",
-	})
-	// A minimal program: export default function Page() { return <h1>New</h1>; }
-	ast := `{"kind":"Program","body":[{"kind":"ExportStmt","default":true,"declaration":{"kind":"FnDecl","name":"Page","body":[{"kind":"ReturnStmt","value":{"kind":"JSXElement","opening":{"kind":"JSXOpening","name":"h1","selfClosing":false},"closing":{"kind":"JSXClosing","name":"h1"},"children":[{"kind":"JSXText","value":"New"}]}}]}}]}`
-	resps := serve(t, svc, call("edit_ast", map[string]any{"route": "/plain", "ast": ast}))
-	text := toolText(t, resps[0])
-	if !strings.Contains(text, "+export default function Page()") {
-		t.Fatalf("expected updated source in diff, got %s", text)
-	}
-	// File unchanged after dry-run.
-	data, _ := os.ReadFile(filepath.Join(svc.root, "src", "pages", "plain.tsx"))
-	if !strings.Contains(string(data), "Old") {
-		t.Fatal("dry-run must not modify the file")
-	}
-}
-
 func TestResourceRoutesAndPage(t *testing.T) {
 	svc := newTestService(t, map[string]string{
 		"src/pages/about.tsx": "export default function About() { return <h1>About</h1>; }",
@@ -290,9 +262,11 @@ func TestToolAnnotations(t *testing.T) {
 	resp := mustResp(t, serve(t, svc, `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`)[0])
 	want := map[string]bool{
 		"list_routes": false, "read_page": false, "read_content": false, "search_docs": false,
-		"create_page": false, "edit_ast": true, "edit_page": true,
+		"list_files": false, "read_file": false,
+		"create_page": false, "edit_file": true, "apply_patch": true, "batch_edit": true, "undo": true, "format_file": true, "apply_fix": true, "apply_safe_fixes": true,
+		"create_file": false, "delete_file": true, "move_file": true, "create_component": false,
 		"create_content": false, "edit_content": true,
-		"build": false, "check": false,
+		"build": false, "check": false, "run_task": false,
 	}
 	for _, tool := range resp["tools"].([]any) {
 		m := tool.(map[string]any)
@@ -306,6 +280,33 @@ func TestToolAnnotations(t *testing.T) {
 		if destructive != want[name] {
 			t.Errorf("tool %s destructiveHint = %v, want %v", name, destructive, want[name])
 		}
+	}
+}
+
+func TestShutdownStopsServer(t *testing.T) {
+	svc := newTestService(t, map[string]string{"src/pages/index.tsx": "export default function Page() { return <h1>Hi</h1>; }"})
+	var out bytes.Buffer
+	srv := NewServer(&out, "krate", "test")
+	svc.Register(srv)
+	input := `{"jsonrpc":"2.0","id":1,"method":"shutdown"}` + "\n" +
+		`{"jsonrpc":"2.0","id":2,"method":"tools/list"}` + "\n"
+	if err := srv.Serve(strings.NewReader(input)); err != nil {
+		t.Fatal(err)
+	}
+	var responses []map[string]any
+	dec := json.NewDecoder(&out)
+	for {
+		var m map[string]any
+		if dec.Decode(&m) != nil {
+			break
+		}
+		responses = append(responses, m)
+	}
+	if len(responses) != 1 {
+		t.Fatalf("responses after shutdown = %v, want only the shutdown result", responses)
+	}
+	if responses[0]["id"] != float64(1) {
+		t.Fatalf("shutdown response id = %v", responses[0]["id"])
 	}
 }
 
@@ -395,7 +396,7 @@ func TestEditPageFindReplaceDryRunAndApply(t *testing.T) {
 	})
 
 	// Dry-run: no file written.
-	text := toolText(t, serve(t, svc, call("edit_page", map[string]any{
+	text := toolText(t, serve(t, svc, call("edit_file", map[string]any{
 		"route": "/about", "find": "About", "replace": "Company",
 	}))[0])
 	if !strings.Contains(text, "+++") || !strings.Contains(text, "Dry run") {
@@ -407,7 +408,7 @@ func TestEditPageFindReplaceDryRunAndApply(t *testing.T) {
 	}
 
 	// Apply writes the change.
-	text = toolText(t, serve(t, svc, call("edit_page", map[string]any{
+	text = toolText(t, serve(t, svc, call("edit_file", map[string]any{
 		"route": "/about", "find": "About", "replace": "Company", "apply": true,
 	}))[0])
 	if !strings.Contains(text, "Updated") || !strings.Contains(text, "+++") {
@@ -424,7 +425,7 @@ func TestEditPageFullReplaceAndNewFile(t *testing.T) {
 		"src/pages/index.tsx": "export default function Page() { return <h1>Hi</h1>; }",
 	})
 	// Full-file replace via a project-relative path.
-	text := toolText(t, serve(t, svc, call("edit_page", map[string]any{
+	text := toolText(t, serve(t, svc, call("edit_file", map[string]any{
 		"route": "src/pages/index.tsx", "content": "export default function Page() { return <h1>New</h1>; }\n",
 	}))[0])
 	if !strings.Contains(text, "<h1>Hi</h1>") || !strings.Contains(text, "<h1>New</h1>") {
@@ -432,7 +433,7 @@ func TestEditPageFullReplaceAndNewFile(t *testing.T) {
 	}
 
 	// content on a missing target creates the file (apply).
-	text = toolText(t, serve(t, svc, call("edit_page", map[string]any{
+	text = toolText(t, serve(t, svc, call("edit_file", map[string]any{
 		"route": "src/pages/faq.tsx", "content": "export default function Page() { return <h1>FAQ</h1>; }\n", "apply": true,
 	}))[0])
 	if !strings.Contains(text, "Created") {
@@ -452,7 +453,7 @@ func TestEditPageFindReplaceContextRules(t *testing.T) {
 		"src/pages/index.tsx": "export default function Page() { return <h1>a</h1>; return <h1>a</h1>; }",
 	})
 	// Multiple matches require replaceAll.
-	text := toolText(t, serve(t, svc, call("edit_page", map[string]any{
+	text := toolText(t, serve(t, svc, call("edit_file", map[string]any{
 		"route": "/", "find": "<h1>a</h1>", "replace": "<h1>b</h1>",
 	}))[0])
 	if !strings.Contains(text, "replaceAll: true") {
@@ -460,7 +461,7 @@ func TestEditPageFindReplaceContextRules(t *testing.T) {
 	}
 
 	// replaceAll applies everywhere.
-	text = toolText(t, serve(t, svc, call("edit_page", map[string]any{
+	text = toolText(t, serve(t, svc, call("edit_file", map[string]any{
 		"route": "/", "find": "<h1>a</h1>", "replace": "<h1>b</h1>", "replaceAll": true, "apply": true,
 	}))[0])
 	if !strings.Contains(text, "Updated") {
@@ -468,7 +469,7 @@ func TestEditPageFindReplaceContextRules(t *testing.T) {
 	}
 
 	// A non-matching find text errors.
-	text = toolText(t, serve(t, svc, call("edit_page", map[string]any{
+	text = toolText(t, serve(t, svc, call("edit_file", map[string]any{
 		"route": "/", "find": "nope", "replace": "x",
 	}))[0])
 	if !strings.Contains(text, "not found") {
@@ -482,7 +483,7 @@ func TestEditPageRefusesBrokenSource(t *testing.T) {
 	})
 	// Replacing "function Page()" with "function Page(" yields unparseable code.
 	for _, apply := range []bool{false, true} {
-		text := toolText(t, serve(t, svc, call("edit_page", map[string]any{
+		text := toolText(t, serve(t, svc, call("edit_file", map[string]any{
 			"route": "/about", "find": "function Page()", "replace": "function Page(", "apply": apply,
 		}))[0])
 		if !strings.Contains(text, "refusing to write") {
@@ -497,7 +498,7 @@ func TestEditPageRefusesBrokenSource(t *testing.T) {
 
 func TestEditPageRejectsTraversal(t *testing.T) {
 	svc := newTestService(t, map[string]string{"src/pages/index.tsx": "export default function Page() { return <h1>Hi</h1>; }"})
-	text := toolText(t, serve(t, svc, call("edit_page", map[string]any{
+	text := toolText(t, serve(t, svc, call("edit_file", map[string]any{
 		"route": "../../../evil.tsx", "content": "export default function Page() { return null; }\n",
 	}))[0])
 	if !strings.Contains(text, "invalid path") {
@@ -505,11 +506,34 @@ func TestEditPageRejectsTraversal(t *testing.T) {
 	}
 }
 
+// TestEditPageRejectsSymlinkEscape verifies a symlinked directory inside the
+// project pointing outside it cannot be used to write outside the root.
+func TestEditPageRejectsSymlinkEscape(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("symlink creation is privileged on Windows CI")
+	}
+	svc := newTestService(t, map[string]string{"src/pages/index.tsx": "export default function Page() { return <h1>Hi</h1>; }"})
+	outside := t.TempDir()
+	link := filepath.Join(svc.root, "link")
+	if err := os.Symlink(outside, link); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	text := toolText(t, serve(t, svc, call("edit_file", map[string]any{
+		"route": "link/evil.tsx", "content": "export default function Page() { return null; }\n", "apply": true,
+	}))[0])
+	if !strings.Contains(text, "invalid path") && !strings.Contains(text, "escapes") {
+		t.Fatalf("expected symlink escape rejection, got %s", text)
+	}
+	if _, err := os.Stat(filepath.Join(outside, "evil.tsx")); err == nil {
+		t.Fatalf("symlink escape wrote outside the root")
+	}
+}
+
 func TestEditPagePreservesCRLF(t *testing.T) {
 	svc := newTestService(t, map[string]string{
 		"src/pages/index.tsx": "export default function Page() { return <h1>Hi</h1>; }\r\n",
 	})
-	_ = serve(t, svc, call("edit_page", map[string]any{
+	_ = serve(t, svc, call("edit_file", map[string]any{
 		"route": "/", "find": "<h1>Hi</h1>", "replace": "<h1>Yo</h1>", "apply": true,
 	}))
 	data, _ := os.ReadFile(filepath.Join(svc.root, "src", "pages", "index.tsx"))
@@ -518,6 +542,25 @@ func TestEditPagePreservesCRLF(t *testing.T) {
 	}
 	if strings.Contains(string(data), "<h1>Hi</h1>") {
 		t.Errorf("expected replacement applied, got %q", data)
+	}
+}
+
+// TestListContentFilesKeepsNestedPaths verifies nested content entries keep
+// distinct dir-relative slugs instead of colliding on the bare filename.
+func TestListContentFilesKeepsNestedPaths(t *testing.T) {
+	dir := t.TempDir()
+	writeFile(t, dir, "index.md", "---\ntitle: A\n---\n")
+	writeFile(t, dir, "guides/index.md", "---\ntitle: B\n---\n")
+	files, err := listContentFiles(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(files, ",")
+	if !strings.Contains(joined, "index.md") || !strings.Contains(joined, "guides/index.md") {
+		t.Fatalf("nested slugs collided or missing: %v", files)
+	}
+	if len(files) != 2 {
+		t.Fatalf("expected 2 files, got %v", files)
 	}
 }
 
@@ -992,7 +1035,7 @@ func TestSearchDocsSearchesFrameworkDocs(t *testing.T) {
 		t.Errorf("full content suspiciously short (%d); maxChars may be truncating it", len(fullBody))
 	}
 
-	// A project-only term yields nothing — proof the search is Krate's docs.
+	// A project-only term yields nothing - proof the search is Krate's docs.
 	none := serve(t, svc, call("search_docs", map[string]any{"query": "zzyzx-only-in-project"}))[0]
 	if got := toolText(t, none); strings.Contains(got, "zzyzx") {
 		t.Errorf("framework search leaked project content: %s", got)
@@ -1002,7 +1045,7 @@ func TestSearchDocsSearchesFrameworkDocs(t *testing.T) {
 func TestExcerptBoundaries(t *testing.T) {
 	// Match at the very start: no leading ellipsis, first word preserved.
 	got := excerpt("Plugin System is here and more text follows", "plugin", 20)
-	if strings.HasPrefix(got, "…") {
+	if strings.HasPrefix(got, "...") {
 		t.Errorf("unexpected leading ellipsis: %q", got)
 	}
 	if !strings.HasPrefix(got, "Plugin") {
@@ -1010,12 +1053,12 @@ func TestExcerptBoundaries(t *testing.T) {
 	}
 	// Entire text fits: no ellipses at all.
 	full := excerpt("Short body", "short", 100)
-	if strings.Contains(full, "…") {
+	if strings.Contains(full, "...") {
 		t.Errorf("full-window excerpt should have no ellipsis: %q", full)
 	}
 	// Match in the middle: ellipses on both sides.
 	mid := excerpt(strings.Repeat("word ", 40)+"needle "+strings.Repeat("word ", 40), "needle", 40)
-	if !strings.HasPrefix(mid, "…") || !strings.HasSuffix(mid, "…") {
+	if !strings.HasPrefix(mid, "...") || !strings.HasSuffix(mid, "...") {
 		t.Errorf("expected both ellipses, got %q", mid)
 	}
 }
@@ -1062,5 +1105,435 @@ func TestReadDocsResource(t *testing.T) {
 	}
 	if !hasMCP {
 		t.Errorf("expected features/mcp among doc slug completions, got %v", values)
+	}
+}
+
+func TestApplyPatchDryRunApplyUndo(t *testing.T) {
+	svc := newTestService(t, map[string]string{
+		"src/pages/index.tsx": "export default function Page() { return <h1>Old</h1>; }\n",
+	})
+	patch := `--- a/src/pages/index.tsx
++++ b/src/pages/index.tsx
+@@ -1 +1 @@
+-export default function Page() { return <h1>Old</h1>; }
++export default function Page() { return <h1>New</h1>; }
+--- /dev/null
++++ b/src/pages/about.tsx
+@@ -0,0 +1 @@
++export default function About() { return <h1>About</h1>; }
+`
+	resps := serve(t, svc, call("apply_patch", map[string]any{"patch": patch}))
+	if text := toolText(t, resps[0]); !strings.Contains(text, "+export default function Page()") {
+		t.Fatalf("dry-run missing diff: %s", text)
+	}
+	data, _ := os.ReadFile(filepath.Join(svc.root, "src", "pages", "index.tsx"))
+	if !strings.Contains(string(data), "Old") {
+		t.Fatal("dry-run modified the source")
+	}
+	resps = serve(t, svc, call("apply_patch", map[string]any{"patch": patch, "apply": true}))
+	if text := toolText(t, resps[0]); !strings.Contains(text, "Applied apply patch") {
+		t.Fatalf("apply failed: %s", text)
+	}
+	data, _ = os.ReadFile(filepath.Join(svc.root, "src", "pages", "index.tsx"))
+	if !strings.Contains(string(data), "New") {
+		t.Fatal("patch did not apply")
+	}
+	if _, err := os.Stat(filepath.Join(svc.root, "src", "pages", "about.tsx")); err != nil {
+		t.Fatal("created file missing")
+	}
+	resps = serve(t, svc, call("undo", map[string]any{}))
+	if text := toolText(t, resps[0]); !strings.Contains(text, "Undid transaction") {
+		t.Fatalf("undo failed: %s", text)
+	}
+	data, _ = os.ReadFile(filepath.Join(svc.root, "src", "pages", "index.tsx"))
+	if !strings.Contains(string(data), "Old") {
+		t.Fatal("undo did not restore the source")
+	}
+	if _, err := os.Stat(filepath.Join(svc.root, "src", "pages", "about.tsx")); !os.IsNotExist(err) {
+		t.Fatal("undo did not remove the created file")
+	}
+}
+
+func TestBatchEditAtomicAndValidation(t *testing.T) {
+	svc := newTestService(t, map[string]string{
+		"src/pages/index.tsx": "export default function Page() { return <h1>Old</h1>; }\n",
+	})
+	edits := []any{
+		map[string]any{"path": "src/pages/index.tsx", "find": "Old", "replace": "New"},
+		map[string]any{"path": "src/pages/about.tsx", "content": "export default function About() { return <h1>About</h1>; }\n"},
+	}
+	resps := serve(t, svc, call("batch_edit", map[string]any{"edits": edits, "apply": true}))
+	if text := toolText(t, resps[0]); !strings.Contains(text, "Applied batch edit") {
+		t.Fatalf("batch apply failed: %s", text)
+	}
+	if _, err := os.Stat(filepath.Join(svc.root, "src", "pages", "about.tsx")); err != nil {
+		t.Fatal("batch create missing")
+	}
+	// A bad second operation must leave the first file unchanged.
+	before, _ := os.ReadFile(filepath.Join(svc.root, "src", "pages", "index.tsx"))
+	bad := []any{
+		map[string]any{"path": "src/pages/index.tsx", "find": "New", "replace": "Broken"},
+		map[string]any{"path": "src/pages/bad.tsx", "content": "<"},
+	}
+	resps = serve(t, svc, call("batch_edit", map[string]any{"edits": bad, "apply": true}))
+	if text := toolText(t, resps[0]); !strings.Contains(text, "would not parse") {
+		t.Fatalf("expected parse rejection, got: %s", text)
+	}
+	after, _ := os.ReadFile(filepath.Join(svc.root, "src", "pages", "index.tsx"))
+	if string(before) != string(after) {
+		t.Fatal("failed batch partially modified the first file")
+	}
+}
+
+func TestWriteRoots(t *testing.T) {
+	svc := newTestService(t, map[string]string{
+		"src/pages/index.tsx": "export default function Page() { return <h1>Hi</h1>; }\n",
+		"public/site.css":     "body { color: red; }\n",
+	})
+	svc.policy.WriteRoots = []string{"src"}
+	resps := serve(t, svc, call("edit_file", map[string]any{
+		"route": "public/site.css", "find": "red", "replace": "blue", "apply": true,
+	}))
+	if text := toolText(t, resps[0]); !strings.Contains(text, "refusing to edit") {
+		t.Fatalf("writeRoots did not reject public/site.css: %s", text)
+	}
+	resps = serve(t, svc, call("edit_file", map[string]any{
+		"route": "src/pages/index.tsx", "find": "Hi", "replace": "Hello", "apply": true,
+	}))
+	if text := toolText(t, resps[0]); strings.Contains(text, "refusing") {
+		t.Fatalf("writeRoots rejected an allowed path: %s", text)
+	}
+}
+
+func TestEditPageExpectedHash(t *testing.T) {
+	svc := newTestService(t, map[string]string{
+		"src/pages/index.tsx": "export default function Page() { return <h1>Hi</h1>; }\n",
+	})
+	text := toolText(t, serve(t, svc, call("edit_file", map[string]any{
+		"route": "src/pages/index.tsx", "find": "Hi", "replace": "Hello",
+		"expectedSha256": "not-the-current-hash", "apply": true,
+	}))[0])
+	if !strings.Contains(text, "changed since it was read") {
+		t.Fatalf("expected stale hash refusal, got: %s", text)
+	}
+	text = toolText(t, serve(t, svc, call("edit_file", map[string]any{
+		"route": "src/pages/index.tsx", "find": "Hi", "replace": "Hello",
+		"expectedSha256": hashString("export default function Page() { return <h1>Hi</h1>; }\n"), "apply": true,
+	}))[0])
+	if strings.Contains(text, "changed since it was read") {
+		t.Fatalf("matching hash was rejected: %s", text)
+	}
+}
+
+func TestSearchProjectReadFilesAndReferences(t *testing.T) {
+	svc := newTestService(t, map[string]string{
+		"src/pages/index.tsx": "export function Greeting() { return <h1>Hello</h1>; }\nconst unused = 1;\n",
+		"src/pages/about.tsx": "export default function About() { return <h1>About</h1>; }\n",
+	})
+	text := toolText(t, serve(t, svc, call("search_project", map[string]any{
+		"query": "Greeting", "glob": "src/**/*.tsx",
+	}))[0])
+	if !strings.Contains(text, "src/pages/index.tsx") || !strings.Contains(text, "\"line\": 1") {
+		t.Fatalf("search_project did not find the symbol: %s", text)
+	}
+	text = toolText(t, serve(t, svc, call("find_references", map[string]any{"symbol": "Greeting"}))[0])
+	if !strings.Contains(text, "\"count\": 1") {
+		t.Fatalf("find_references count mismatch: %s", text)
+	}
+	text = toolText(t, serve(t, svc, call("read_files", map[string]any{
+		"paths": []any{"src/pages/index.tsx", "src/pages/about.tsx"},
+	}))[0])
+	if !strings.Contains(text, "Hello") || !strings.Contains(text, "About") {
+		t.Fatalf("read_files missing content: %s", text)
+	}
+}
+
+func TestGetDiagnosticsStructured(t *testing.T) {
+	svc := newTestService(t, map[string]string{
+		"src/pages/index.tsx": "export default function Page() { return <h1>; }\n",
+	})
+	text := toolText(t, serve(t, svc, call("get_diagnostics", map[string]any{"check": false}))[0])
+	if !strings.Contains(text, "\"diagnostics\"") || !strings.Contains(text, "compile") {
+		t.Fatalf("expected structured compile diagnostics, got: %s", text)
+	}
+}
+
+func TestListChangesAndApplyFix(t *testing.T) {
+	svc := newTestService(t, map[string]string{
+		"src/pages/index.tsx": "export default function Page() { return <h1>Old</h1>; }\n",
+	})
+	text := toolText(t, serve(t, svc, call("apply_fix", map[string]any{
+		"path": "src/pages/index.tsx", "find": "Old", "replace": "New", "apply": true,
+	}))[0])
+	if !strings.Contains(text, "Updated") {
+		t.Fatalf("apply_fix failed: %s", text)
+	}
+	text = toolText(t, serve(t, svc, call("list_changes", map[string]any{}))[0])
+	if !strings.Contains(text, "src/pages/index.tsx") {
+		t.Fatalf("list_changes missing transaction: %s", text)
+	}
+}
+
+func TestProgressNotifications(t *testing.T) {
+	svc := newTestService(t, map[string]string{
+		"src/pages/index.tsx": "export default function Page() { return <h1>Hi</h1>; }\n",
+	})
+	req := `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"search_project","arguments":{"query":"Page"},"_meta":{"progressToken":"p1"}}}`
+	resps := serve(t, svc, req)
+	found := false
+	for _, r := range resps {
+		if r["method"] == "notifications/progress" {
+			found = true
+			params, _ := r["params"].(map[string]any)
+			if params["progressToken"] != "p1" {
+				t.Errorf("progress token = %v, want p1", params["progressToken"])
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no progress notification in %v", resps)
+	}
+}
+
+func TestResourceSubscriptions(t *testing.T) {
+	svc := newTestService(t, map[string]string{
+		"src/pages/index.tsx": "export default function Page() { return <h1>Hi</h1>; }\n",
+	})
+	resps := serve(t, svc,
+		`{"jsonrpc":"2.0","id":1,"method":"resources/subscribe","params":{"uri":"krate://manifest"}}`,
+		call("edit_file", map[string]any{"route": "/", "find": "Hi", "replace": "Hello", "apply": true}),
+	)
+	found := false
+	for _, r := range resps {
+		if r["method"] == "notifications/resources/updated" {
+			params, _ := r["params"].(map[string]any)
+			if params["uri"] == "krate://manifest" {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("no resource update notification in %v", resps)
+	}
+}
+
+func TestPaginationCursors(t *testing.T) {
+	svc := newTestService(t, map[string]string{
+		"src/pages/index.tsx":   "export default function Page() { return <h1>Hi</h1>; }\n",
+		"src/pages/about.tsx":   "export default function About() { return <h1>About</h1>; }\n",
+		"src/pages/contact.tsx": "export default function Contact() { return <h1>Contact</h1>; }\n",
+	})
+	var first map[string]any
+	if err := json.Unmarshal([]byte(toolText(t, serve(t, svc, call("list_files", map[string]any{"glob": "src/pages/*.tsx", "limit": 1}))[0])), &first); err != nil {
+		t.Fatal(err)
+	}
+	next, _ := first["nextCursor"].(string)
+	if next == "" {
+		t.Fatalf("expected nextCursor, got %v", first)
+	}
+	var second map[string]any
+	if err := json.Unmarshal([]byte(toolText(t, serve(t, svc, call("list_files", map[string]any{"glob": "src/pages/*.tsx", "limit": 1, "cursor": next}))[0])), &second); err != nil {
+		t.Fatal(err)
+	}
+	if second["nextCursor"] == next {
+		t.Fatal("cursor did not advance")
+	}
+	var search map[string]any
+	if err := json.Unmarshal([]byte(toolText(t, serve(t, svc, call("search_project", map[string]any{"query": "function", "limit": 1}))[0])), &search); err != nil {
+		t.Fatal(err)
+	}
+	if search["nextCursor"] == "" {
+		t.Fatalf("expected search nextCursor, got %v", search)
+	}
+}
+
+func TestProtocolVersionMatrix(t *testing.T) {
+	svc := newTestService(t, map[string]string{
+		"src/pages/index.tsx": "export default function Page() { return <h1>Hi</h1>; }\n",
+	})
+	for _, version := range mcpVersions {
+		req := `{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"` + version + `"}}`
+		resp := mustResp(t, serve(t, svc, req)[0])
+		if resp["protocolVersion"] != version {
+			t.Errorf("version %s negotiated as %v", version, resp["protocolVersion"])
+		}
+	}
+}
+
+func TestEditAnyProjectFile(t *testing.T) {
+	svc := newTestService(t, map[string]string{
+		"src/pages/index.tsx":       "export default function Page() { return <h1>Hi</h1>; }\n",
+		"src/api/hello.ts":          "export function GET() { return new Response('ok'); }\n",
+		"src/styles/site.css":       "body { color: red; }\n",
+		"src/content/docs/guide.md": "---\ntitle: Guide\n---\nOld body.\n",
+		"docs/README.md":            "Old docs.\n",
+	})
+	cases := []struct {
+		path, find, replace string
+	}{
+		{"src/api/hello.ts", "ok", "fine"},
+		{"src/styles/site.css", "red", "blue"},
+		{"src/content/docs/guide.md", "Old body", "New body"},
+		{"docs/README.md", "Old docs", "New docs"},
+	}
+	for _, c := range cases {
+		text := toolText(t, serve(t, svc, call("edit_file", map[string]any{
+			"route": c.path, "find": c.find, "replace": c.replace, "apply": true,
+		}))[0])
+		if strings.Contains(text, "refusing") || strings.Contains(text, "outside writeRoots") {
+			t.Fatalf("edit_file refused %s: %s", c.path, text)
+		}
+		data, err := os.ReadFile(filepath.Join(svc.root, filepath.FromSlash(c.path)))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(data), c.replace) {
+			t.Fatalf("%s was not updated: %s", c.path, data)
+		}
+	}
+}
+
+func TestRunTaskAllowlist(t *testing.T) {
+	svc := newTestService(t, map[string]string{
+		"src/pages/index.tsx": "export default function Page() { return <h1>Hi</h1>; }\n",
+	})
+	svc.policy.AllowTasks = []string{"build"}
+	text := toolText(t, serve(t, svc, call("run_task", map[string]any{"task": "test"}))[0])
+	if !strings.Contains(text, "allowTasks") {
+		t.Fatalf("expected allowlist refusal, got: %s", text)
+	}
+}
+
+func TestReadOnlyModeBlocksWritesAndTasks(t *testing.T) {
+	svc := newTestService(t, map[string]string{
+		"src/pages/index.tsx": "export default function Page() { return <h1>Hi</h1>; }\n",
+	})
+	svc.policy.ReadOnlyMode = true
+	text := toolText(t, serve(t, svc, call("edit_file", map[string]any{
+		"route": "src/pages/index.tsx", "find": "Hi", "replace": "Hello", "apply": true,
+	}))[0])
+	if !strings.Contains(text, "readOnlyMode") {
+		t.Fatalf("expected read-only write refusal, got: %s", text)
+	}
+	text = toolText(t, serve(t, svc, call("run_task", map[string]any{"task": "build"}))[0])
+	if !strings.Contains(text, "readOnlyMode") {
+		t.Fatalf("expected read-only task refusal, got: %s", text)
+	}
+}
+
+func TestNewWorkflowPromptsListed(t *testing.T) {
+	svc := newTestService(t, map[string]string{"src/pages/index.tsx": "export default function Page() { return <h1>Hi</h1>; }"})
+	resp := mustResp(t, serve(t, svc, `{"jsonrpc":"2.0","id":1,"method":"prompts/list"}`)[0])
+	list, _ := resp["prompts"].([]any)
+	names := map[string]bool{}
+	for _, p := range list {
+		names[p.(map[string]any)["name"].(string)] = true
+	}
+	for _, name := range []string{"repair-diagnostics", "refactor", "audit-dependencies", "scaffold-component"} {
+		if !names[name] {
+			t.Errorf("missing prompt %s", name)
+		}
+	}
+}
+
+func TestUndoConflictAndForce(t *testing.T) {
+	svc := newTestService(t, map[string]string{
+		"src/pages/index.tsx": "export default function Page() { return <h1>Old</h1>; }\n",
+	})
+	_ = serve(t, svc, call("edit_file", map[string]any{
+		"route": "src/pages/index.tsx", "find": "Old", "replace": "New", "apply": true,
+	}))
+	path := filepath.Join(svc.root, "src", "pages", "index.tsx")
+	_ = os.WriteFile(path, []byte("manual edit\n"), 0644)
+	text := toolText(t, serve(t, svc, call("undo", map[string]any{}))[0])
+	if !strings.Contains(text, "changed after the transaction") {
+		t.Fatalf("expected undo conflict, got: %s", text)
+	}
+	text = toolText(t, serve(t, svc, call("undo", map[string]any{"force": true}))[0])
+	if !strings.Contains(text, "Undid transaction") {
+		t.Fatalf("forced undo failed: %s", text)
+	}
+	data, _ := os.ReadFile(path)
+	if !strings.Contains(string(data), "Old") {
+		t.Fatalf("forced undo did not restore original: %s", data)
+	}
+}
+
+func TestDiagnosticCodemodsAndFilteredFixes(t *testing.T) {
+	svc := newTestService(t, map[string]string{
+		"src/pages/index.tsx": "export default function Page() { return <button onclick={() => {}}>Hi</button>; }\n",
+	})
+	text := toolText(t, serve(t, svc, call("get_diagnostics", map[string]any{"check": false}))[0])
+	if !strings.Contains(text, `"codemods"`) || !strings.Contains(text, `"code": "KR5002"`) {
+		t.Fatalf("get_diagnostics did not advertise the safe codemod: %s", text)
+	}
+	resp := serve(t, svc, call("apply_safe_fixes", map[string]any{
+		"codes": []any{"KR5002"}, "paths": []any{"src/pages/*.tsx"}, "apply": true,
+	}))[0]
+	result := mustResp(t, resp)
+	var report strings.Builder
+	for _, block := range result["content"].([]any) {
+		report.WriteString(block.(map[string]any)["text"].(string))
+	}
+	if !strings.Contains(report.String(), "Codemods:") || !strings.Contains(report.String(), "KR5002") {
+		t.Fatalf("apply_safe_fixes did not report the codemod: %s", report.String())
+	}
+	data, err := os.ReadFile(filepath.Join(svc.root, "src", "pages", "index.tsx"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "onClick") || strings.Contains(string(data), "onclick") {
+		t.Fatalf("filtered codemod was not applied: %s", data)
+	}
+}
+
+func TestAuditLogAndSecretRedaction(t *testing.T) {
+	const secret = "super-secret-token-value"
+	svc := newTestService(t, map[string]string{
+		"src/pages/index.tsx": "export default function Page() { return <h1>" + secret + "</h1>; }\n",
+	})
+	svc.secretValues = []string{secret}
+
+	text := toolText(t, serve(t, svc, call("read_file", map[string]any{"path": "src/pages/index.tsx"}))[0])
+	if strings.Contains(text, secret) {
+		t.Fatalf("tool output leaked a secret: %s", text)
+	}
+	if !strings.Contains(text, "[REDACTED]") {
+		t.Fatalf("tool output was not redacted: %s", text)
+	}
+
+	auditPath := filepath.Join(svc.root, filepath.FromSlash(svc.auditPath))
+	data, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatalf("reading audit log: %v", err)
+	}
+	log := string(data)
+	if !strings.Contains(log, `"event":"tool_call"`) || !strings.Contains(log, `"tool":"read_file"`) {
+		t.Fatalf("audit log missing tool call: %s", log)
+	}
+	if strings.Contains(log, secret) {
+		t.Fatalf("audit log leaked a secret: %s", log)
+	}
+}
+
+func TestTransactionLimits(t *testing.T) {
+	svc := newTestService(t, map[string]string{
+		"src/pages/index.tsx": "export default function Page() { return <h1>Hi</h1>; }\n",
+	})
+	svc.policy.MaxBatchFiles = 1
+	edits := []any{
+		map[string]any{"path": "src/pages/index.tsx", "find": "Hi", "replace": "Hello"},
+		map[string]any{"path": "src/pages/other.tsx", "content": "export default function Other() { return null; }\n"},
+	}
+	text := toolText(t, serve(t, svc, call("batch_edit", map[string]any{"edits": edits, "apply": true}))[0])
+	if !strings.Contains(text, "limit is 1") {
+		t.Fatalf("expected batch limit error, got: %s", text)
+	}
+	svc.policy.MaxFileBytes = 8
+	text = toolText(t, serve(t, svc, call("edit_file", map[string]any{
+		"route": "src/pages/index.tsx", "find": "Hi", "replace": "A much longer replacement", "apply": true,
+	}))[0])
+	if !strings.Contains(text, "byte limit") {
+		t.Fatalf("expected file size error, got: %s", text)
 	}
 }

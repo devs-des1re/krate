@@ -2,12 +2,15 @@ package annotator
 
 import (
 	"path/filepath"
+	"regexp"
 	"strings"
 
 	"github.com/kratejs/krate/packages/compiler/ast"
 	"github.com/kratejs/krate/packages/compiler/internal/bundler"
 	"github.com/kratejs/krate/packages/compiler/internal/config"
+	"github.com/kratejs/krate/packages/compiler/internal/diag"
 	irtree "github.com/kratejs/krate/packages/compiler/internal/irtree"
+	"github.com/kratejs/krate/packages/compiler/internal/jsvalue"
 	"github.com/kratejs/krate/packages/compiler/internal/sigutil"
 )
 
@@ -22,12 +25,18 @@ func Annotate(prog *ast.Program, cfg *config.Config, sourceFile string, rawSourc
 		Functions:        make(map[string]*ast.FnDecl),
 		ComponentSources: make(map[string]string),
 		ComponentRaw:     make(map[string]string),
+		ClassComponents:  make(map[string]bool),
 	}
 
 	// 1. Collect all function declarations
 	collectFunctionsWithSource(prog.Body, ann.Functions, ann.ComponentSources, ann.ComponentRaw, sourceFile, rawSource)
+	collectMemberComponents(prog.Body, ann.Functions)
+	collectHOCComponents(ann, prog.Body, sourceFile, rawSource)
+	collectClassComponents(prog.Body, ann.ClassComponents)
+	collectClassRejections(prog.Body, ann, sourceFile, rawSource)
+	collectLazyComponents(prog.Body, ann, sourceFile, rawSource)
 
-	// 2. Find default export → entry point
+	// 2. Find default export -> entry point
 	ann.EntryPoint = FindDefaultExport(prog.Body)
 
 	// 3. Walk used-component graph
@@ -60,12 +69,13 @@ func Annotate(prog *ast.Program, cfg *config.Config, sourceFile string, rawSourc
 }
 
 // classifyTiers determines component tiers based on the priority rules:
-// 1. Directive in source (@server, @static, @runtime)
+// 0. async function components are always TierRuntime (server components)
+// 1. Tier decorator on the declaration (@server function Stats() {})
+// 1b. Directive in source (@server, @static, @runtime)
 // 2. File convention (*.server.tsx, *.static.tsx, *.runtime.tsx)
 // 3. Config name lists (serverComponents, runtimeComponents)
 // 4. Config directory lists (serverDirs, runtimeDirs)
 // 5. Default: TierClient
-//
 // Each function is classified using its OWN module's source file and raw text
 // (recorded by collectFunctionsWithSource), so a page-level `// @server`
 // directive doesn't leak onto imported *.runtime.tsx components.
@@ -79,14 +89,27 @@ func classifyTiers(ann *irtree.Annotations, cfg *config.Config) {
 
 // classifyComponent determines a single component's tier.
 func classifyComponent(name string, fn *ast.FnDecl, cfg *config.Config, sourceFile string, rawSource string) irtree.ComponentTier {
-	// 1. Directive in source (leading string literal with @annotation)
+	// 0. An async function component is a server component: it awaits data,
+	// so it can only render per request (never at build time or on the client).
+	if fn != nil && fn.Async {
+		return irtree.TierRuntime
+	}
+
+	// 1. Tier decorator on the declaration
+	if fn != nil {
+		if tier := tierFromName(fn.Tier); tier != irtree.TierUnknown {
+			return tier
+		}
+	}
+
+	// 1b. Directive in source (leading string literal with @annotation)
 	if fn != nil {
 		if tier := detectDirectiveTier(fn); tier != irtree.TierUnknown {
 			return tier
 		}
 	}
 
-	// 1b. Directive in raw source comments (// @server, // @static, // @runtime)
+	// 1c. Directive in raw source comments (// @server, // @static, // @runtime)
 	if tier := detectDirectiveTierFromSource(rawSource); tier != irtree.TierUnknown {
 		return tier
 	}
@@ -96,15 +119,16 @@ func classifyComponent(name string, fn *ast.FnDecl, cfg *config.Config, sourceFi
 		return tier
 	}
 
-	// 3. Config name lists
+	// 3. Config name lists, which use the name as written
 	if cfg != nil {
+		written := bundler.OriginalName(name)
 		for _, n := range cfg.ServerComponents {
-			if n == name {
+			if n == written {
 				return irtree.TierServer
 			}
 		}
 		for _, n := range cfg.RuntimeComponents {
-			if n == name {
+			if n == written {
 				return irtree.TierRuntime
 			}
 		}
@@ -155,8 +179,26 @@ func detectDirectiveTier(fn *ast.FnDecl) irtree.ComponentTier {
 	return irtree.TierUnknown
 }
 
-// detectDirectiveTierFromSource checks raw source text for comment-based directives
-// like "// @server", "// @static", "// @runtime".
+// tierFromName maps a decorator's tier name to its tier.
+func tierFromName(name string) irtree.ComponentTier {
+	switch name {
+	case "static":
+		return irtree.TierStatic
+	case "server":
+		return irtree.TierServer
+	case "runtime":
+		return irtree.TierRuntime
+	case "client":
+		return irtree.TierClient
+	}
+	return irtree.TierUnknown
+}
+
+var directiveCommentRe = regexp.MustCompile(`@(static|server|runtime|client)\b`)
+
+// detectDirectiveTierFromSource checks the comments at the start of a file for
+// directives like "// @server". Code is ignored, so an import from an `@server/*`
+// alias or a tier decorator does not classify the file.
 func detectDirectiveTierFromSource(source string) irtree.ComponentTier {
 	if source == "" {
 		return irtree.TierUnknown
@@ -165,18 +207,24 @@ func detectDirectiveTierFromSource(source string) irtree.ComponentTier {
 	if len(check) > 200 {
 		check = check[:200]
 	}
-	switch {
-	case strings.Contains(check, "@static"):
-		return irtree.TierStatic
-	case strings.Contains(check, "@server"):
-		return irtree.TierServer
-	case strings.Contains(check, "@runtime"):
-		return irtree.TierRuntime
-	case strings.Contains(check, "@client"):
-		return irtree.TierClient
+	best := irtree.TierUnknown
+	bestRank := len(directiveRank)
+	for _, line := range strings.Split(check, "\n") {
+		trimmed := strings.TrimSpace(line)
+		if !strings.HasPrefix(trimmed, "//") && !strings.HasPrefix(trimmed, "/*") && !strings.HasPrefix(trimmed, "*") {
+			continue
+		}
+		for _, m := range directiveCommentRe.FindAllStringSubmatch(trimmed, -1) {
+			if rank := directiveRank[m[1]]; rank < bestRank {
+				best, bestRank = tierFromName(m[1]), rank
+			}
+		}
 	}
-	return irtree.TierUnknown
+	return best
 }
+
+// directiveRank orders directives when a file names several.
+var directiveRank = map[string]int{"static": 0, "server": 1, "runtime": 2, "client": 3}
 
 // detectFileConventionTier checks the source file name for tier conventions.
 func detectFileConventionTier(sourceFile string) irtree.ComponentTier {
@@ -194,11 +242,7 @@ func detectFileConventionTier(sourceFile string) irtree.ComponentTier {
 
 // matchesDir checks if a file path is within a directory.
 func matchesDir(filePath, dir string) bool {
-	rel, err := filepath.Rel(dir, filePath)
-	if err != nil {
-		return false
-	}
-	return !strings.HasPrefix(rel, "..")
+	return bundler.PathInDirs(filePath, []string{dir})
 }
 
 // detectStreamingConfig checks for `export const config = { streaming: true }`.
@@ -307,12 +351,7 @@ func hasSuspenseInExpr(expr ast.Expr) bool {
 	return false
 }
 
-// ─── AST walking helpers (ported from renderer) ────────────────────────────
-
-// collectFunctions walks function bodies recording declarations.
-func collectFunctions(body []ast.Stmt, dest map[string]*ast.FnDecl) {
-	collectFunctionsWithSource(body, dest, nil, nil, "", "")
-}
+// AST walking helpers (ported from renderer)
 
 // collectFunctionsWithSource walks function bodies recording declarations and,
 // when sourcePath/rawSource are non-empty, records the module source each
@@ -335,15 +374,23 @@ func collectFunctionsWithSource(body []ast.Stmt, dest map[string]*ast.FnDecl, so
 				case *ast.FnDecl:
 					record(decl)
 				case *ast.VarStmt:
-					// `export const Live = () => <p/>` — the parser stores the
+					// `export const Live = () => <p/>` - the parser stores the
 					// variable statement in ExportStmt.Declaration, so named
 					// arrow/function-expression components exported like this
 					// get the same treatment as plain FnDecl components.
 					recordComponentVarDecls(decl, record)
+				case *ast.ClassDecl:
+					if fn, ok := synthesizeClassComponent(decl); ok {
+						record(fn)
+					}
 				}
 			}
 		case *ast.VarStmt:
 			recordComponentVarDecls(s, record)
+		case *ast.ClassDecl:
+			if fn, ok := synthesizeClassComponent(s); ok {
+				record(fn)
+			}
 		case *ast.ForStmt:
 			collectFunctionsWithSource(s.Body, dest, sources, raws, sourcePath, rawSource)
 		case *ast.WhileStmt:
@@ -362,6 +409,77 @@ func collectFunctionsWithSource(body []ast.Stmt, dest map[string]*ast.FnDecl, so
 			collectFunctionsWithSource(s.Finally, dest, sources, raws, sourcePath, rawSource)
 		case *ast.BlockStmt:
 			collectFunctionsWithSource(s.Body, dest, sources, raws, sourcePath, rawSource)
+		}
+	}
+}
+
+// collectMemberComponents registers plain member assignments (`Root.Part =
+// PartFn`) so dotted JSX tags like `<Root.Part>` resolve to the assigned
+// component - the general mechanism behind namespaced compound APIs.
+func collectMemberComponents(body []ast.Stmt, functions map[string]*ast.FnDecl) {
+	for _, stmt := range body {
+		switch s := stmt.(type) {
+		case *ast.ExprStmt:
+			assign, ok := s.Expression.(*ast.BinaryExpr)
+			if !ok || assign.Op != "=" {
+				continue
+			}
+			member, ok := assign.Left.(*ast.MemberExpr)
+			if !ok || member.Computed {
+				continue
+			}
+			obj, ok := member.Object.(*ast.Identifier)
+			if !ok {
+				continue
+			}
+			prop, ok := member.Property.(*ast.Identifier)
+			if !ok {
+				continue
+			}
+			tag := obj.Name + "." + prop.Name
+			if rhs, ok := assign.Right.(*ast.Identifier); ok {
+				if fn := functions[rhs.Name]; fn != nil {
+					if _, exists := functions[tag]; !exists {
+						functions[tag] = fn
+					}
+				}
+			} else if inner := unwrapComponentInit(assign.Right); inner != nil {
+				// `Table.Cell = function (props) {...}` or an arrow: the
+				// function has no declaration of its own, so give it one.
+				if _, exists := functions[tag]; exists {
+					continue
+				}
+				name := inner.Name
+				if name == "" {
+					name = obj.Name + "$" + prop.Name
+				}
+				fn := &ast.FnDecl{Name: name, Params: inner.Params, Body: inner.Body, Async: inner.Async}
+				functions[tag] = fn
+				if _, exists := functions[name]; !exists {
+					functions[name] = fn
+				}
+			}
+		case *ast.BlockStmt:
+			collectMemberComponents(s.Body, functions)
+		case *ast.ForStmt:
+			collectMemberComponents(s.Body, functions)
+		case *ast.WhileStmt:
+			collectMemberComponents(s.Body, functions)
+		case *ast.DoWhileStmt:
+			collectMemberComponents(s.Body, functions)
+		case *ast.IfStmt:
+			collectMemberComponents(s.Consequent, functions)
+			collectMemberComponents(s.Alternate, functions)
+		case *ast.SwitchStmt:
+			for _, c := range s.Cases {
+				collectMemberComponents(c.Body, functions)
+			}
+		case *ast.TryStmt:
+			collectMemberComponents(s.Body, functions)
+			if s.Catch != nil {
+				collectMemberComponents(s.Catch.Body, functions)
+			}
+			collectMemberComponents(s.Finally, functions)
 		}
 	}
 }
@@ -388,6 +506,11 @@ func FindDefaultExport(body []ast.Stmt) string {
 		if exp, ok := stmt.(*ast.ExportStmt); ok && exp.Default {
 			if fn, ok := exp.Declaration.(*ast.FnDecl); ok {
 				return fn.Name
+			}
+			// `export default class Page extends Component` (lowered to a
+			// function of the same name).
+			if class, ok := exp.Declaration.(*ast.ClassDecl); ok && class.Name != "" {
+				return class.Name
 			}
 			if exp.Local != "" {
 				return exp.Local
@@ -517,6 +640,8 @@ func extractComponentFromVar(decl *ast.VarDecl) *ast.FnDecl {
 		Name:   decl.Name,
 		Params: innerFn.Params,
 		Body:   innerFn.Body,
+		Async:  innerFn.Async,
+		Tier:   decl.Tier,
 	}
 }
 
@@ -529,6 +654,12 @@ func unwrapComponentInit(expr ast.Expr) *ast.ArrowFn {
 			if len(e.Args) >= 1 {
 				return unwrapComponentInit(e.Args[0])
 			}
+			return nil
+		}
+		// esbuild's `__name(fn, "Name")` wrapper (emitted by compiled libraries
+		// such as Radix) is an identity; unwrap it so the component registers.
+		if id, ok := e.Callee.(*ast.Identifier); ok && id.Name == "__name" && len(e.Args) >= 1 {
+			return unwrapComponentInit(e.Args[0])
 		}
 	}
 	return nil
@@ -548,7 +679,24 @@ type ModuleSource struct {
 	Program   *ast.Program
 	Path      string
 	RawSource string
+	// Resolver resolves this module's imports with the build's tsconfig path
+	// aliases. Nil resolves without aliases.
+	Resolver *bundler.ImportResolver
 }
+
+// resolverOf returns the first import resolver the modules carry; all modules
+// of one build share it.
+func resolverOf(modules []ModuleSource) *bundler.ImportResolver {
+	for _, m := range modules {
+		if m.Resolver != nil {
+			return m.Resolver
+		}
+	}
+	return nil
+}
+
+// ResolverOf is resolverOf for callers outside the package.
+func ResolverOf(modules []ModuleSource) *bundler.ImportResolver { return resolverOf(modules) }
 
 // MergeModuleFunctions collects function declarations from additional bundled modules
 // and merges them into the annotations. Imported components (e.g. DocsLayout, SidebarNav)
@@ -559,6 +707,13 @@ func MergeModuleFunctions(ann *irtree.Annotations, modules []ModuleSource) {
 	for _, mod := range modules {
 		if mod.Program != nil {
 			collectFunctionsWithSource(mod.Program.Body, ann.Functions, ann.ComponentSources, ann.ComponentRaw, mod.Path, mod.RawSource)
+			collectMemberComponents(mod.Program.Body, ann.Functions)
+			if ann.ClassComponents == nil {
+				ann.ClassComponents = make(map[string]bool)
+			}
+			collectClassComponents(mod.Program.Body, ann.ClassComponents)
+			collectClassRejections(mod.Program.Body, ann, mod.Path, mod.RawSource)
+			collectLazyComponents(mod.Program.Body, ann, mod.Path, mod.RawSource)
 			// Merge module-level cva factories so variant calls in the entry
 			// module can fold against factories defined in imported modules.
 			if ann.CVAFactories == nil {
@@ -567,6 +722,16 @@ func MergeModuleFunctions(ann *irtree.Annotations, modules []ModuleSource) {
 			for name, spec := range irtree.CollectCVAFactories(mod.Program) {
 				if _, exists := ann.CVAFactories[name]; !exists {
 					ann.CVAFactories[name] = spec
+				}
+			}
+			// Merge context defaults so `X.useContext()` in the entry module can
+			// fold against `createContext` bindings from imported modules.
+			if ann.ContextDefaults == nil {
+				ann.ContextDefaults = make(map[string]jsvalue.Value)
+			}
+			for name, def := range irtree.CollectContextDefaults(mod.Program) {
+				if _, exists := ann.ContextDefaults[name]; !exists {
+					ann.ContextDefaults[name] = def
 				}
 			}
 		}
@@ -591,9 +756,9 @@ func MergeModuleFunctions(ann *irtree.Annotations, modules []ModuleSource) {
 
 // MergeImportAliases makes imported components resolvable under their local
 // binding names. Bundled modules' function declarations are merged into one map
-// keyed by declared name, so without aliasing a renamed import — e.g.
+// keyed by declared name, so without aliasing a renamed import - e.g.
 // `import FooLayout from "./theme/layout"` where the theme declares
-// `export default function NightLayout` — renders nothing: `<FooLayout>` has no
+// `export default function NightLayout` - renders nothing: `<FooLayout>` has no
 // matching entry. Aliasing each import local to the function it actually
 // resolves to fixes that, so page/theme authors can name exports freely.
 // entry is the page's own module (its imports are the ones that matter most).
@@ -601,11 +766,20 @@ func MergeImportAliases(ann *irtree.Annotations, modules []ModuleSource, entry M
 	if entry.Program != nil {
 		modules = append(modules, entry)
 	}
+	markLazyDefaults(ann, modules)
+	lowerContextUses(ann, modules)
+	collectCrossModuleHOCs(ann, modules)
 	aliases := BuildImportAliases(modules)
 	for local, declared := range aliases {
 		if fn := ann.Functions[declared]; fn != nil {
 			if _, exists := ann.Functions[local]; !exists {
 				ann.Functions[local] = fn
+				// The alias is classified against the file that declares the
+				// component, not an empty source.
+				if src, ok := ann.ComponentSources[declared]; ok && ann.ComponentSources[local] == "" {
+					ann.ComponentSources[local] = src
+					ann.ComponentRaw[local] = ann.ComponentRaw[declared]
+				}
 			}
 		}
 	}
@@ -634,6 +808,7 @@ func BuildImportAliases(modules []ModuleSource) map[string]string {
 			byPath[m.Path] = m.Program
 		}
 	}
+	res := resolverOf(modules)
 	aliases := make(map[string]string)
 	for _, m := range modules {
 		if m.Program == nil || m.Path == "" {
@@ -643,9 +818,9 @@ func BuildImportAliases(modules []ModuleSource) map[string]string {
 			// Namespace re-export (`export * as Card from './card'`): address
 			// every function of the target module as `Card.<Name>`.
 			if exp, ok := stmt.(*ast.ExportStmt); ok && exp.Namespace != "" && exp.ReexportSource != "" {
-				target := bundler.ResolveImport(m.Path, strings.Trim(exp.ReexportSource, "\"'"))
+				target := res.Resolve(m.Path, strings.Trim(exp.ReexportSource, "\"'"))
 				if tprog := byPath[target]; tprog != nil {
-					addNamespaceAliases(aliases, exp.Namespace, tprog.Body)
+					addNamespaceExports(aliases, exp.Namespace, res, target, byPath, map[string]bool{})
 				}
 				continue
 			}
@@ -653,27 +828,35 @@ func BuildImportAliases(modules []ModuleSource) map[string]string {
 			if !ok || imp.Source == "" {
 				continue
 			}
-			target := bundler.ResolveImport(m.Path, strings.Trim(imp.Source, "\"'"))
+			target := res.Resolve(m.Path, strings.Trim(imp.Source, "\"'"))
 			tprog := byPath[target]
 			if tprog == nil {
 				continue
 			}
 			if imp.Default != "" {
-				if name := FindDefaultExport(tprog.Body); name != "" {
+				if name := resolveExportedName(res, target, "default", byPath, 0); name != "" {
 					aliases[imp.Default] = name
 				}
 			}
 			for _, n := range imp.Named {
-				if n.Local != "" && n.Remote != "" && n.Local != n.Remote {
-					aliases[n.Local] = n.Remote
+				if n.Local != "" && n.Remote != "" {
+					// Follow `export { X } from` / `export { default as X }
+					// from` barrels to the module that declares the function.
+					if name := resolveExportedName(res, target, n.Remote, byPath, 0); name != "" {
+						if name != n.Local {
+							aliases[n.Local] = name
+						}
+					} else if n.Local != n.Remote {
+						aliases[n.Local] = n.Remote
+					}
 				}
 				// The target module may re-export a namespace under this name
 				// (`export * as Card from './card'`), so `import { Card }` then
 				// `<Card.Root>` resolves to the deeper module's `Root`. Expand
 				// the named import into namespace aliases keyed by the LOCAL
 				// binding so the import site's dotted tag resolves.
-				if nsBody, ok := namespaceReexportBody(tprog.Body, n.Remote, m.Path, byPath); ok {
-					addNamespaceAliases(aliases, n.Local, nsBody)
+				if nsPath, ok := namespaceReexportPath(res, tprog.Body, n.Remote, target, byPath); ok {
+					addNamespaceExports(aliases, n.Local, res, nsPath, byPath, map[string]bool{})
 				}
 			}
 			// Namespace import (`import * as Card from './card'`): every
@@ -681,45 +864,215 @@ func BuildImportAliases(modules []ModuleSource) map[string]string {
 			// `Card.<Name>`, so dotted JSX tags like `<Card.Root>` resolve to
 			// the declared `Root` function.
 			if imp.Namespace != "" {
-				addNamespaceAliases(aliases, imp.Namespace, tprog.Body)
+				addNamespaceExports(aliases, imp.Namespace, res, target, byPath, map[string]bool{})
 			}
 		}
 	}
 	return aliases
 }
 
-// namespaceReexportBody returns the target module's body when `exportName` in
-// the given module is a namespace re-export (`export * as exportName from '...'`).
-// This lets a named import of that binding expand into dotted aliases.
-func namespaceReexportBody(body []ast.Stmt, exportName, modulePath string, byPath map[string]*ast.Program) ([]ast.Stmt, bool) {
+// resolveExportedName returns the declared name that exportName of the module
+// at path refers to, following named and star re-exports through barrel files.
+// Empty when it cannot be determined statically.
+func resolveExportedName(res *bundler.ImportResolver, path, exportName string, byPath map[string]*ast.Program, depth int) string {
+	prog := byPath[path]
+	if prog == nil || depth > 16 {
+		return ""
+	}
+	if exportName == "default" {
+		if name := FindDefaultExport(prog.Body); name != "" {
+			return name
+		}
+	}
+	resolveSource := func(src string) string {
+		return res.Resolve(path, strings.Trim(src, "\"'"))
+	}
+	for _, stmt := range prog.Body {
+		exp, ok := stmt.(*ast.ExportStmt)
+		if !ok {
+			continue
+		}
+		if exp.ReexportSource != "" {
+			for _, n := range exp.ReexportNamed {
+				if n.Remote == exportName {
+					return resolveExportedName(res, resolveSource(exp.ReexportSource), n.Local, byPath, depth+1)
+				}
+			}
+			continue
+		}
+		if exp.Default {
+			continue
+		}
+		for _, n := range exp.Named {
+			if n.Remote == exportName {
+				return n.Local
+			}
+		}
+		switch d := exp.Declaration.(type) {
+		case *ast.FnDecl:
+			if d.Name == exportName {
+				return d.Name
+			}
+		case *ast.ClassDecl:
+			if d.Name == exportName {
+				return d.Name
+			}
+		case *ast.VarStmt:
+			for _, decl := range d.Decls {
+				if decl.Name == exportName {
+					return decl.Name
+				}
+			}
+		}
+	}
+	if exportName == "default" {
+		return ""
+	}
+	for _, stmt := range prog.Body {
+		if exp, ok := stmt.(*ast.ExportStmt); ok && exp.StarReexport && exp.ReexportSource != "" {
+			if name := resolveExportedName(res, resolveSource(exp.ReexportSource), exportName, byPath, depth+1); name != "" {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
+// namespaceReexportPath returns the path of the module that `exportName` in
+// the module at modulePath re-exports as a namespace (`export * as exportName
+// from '...'`). This lets a named import of that binding expand into dotted
+// aliases.
+func namespaceReexportPath(res *bundler.ImportResolver, body []ast.Stmt, exportName, modulePath string, byPath map[string]*ast.Program) (string, bool) {
 	for _, stmt := range body {
 		exp, ok := stmt.(*ast.ExportStmt)
 		if !ok || exp.Namespace != exportName || exp.ReexportSource == "" {
 			continue
 		}
-		target := bundler.ResolveImport(modulePath, strings.Trim(exp.ReexportSource, "\"'"))
-		if tprog := byPath[target]; tprog != nil {
-			return tprog.Body, true
+		target := res.Resolve(modulePath, strings.Trim(exp.ReexportSource, "\"'"))
+		if byPath[target] != nil {
+			return target, true
 		}
 	}
-	return nil, false
+	return "", false
+}
+
+// addNamespaceExports maps `ns.<Export>` to the declared function for every
+// export of the module at path: its own declarations and renames, then the
+// named and star re-exports of barrel files, followed to the modules that
+// declare them. `export * as sub from` adds `ns.sub.<Export>`.
+func addNamespaceExports(aliases map[string]string, ns string, res *bundler.ImportResolver, path string, byPath map[string]*ast.Program, seen map[string]bool) {
+	prog := byPath[path]
+	if prog == nil || seen[path] {
+		return
+	}
+	seen[path] = true
+	addNamespaceAliases(aliases, ns, prog.Body)
+	for _, stmt := range prog.Body {
+		exp, ok := stmt.(*ast.ExportStmt)
+		if !ok || exp.ReexportSource == "" {
+			continue
+		}
+		target := res.Resolve(path, strings.Trim(exp.ReexportSource, "\"'"))
+		switch {
+		case exp.Namespace != "":
+			addNamespaceExports(aliases, ns+"."+exp.Namespace, res, target, byPath, map[string]bool{})
+		case exp.StarReexport:
+			addNamespaceExports(aliases, ns, res, target, byPath, seen)
+		default:
+			for _, n := range exp.ReexportNamed {
+				if n.Remote == "" || n.Remote == "default" {
+					continue
+				}
+				if name := resolveExportedName(res, path, n.Remote, byPath, 0); name != "" {
+					aliases[ns+"."+n.Remote] = name
+				}
+			}
+		}
+	}
 }
 
 // addNamespaceAliases maps `ns.<Fn>` to the declared function name for every
-// function declaration in a module body, so dotted JSX tags resolve.
+// function declaration in a module body, so dotted JSX tags resolve. It also
+// follows simple aliases (`var Root2 = Popover`) and named export renames
+// (`export { Root2 as Root }`), which is how compiled libraries expose their
+// public compound components.
 func addNamespaceAliases(aliases map[string]string, ns string, body []ast.Stmt) {
+	varAlias := map[string]string{}
+	declareVar := func(v *ast.VarStmt) {
+		for _, decl := range v.Decls {
+			if decl.Name == "" {
+				continue
+			}
+			if id, ok := decl.Init.(*ast.Identifier); ok {
+				varAlias[decl.Name] = id.Name
+				continue
+			}
+			aliases[ns+"."+decl.Name] = decl.Name
+		}
+	}
 	for _, stmt := range body {
 		switch d := stmt.(type) {
 		case *ast.FnDecl:
 			if d.Name != "" {
 				aliases[ns+"."+d.Name] = d.Name
 			}
+		case *ast.VarStmt:
+			declareVar(d)
 		case *ast.ExportStmt:
 			if d2, ok := d.Declaration.(*ast.FnDecl); ok && d2.Name != "" {
 				aliases[ns+"."+d2.Name] = d2.Name
 			}
+			if v, ok := d.Declaration.(*ast.VarStmt); ok {
+				declareVar(v)
+			}
 		}
 	}
+	for _, stmt := range body {
+		d, ok := stmt.(*ast.ExportStmt)
+		if !ok {
+			continue
+		}
+		for _, n := range d.Named {
+			target := n.Local
+			if t, ok := varAlias[target]; ok {
+				target = t
+			}
+			aliases[ns+"."+n.Remote] = target
+		}
+	}
+}
+
+// collectClassComponents records class declarations that extend Component or
+// PureComponent, so the builder can emit a specific class-component diagnostic
+// instead of a generic "unresolved component".
+func collectClassComponents(body []ast.Stmt, dest map[string]bool) {
+	for _, stmt := range body {
+		var class *ast.ClassDecl
+		switch s := stmt.(type) {
+		case *ast.ClassDecl:
+			class = s
+		case *ast.ExportStmt:
+			if c, ok := s.Declaration.(*ast.ClassDecl); ok {
+				class = c
+			}
+		}
+		if class == nil || class.Name == "" || !isReactClassBase(class.SuperClass) {
+			continue
+		}
+		dest[class.Name] = true
+	}
+}
+
+func isReactClassBase(super ast.Expr) bool {
+	switch s := super.(type) {
+	case *ast.Identifier:
+		return s.Name == "Component" || s.Name == "PureComponent"
+	case *ast.MemberExpr:
+		if prop, ok := s.Property.(*ast.Identifier); ok {
+			return prop.Name == "Component" || prop.Name == "PureComponent"
+		}
+	}
+	return false
 }
 
 // ReclassifyTiers re-runs tier classification for all used components.
@@ -727,4 +1080,136 @@ func addNamespaceAliases(aliases map[string]string, ns string, body []ast.Stmt) 
 // against their own module sources.
 func ReclassifyTiers(ann *irtree.Annotations, cfg *config.Config) {
 	classifyTiers(ann, cfg)
+}
+
+// collectHOCComponents registers `const Wrapped = withX(Base)` bindings whose
+// factory is a simple higher-order component as component functions (see
+// irtree.InstantiateHOC). Factories are looked up in the same module; see
+// collectCrossModuleHOCs for factories declared elsewhere.
+func collectHOCComponents(ann *irtree.Annotations, body []ast.Stmt, sourcePath, rawSource string) {
+	factories := map[string]irtree.HOCFactory{}
+	collectHOCFactories(body, factories)
+	instantiateHOCComponents(ann, body, factories, sourcePath, rawSource)
+}
+
+// collectCrossModuleHOCs resolves higher-order component applications whose
+// factory lives in another bundled module (`import { withX } from "./hoc"`).
+func collectCrossModuleHOCs(ann *irtree.Annotations, modules []ModuleSource) {
+	factories := map[string]irtree.HOCFactory{}
+	for _, m := range modules {
+		if m.Program != nil {
+			collectHOCFactories(m.Program.Body, factories)
+		}
+	}
+	if len(factories) == 0 {
+		return
+	}
+	for _, m := range modules {
+		if m.Program != nil {
+			instantiateHOCComponents(ann, m.Program.Body, factories, m.Path, m.RawSource)
+		}
+	}
+}
+
+func collectHOCFactories(body []ast.Stmt, factories map[string]irtree.HOCFactory) {
+	for _, stmt := range body {
+		if exp, ok := stmt.(*ast.ExportStmt); ok && exp.Declaration != nil {
+			stmt = exp.Declaration
+		}
+		switch s := stmt.(type) {
+		case *ast.FnDecl:
+			factories[s.Name] = irtree.HOCFactory{Params: s.Params, Body: s.Body}
+		case *ast.VarStmt:
+			for _, d := range s.Decls {
+				if d == nil || d.Name == "" {
+					continue
+				}
+				if arrow, ok := d.Init.(*ast.ArrowFn); ok {
+					body := arrow.Body
+					if arrow.Expression && len(body) == 1 {
+						if es, ok := body[0].(*ast.ExprStmt); ok {
+							body = []ast.Stmt{&ast.ReturnStmt{Value: es.Expression}}
+						}
+					}
+					factories[d.Name] = irtree.HOCFactory{Params: arrow.Params, Body: body}
+				}
+			}
+		}
+	}
+}
+
+func instantiateHOCComponents(ann *irtree.Annotations, body []ast.Stmt, factories map[string]irtree.HOCFactory, sourcePath, rawSource string) {
+	functions := ann.Functions
+	for _, stmt := range body {
+		if exp, ok := stmt.(*ast.ExportStmt); ok && exp.Declaration != nil {
+			stmt = exp.Declaration
+		}
+		vs, ok := stmt.(*ast.VarStmt)
+		if !ok {
+			continue
+		}
+		for _, d := range vs.Decls {
+			if d == nil || len(d.Name) == 0 || d.Name[0] < 'A' || d.Name[0] > 'Z' || functions[d.Name] != nil {
+				continue
+			}
+			// memo(withX(Inner)) is the HOC application inside the wrappers.
+			init := d.Init
+			for {
+				outer, isCall := init.(*ast.CallExpr)
+				if !isCall || len(outer.Args) == 0 {
+					break
+				}
+				id, isID := outer.Callee.(*ast.Identifier)
+				if !isID || (id.Name != "memo" && id.Name != "forwardRef") {
+					break
+				}
+				init = outer.Args[0]
+			}
+			call, ok := init.(*ast.CallExpr)
+			if !ok {
+				continue
+			}
+			callee, ok := call.Callee.(*ast.Identifier)
+			if !ok || reactWrapperCallee(callee.Name) {
+				continue
+			}
+			fail := func(reason string) {
+				if ann.UnresolvedHOCs == nil {
+					ann.UnresolvedHOCs = map[string]diag.Diagnostic{}
+				}
+				pos := vs.Position
+				ann.UnresolvedHOCs[d.Name] = diag.New(sourcePath, pos.Line, pos.Col,
+					d.Name+" is "+callee.Name+"(...), a higher-order component that cannot be resolved at build time: "+reason,
+					"declare "+callee.Name+" in the project as a function that returns one component function, `function "+callee.Name+"(C) { return function Wrapped(props) { ... <C {...props} /> } }`, or write the wrapped component out by hand",
+					lineOf(rawSource, pos.Line)).WithCode(diag.CodeHOCUnresolved)
+			}
+			factory, ok := factories[callee.Name]
+			if !ok {
+				fail(callee.Name + " is not a function declared in the project's source (is it imported from a package?)")
+				continue
+			}
+			fn := irtree.InstantiateHOC(d.Name, factory, call.Args)
+			if fn == nil {
+				fail(callee.Name + " is not a simple wrapper (its body must only declare and return one component function, with plain parameters)")
+				continue
+			}
+			fn.Tier = d.Tier
+			functions[d.Name] = fn
+			delete(ann.UnresolvedHOCs, d.Name)
+			if ann.ComponentSources != nil && sourcePath != "" {
+				ann.ComponentSources[d.Name] = sourcePath
+				ann.ComponentRaw[d.Name] = rawSource
+			}
+		}
+	}
+}
+
+// reactWrapperCallee reports calls that wrap a component without creating a
+// new one, which other passes handle.
+func reactWrapperCallee(name string) bool {
+	switch name {
+	case "memo", "forwardRef", "lazy", "createContext", "__name":
+		return true
+	}
+	return false
 }

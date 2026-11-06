@@ -35,9 +35,9 @@ func effectiveOrder(p Page) int {
 }
 
 // NormalizePagePath strips trailing "/index" from a page path for URL generation.
-// "index" → ""
-// "guides/index" → "guides"
-// "guides/advanced" → "guides/advanced"
+// "index" -> ""
+// "guides/index" -> "guides"
+// "guides/advanced" -> "guides/advanced"
 func NormalizePagePath(path string) string {
 	if path == "index" || path == "" {
 		return ""
@@ -45,19 +45,58 @@ func NormalizePagePath(path string) string {
 	return strings.TrimSuffix(path, "/index")
 }
 
+// DocsBasePath is the URL prefix the docs plugin mounts pages under. It is the
+// single source of truth for absolute docs URLs (sidebar, prev/next links, and
+// breadcrumbs) so they agree.
+const DocsBasePath = "/docs"
+
 // PageURL returns the full URL for a docs page path.
 func PageURL(path string) string {
 	normalized := NormalizePagePath(path)
 	if normalized == "" {
-		return "/docs/"
+		return DocsBasePath + "/"
 	}
-	return "/docs/" + normalized + "/"
+	return DocsBasePath + "/" + normalized + "/"
+}
+
+// pagePathURL returns a page's URL, preferring the plugin-computed (locale- and
+// version-aware) URL when present.
+func pagePathURL(p Page) string {
+	if p.URL != "" {
+		return p.URL
+	}
+	return PageURL(p.Path)
+}
+
+// LocaleURL returns the absolute URL for a docs page in a locale. The default
+// locale is unprefixed (/docs/...); other locales are path-prefixed
+// (/fr/docs/...).
+func LocaleURL(locale, defaultLocale, path string) string {
+	base := PageURL(path)
+	if locale == "" || locale == defaultLocale {
+		return base
+	}
+	return "/" + locale + base
+}
+
+// BuildBreadcrumbsURL is BuildBreadcrumbs with a locale prefix applied to every
+// non-default locale's crumb URLs.
+func BuildBreadcrumbsURL(locale, defaultLocale, path string) []Breadcrumb {
+	crumbs := BuildBreadcrumbs(path)
+	if locale == "" || locale == defaultLocale {
+		return crumbs
+	}
+	for i := range crumbs {
+		if crumbs[i].URL != "" {
+			crumbs[i].URL = "/" + locale + crumbs[i].URL
+		}
+	}
+	return crumbs
 }
 
 // BuildSidebarTree builds a recursive sidebar tree from pages.
-// Pages are grouped by their directory structure — each subdirectory
+// Pages are grouped by their directory structure - each subdirectory
 // becomes a nested SidebarItem with Children, supporting infinite nesting.
-//
 // Frontmatter navigation metadata (`sidebar: {...}` and top-level `badge`) is
 // applied here: `hidden` pages are dropped from the nav (still renderable and
 // searchable), `label` overrides the displayed title, `order` overrides the
@@ -76,7 +115,7 @@ func BuildSidebarTree(pages []Page) []SidebarItem {
 	navByURL := make(map[string]*SidebarNavConfig)
 	badgeByURL := make(map[string]*Badge)
 	for _, p := range pages {
-		url := PageURL(p.Path)
+		url := pagePathURL(p)
 		if p.SidebarCfg != nil {
 			navByURL[url] = p.SidebarCfg
 		}
@@ -119,7 +158,7 @@ func BuildSidebarTree(pages []Page) []SidebarItem {
 		}
 		linkItem := SidebarItem{
 			Title: title,
-			URL:   PageURL(p.Path),
+			URL:   pagePathURL(p),
 			Icon:  icon,
 			Badge: badge,
 		}
@@ -169,7 +208,7 @@ func BuildSidebarTree(pages []Page) []SidebarItem {
 			}
 		}
 		// Stable sort: sections after links, sections alphabetically,
-		// links preserve insertion order (from SortPages: Dir→Order→Title)
+		// links preserve insertion order (from SortPages: Dir->Order->Title)
 		sort.SliceStable(n.item.Children, func(i, j int) bool {
 			hasChildrenI := len(n.item.Children[i].Children) > 0
 			hasChildrenJ := len(n.item.Children[j].Children) > 0
@@ -205,7 +244,7 @@ func firstNonEmpty(a, b string) string {
 }
 
 // BuildBreadcrumbs returns the breadcrumb trail as a slice.
-// Index pages (e.g. "guides/index") produce breadcrumbs ending at the directory name ("Guides") — no "Index" crumb.
+// Index pages (e.g. "guides/index") produce breadcrumbs ending at the directory name ("Guides") - no "Index" crumb.
 func BuildBreadcrumbs(path string) []Breadcrumb {
 	path = NormalizePagePath(path)
 	if path == "" {
@@ -223,11 +262,37 @@ func BuildBreadcrumbs(path string) []Breadcrumb {
 		isLast := (i == len(parts)-1)
 		result = append(result, Breadcrumb{
 			Label:  label,
-			URL:    accum,
+			URL:    DocsBasePath + accum + "/",
 			IsLast: isLast,
 		})
 	}
 	return result
+}
+
+// BuildBreadcrumbsTitled is BuildBreadcrumbsURL with real page titles: a crumb
+// whose path matches a page (keyed by NormalizePagePath) uses that page's
+// title instead of the humanised file name.
+func BuildBreadcrumbsTitled(locale, defaultLocale, path string, pages []Page) []Breadcrumb {
+	crumbs := BuildBreadcrumbsURL(locale, defaultLocale, path)
+	if len(crumbs) == 0 {
+		return crumbs
+	}
+	titles := make(map[string]string, len(pages))
+	for _, p := range pages {
+		if p.Title != "" {
+			titles[NormalizePagePath(p.Path)] = p.Title
+		}
+	}
+	norm := strings.Split(NormalizePagePath(path), "/")
+	for i := range crumbs {
+		if i >= len(norm) {
+			break
+		}
+		if t, ok := titles[strings.Join(norm[:i+1], "/")]; ok {
+			crumbs[i].Label = t
+		}
+	}
+	return crumbs
 }
 
 // PathToTitle converts a file path or directory name to a human-readable title.
@@ -250,6 +315,13 @@ func PathToTitle(path string) string {
 // Values already set by frontmatter (sidebar: {collapsible, defaultOpen}) are
 // preserved and OR'd with the auto-derived values.
 func EnrichSidebarItems(items []SidebarItem, currentPath string) []SidebarItem {
+	return EnrichSidebarItemsURL(items, PageURL(currentPath))
+}
+
+// EnrichSidebarItemsURL is EnrichSidebarItems keyed by the current page's full
+// (locale/version-aware) URL, so active/expanded state is correct under i18n
+// and versioning.
+func EnrichSidebarItemsURL(items []SidebarItem, activeURL string) []SidebarItem {
 	if len(items) == 0 {
 		return items
 	}
@@ -258,10 +330,10 @@ func EnrichSidebarItems(items []SidebarItem, currentPath string) []SidebarItem {
 		out[i] = item
 		out[i].IndexURL = sidebarIndexURLNav(item)
 		out[i].Collapsible = item.Collapsible || (len(item.Children) > 0 && out[i].IndexURL != "")
-		out[i].Expanded = item.Expanded || sidebarItemActiveNav(item, currentPath)
+		out[i].Expanded = item.Expanded || sidebarItemActiveNav(item, activeURL)
 		if len(item.Children) > 0 {
 			filtered := filterSidebarIndexChildNav(item.Children, out[i].IndexURL)
-			out[i].Children = EnrichSidebarItems(filtered, currentPath)
+			out[i].Children = EnrichSidebarItemsURL(filtered, activeURL)
 		}
 	}
 	return out
@@ -302,12 +374,12 @@ func sidebarIndexURLNav(item SidebarItem) string {
 	return ""
 }
 
-func sidebarItemActiveNav(item SidebarItem, currentPath string) bool {
-	if item.Active || (item.URL != "" && item.URL == PageURL(currentPath)) {
+func sidebarItemActiveNav(item SidebarItem, activeURL string) bool {
+	if item.Active || (item.URL != "" && item.URL == activeURL) {
 		return true
 	}
 	for _, child := range item.Children {
-		if sidebarItemActiveNav(child, currentPath) {
+		if sidebarItemActiveNav(child, activeURL) {
 			return true
 		}
 	}

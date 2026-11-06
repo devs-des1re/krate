@@ -1,5 +1,6 @@
 ---
 title: API Routes
+description: TypeScript and Go API endpoints under /api.
 order: 5
 badge:
   text: New
@@ -23,8 +24,75 @@ Route mapping follows the page convention:
 
 ## JS/TS routes
 
-JS/TS routes are compiled to JS and served via a Node.js sidecar (port 3001)
-or the embedded QuickJS runtime.
+JS/TS routes are compiled and served by the **embedded QuickJS runtime** by
+default (no Node.js process) or by a Node/Bun/Deno sidecar when configured.
+
+Each route is compiled twice: a self-contained IIFE bundle for the embedded
+runtime and an ESM output for the Node sidecar. Routes that import a Node
+built-in or a native module that cannot be bundled are marked **Node-only** and
+transparently forwarded to the sidecar.
+
+### Runtime model and performance
+
+- The embedded runtime keeps a **pool of long-lived VMs** (`ssr.apiWorkers`,
+  default `min(NumCPU, 8)`). Each worker loads a route module once and reuses it,
+  so a request is a single handler call rather than a fresh VM plus a full
+  re-evaluation. Requests run in parallel across workers.
+- **Module state persists per worker across requests** (the same semantics as
+  Node/Next: a module's top-level state survives between requests). Set
+  `ssr.apiIsolation: true` to run every request in a fresh VM instead.
+- The Node sidecar runs `node:cluster` across `ssr.nodeWorkers` processes, and
+  imports each route once (module cache) in production.
+- Set `ssr.apiRuntime: "bun"` to run the JS/TS routes in a **Bun sidecar** using
+  `Bun.serve` (no Node `http` stack, no cluster shim) - the fastest of the
+  sidecar options. `ssr.apiRuntime: "node"` (or `"deno"`) uses the Node `http`
+  sidecar instead. The top-level `runtime: "bun"` selects the same Bun server
+  when no explicit `apiRuntime` is set.
+- Go API routes (`src/api/*.go`) remain the fastest option; the sidecar binary
+  is a compiled Go server.
+
+### Web APIs in the embedded runtime
+
+Route handlers receive a standard Web `Request` and return a `Response`; the
+embedded runtime implements the platform APIs they usually need, and behaves
+like the Node sidecar for them (the same route code is compared against both
+in the test suite):
+
+- `Request`, `Response` (`json`, `redirect`, `error`, body streams), `Headers`
+  (case-insensitive, iterable, `getSetCookie()`), `FormData` (urlencoded and
+  multipart bodies), `Blob`/`File`, `URL`/`URLSearchParams` (spec parsing; an
+  invalid URL throws), `AbortController`/`AbortSignal`, `ReadableStream`.
+- `request.json()`, `.text()`, `.formData()`, `.arrayBuffer()` and `.blob()`
+  return promises, so `await req.json().catch(() => null)` works.
+  `request.cookies.get(name)` is available as in Next.js.
+- `TextEncoder`/`TextDecoder` (UTF-8), `atob`/`btoa`, `structuredClone`,
+  `queueMicrotask`, `performance.now()`, real `setTimeout`/`setInterval`
+  (handlers can `await new Promise((r) => setTimeout(r, 100))`), `fetch`, and
+  `crypto.getRandomValues` / `randomUUID` / `subtle.digest` / HMAC
+  `subtle.importKey`, `sign` and `verify`.
+
+Anything the embedded runtime does not implement (for example `TransformStream`,
+`WritableStream`, `WebSocket`, AES in `crypto.subtle`) throws a clear error
+naming the API and suggesting `ssr.apiRuntime: "node"`, and the error is logged.
+A handler that stays pending longer than 30 seconds (`KRATE_API_TIMEOUT`) is
+failed. Reading a very large *binary* request body with `arrayBuffer()` inside
+the VM is slow (text, JSON and form bodies are fast); use the Node runtime for
+big uploads.
+
+### Methods, errors and streaming
+
+- Exporting only some methods returns `405` with an `Allow` header for the
+  rest; `HEAD` is served from `GET` (headers only), and `OPTIONS` is answered
+  automatically with `Allow`. A default export handles every method.
+- A handler that throws is logged (route, status, message, and the stack in
+  `krate dev`). In production the response body is the generic
+  `{"error":"Internal Server Error"}`; `krate dev` includes the message.
+- `/api` requests appear in the access log, and middleware (see
+  [Middleware](/docs/features/middleware/)) runs in front of them.
+- A `Response` with a `ReadableStream` body streams to the client as it is
+  produced (Server-Sent Events work on the QuickJS and Node runtimes); streaming
+  responses extend the server write deadline.
+- Several `Set-Cookie` headers on one response are all delivered.
 
 ### Modern pattern (recommended): named method exports
 
@@ -42,6 +110,20 @@ export async function POST(request: Request) {
 }
 ```
 
+A route file also receives the dynamic route segments as a second argument,
+matching Next.js route handlers:
+
+```typescript
+// src/api/users/[id].ts
+export async function GET(request: Request, context: { params: { id: string } }) {
+  return Response.json({ id: context.params.id });
+}
+```
+
+`[...slug]` and optional `[[...slug]]` segments are passed as slash-joined
+strings. A default export with two parameters keeps the Node-style
+`(req, res)` signature.
+
 ### Legacy pattern: default export
 
 ```typescript
@@ -54,17 +136,38 @@ export default function handler(req, res) {
 ## Go routes
 
 Go routes (`src/api/*.go`) are compiled into a dedicated Go sidecar binary
-(`.krate/goapi-server[.exe]`, port `+2`) for maximum performance and true
-concurrency.
+(`.krate/goapi-server[.exe]`) for maximum performance and true concurrency. The
+main server reaches it over an **AF_UNIX socket** (`.krate/run/goapi.sock`)
+rather than a loopback port, so no port is consumed and the hop skips the TCP
+stack; it falls back to a loopback port only if the socket cannot be created.
+
+### Quick start (Go routes)
+
+1. **Install the Go toolchain** (1.21+) and make sure `go` is on `PATH`. Go
+   routes are compiled with `go build` at build time.
+2. **Add a file** under `src/api` (the default `go.apiDirs`). No config is
+   required for the default layout; add the [`go` block](/docs/reference/config/#go-components--api-routes)
+   only to change paths or pull in third-party modules.
+3. **Set up editor intellisense** (optional but recommended):
+
+   ```sh
+   krate go:init
+   ```
+
+   This writes a `go.mod` + `go.work`, vendors the helper module under
+   `.krate/goext`, and adds `.krate/types` to your `tsconfig.json` so
+   `goimports`/gopls resolve the `goext/runtime` import.
+
+4. Run `krate dev` and hit the route.
 
 ```go
-// src/api/hello.go — GET /api/hello
+// src/api/hello.go - GET /api/hello
 package api
 
 import (
 	"net/http"
 
-	"krate-goapi/runtime"
+	runtime "github.com/kratejs/krate/packages/compiler/goext/runtime"
 )
 
 func GET(w http.ResponseWriter, r *http.Request) {
@@ -78,11 +181,90 @@ dispatch. Dynamic segments use `[param]` file names and are read with
 `r.PathValue("param")`:
 
 ```go
-// src/api/users/[id].go — all methods on /api/users/{id}
+// src/api/users/[id].go - all methods on /api/users/{id}
 func Handler(w http.ResponseWriter, r *http.Request) {
 	runtime.WriteJSON(w, 200, map[string]interface{}{"id": r.PathValue("id")})
 }
 ```
 
-Go routes require the Go toolchain at build time and should stick to the
-stdlib plus the `krate-goapi/runtime` helper package.
+Go routes require the Go toolchain at build time.
+
+The helper packages live at real import paths
+(`github.com/kratejs/krate/packages/compiler/goext/runtime` and
+`.../goext/krate`) so `goimports`/gopls provide intellisense. Run `krate go:init`
+once to write a project `go.mod` + `go.work` and vendor the helper module under
+`.krate/goext`, so the imports also resolve offline at build time. `krate doctor`
+reports whether the setup is complete.
+
+### Packages, helpers, and dependencies
+
+The `src/api` tree is preserved when it is compiled: a file that defines no
+handler is treated as a **helper** and keeps its package clause, so sibling and
+internal packages stay importable at `krate-goapi/routes/<dir>`:
+
+```go
+// src/api/lib/util.go
+package lib
+
+func Message() string { return "hi" }
+
+// src/api/hello.go
+package api
+
+import (
+	"net/http"
+
+	"krate-goapi/routes/lib"
+	runtime "github.com/kratejs/krate/packages/compiler/goext/runtime"
+)
+
+func GET(w http.ResponseWriter, r *http.Request) {
+	runtime.WriteJSON(w, 200, map[string]interface{}{"msg": lib.Message()})
+}
+```
+
+Third-party modules are declared under `go` (or via a project-root `go.mod`,
+which is merged - its `require`/`replace`/`exclude` directives are copied and
+relative `replace` paths rebased):
+
+```typescript
+// krate.config.ts
+go: {
+  deps: [{ path: "github.com/google/uuid", version: "v1.6.0" }],
+  replaces: [{ from: "example.com/local", to: "../local" }],
+},
+```
+
+A `src/api/go.mod` (with an optional `go.sum`) is used verbatim for full
+control. The compiled sidecar binary is cached by the content of `src/api` and
+the module config, so unchanged routes skip `go build`. See
+[Config Reference](/docs/reference/config/#go-components--api-routes).
+
+## Custom API sidecar
+
+You can run your own HTTP service (any language) and let Krate forward `/api/*`
+to it. Krate forwards the request first; if your service returns `404`, the
+request falls through to Krate's built-in Go/TS/QuickJS routes, and finally to a
+`404` if nothing matches. Because the sidecar sees the full path, it can own
+dynamic routes itself (`/api/users/123`, `/api/blog/2024/hello`) with no route
+declaration:
+
+```typescript
+// krate.config.ts
+export default defineConfig({
+  api: {
+    sidecar: {
+      // Supervised: Krate starts/stops the process and restarts it if it exits.
+      command: "node",
+      args: ["server.js"],
+      port: 8080,
+      // ...or attach to an already-running service:
+      // target: "http://127.0.0.1:8080",
+    },
+  },
+});
+```
+
+The sidecar process receives `PORT` and `KRATE_API_SIDECAR_PORT` in its
+environment. Set `prefix` (default `/api`) to give the sidecar a different
+subtree. See [Config Reference](/docs/reference/config/#api-sidecar).

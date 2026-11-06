@@ -1,0 +1,8 @@
+{
+  "server": true,
+  "steps": [
+    { "op": "click", "sel": "#sign", "then": "#error" },
+    { "op": "fill", "sel": "#name", "text": "Ada" },
+    { "op": "click", "sel": "#sign", "then": "#entries li" }
+  ]
+}

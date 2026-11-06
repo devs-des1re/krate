@@ -1,30 +1,29 @@
 // Package mcp implements `krate mcp`, an MCP (Model Context Protocol) server
 // that exposes the Krate compiler to agents over JSON-RPC 2.0.
-//
 // Transport is stdio by default (one JSON object per line over stdin/stdout),
 // which is what Claude Desktop/Code, Cursor, VS Code, and opencode expect. The
 // dispatcher is transport-agnostic so an HTTP mode can be layered on later.
-//
 // There is no MCP SDK dependency: the protocol surface Krate needs
 // (initialize, tools/list, tools/call, resources/list, resources/read,
 // resources/templates/list, prompts/list, prompts/get, completions/complete,
 // notifications) is implemented directly with encoding/json.
-//
 // Protocol details:
-//
 //   - Initialize negotiates the client's protocol version against the set of
-//     versions this server supports (2024-11-05 … 2025-11-25) and advertises
-//     capabilities (tools, resources, prompts, completions) plus instructions.
-//   - Tool handlers run in goroutines but execute under a single mutex, so the
-//     read loop stays live to observe notifications (e.g. cancelled) while a
-//     long operation is running, without letting build/check output capture
-//     overlap.
-//   - notifications/cancelled marks the referenced request; clients receive a
-//     -32800 (RequestCancelled) error rather than a result.
+//
+// versions this server supports (2024-11-05 ... 2025-11-25) and advertises
+//
+//	  capabilities (tools, resources, prompts, completions) plus instructions.
+//	- Tool handlers run in goroutines but execute under a single mutex, so the
+//	  read loop stays live to observe notifications (e.g. cancelled) while a
+//	  long operation is running, without letting build/check output capture
+//	  overlap.
+//	- notifications/cancelled marks the referenced request; clients receive a
+//	  -32800 (RequestCancelled) error rather than a result.
 package mcp
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -77,21 +76,22 @@ func (e *rpcError) Error() string { return e.Message }
 
 // Server speaks MCP over a pair of streams.
 type Server struct {
-	out    *bufio.Writer
-	outMu  sync.Mutex
-	enc    *json.Encoder
-	pmu    sync.Mutex // guards inflight
-	server *serverInfo
+	out                   *bufio.Writer
+	suppressNotifications bool
+	outMu                 sync.Mutex
+	pmu                   sync.Mutex // guards inflight
+	server                *serverInfo
 
-	tools     map[string]Tool
-	toolOrder []string
-	resources map[string]Resource
-	resOrder  []string
-	templates map[string]*ResourceTemplate
-	tmplOrder []string
-	prompts   map[string]*Prompt
-	promptOrd []string
-	completes map[string]completionFn
+	tools         map[string]Tool
+	toolOrder     []string
+	resources     map[string]Resource
+	resOrder      []string
+	templates     map[string]*ResourceTemplate
+	tmplOrder     []string
+	prompts       map[string]*Prompt
+	promptOrd     []string
+	completes     map[string]completionFn
+	subscriptions map[string]bool
 
 	// reqCh is the fifo queue consumed by the worker goroutine. Requests are
 	// processed strictly in order, so responses are emitted in request order.
@@ -104,6 +104,12 @@ type Server struct {
 	// initialized tracks the handshake so tools/list before initialize can be
 	// tolerated (some clients do this); it is informational only.
 	initialized bool
+
+	redactMu sync.RWMutex
+	redactor func(string) string
+	auditor  func(auditRecord)
+	clientID string
+	remote   bool
 }
 
 // dispatchItem is an enqueued request together with its cancellation state.
@@ -120,9 +126,10 @@ type serverInfo struct {
 
 // pendingOp is the cancel state for a single in-flight request.
 type pendingOp struct {
-	ctx       context.Context
-	cancel    context.CancelFunc
-	cancelled *boolFlag
+	ctx           context.Context
+	cancel        context.CancelFunc
+	cancelled     *boolFlag
+	progressToken any
 }
 
 type boolFlag struct {
@@ -145,18 +152,59 @@ func (b *boolFlag) get() bool {
 // NewServer creates a server writing JSON-RPC responses to out.
 func NewServer(out io.Writer, name, version string) *Server {
 	bw := bufio.NewWriter(out)
-	enc := json.NewEncoder(bw)
-	enc.SetEscapeHTML(false)
 	return &Server{
-		out:       bw,
-		enc:       enc,
-		server:    &serverInfo{Name: name, Version: version},
-		tools:     make(map[string]Tool),
-		resources: make(map[string]Resource),
-		templates: make(map[string]*ResourceTemplate),
-		prompts:   make(map[string]*Prompt),
-		completes: make(map[string]completionFn),
-		inflight:  make(map[string]*pendingOp),
+		out:           bw,
+		server:        &serverInfo{Name: name, Version: version},
+		tools:         make(map[string]Tool),
+		resources:     make(map[string]Resource),
+		templates:     make(map[string]*ResourceTemplate),
+		prompts:       make(map[string]*Prompt),
+		completes:     make(map[string]completionFn),
+		subscriptions: make(map[string]bool),
+		inflight:      make(map[string]*pendingOp),
+	}
+}
+
+// SetRedactor installs a text redactor applied to every outgoing JSON frame.
+func (s *Server) SetRedactor(fn func(string) string) {
+	s.redactMu.Lock()
+	s.redactor = fn
+	s.redactMu.Unlock()
+}
+
+// SetAuditHook installs a tool-call audit sink.
+func (s *Server) SetAuditHook(fn func(auditRecord)) {
+	s.redactMu.Lock()
+	s.auditor = fn
+	s.redactMu.Unlock()
+}
+
+// SetClient identifies the transport client for audit records.
+func (s *Server) SetClient(id string, remote bool) {
+	s.redactMu.Lock()
+	s.clientID = id
+	s.remote = remote
+	s.redactMu.Unlock()
+}
+
+func (s *Server) applyRedaction(text string) string {
+	s.redactMu.RLock()
+	fn := s.redactor
+	s.redactMu.RUnlock()
+	if fn != nil {
+		return fn(text)
+	}
+	return text
+}
+
+func (s *Server) audit(rec auditRecord) {
+	s.redactMu.RLock()
+	fn := s.auditor
+	rec.Client = s.clientID
+	rec.Remote = s.remote
+	s.redactMu.RUnlock()
+	if fn != nil {
+		fn(rec)
 	}
 }
 
@@ -230,6 +278,10 @@ loop:
 			s.cancelRequest(req.Params)
 			continue
 		case "exit":
+			break loop
+		case "shutdown":
+			// Let the worker emit the shutdown result, then stop reading.
+			s.dispatch(req)
 			break loop
 		}
 		s.dispatch(req)
@@ -344,6 +396,10 @@ func (s *Server) handle(req request, op *pendingOp) {
 		result, rerr = s.readResource(req.Params)
 	case "resources/templates/list":
 		result = s.listResourceTemplates()
+	case "resources/subscribe":
+		result, rerr = s.setSubscription(req.Params, true)
+	case "resources/unsubscribe":
+		result, rerr = s.setSubscription(req.Params, false)
 	case "prompts/list":
 		result = s.listPrompts()
 	case "prompts/get":
@@ -401,9 +457,10 @@ func (s *Server) initializeResult(raw json.RawMessage) map[string]any {
 		"protocolVersion": version,
 		"capabilities": map[string]any{
 			"tools":       map[string]any{},
-			"resources":   map[string]any{},
+			"resources":   map[string]any{"subscribe": true},
 			"prompts":     map[string]any{},
 			"completions": map[string]any{},
+			"logging":     map[string]any{},
 		},
 		"serverInfo": map[string]any{
 			"name":    s.server.Name,
@@ -413,8 +470,7 @@ func (s *Server) initializeResult(raw json.RawMessage) map[string]any {
 			"Read routes with list_routes, a page with read_page (source/ast/html; format defaults to the raw source), " +
 			"read content entries with read_content, and validate with build/check. " +
 			"search_docs searches Krate's own framework documentation (embedded in the compiler, not the current project) and returns slugs; read a full page with the krate://docs/{slug} resource, or pass full:true to include full text. " +
-			"Write tools (create_page, edit_ast, edit_page, create_content, edit_content) default to a dry-run unified diff; pass apply:true to write. " +
-			"edit_ast refuses pages the parser cannot round-trip (TypeScript type syntax) — use edit_page to edit the source directly (find+replace or full content). " +
+			"Write tools (create_page, edit_file, apply_patch, batch_edit, create_content, edit_content) default to a dry-run unified diff; pass apply:true to write. " +
 			"create_content validates frontmatter against a collection's schema and refuses existing entries; edit_content re-parses the result and refuses schema violations. " +
 			"Krate conventions: pages under <pagesDir>, root layout in _layout.tsx, directed content via getCollection from 'krate/content'. " +
 			"Content collections come from content: in krate.config.ts plus plugin-contributed ones (e.g. the docs collection).",
@@ -432,6 +488,9 @@ func (s *Server) listTools() map[string]any {
 		}
 		if len(t.Annotations) > 0 {
 			tm["annotations"] = t.Annotations
+		}
+		if len(t.OutputSchema) > 0 {
+			tm["outputSchema"] = t.OutputSchema
 		}
 		tools = append(tools, tm)
 	}
@@ -517,17 +576,85 @@ func (s *Server) getPrompt(raw json.RawMessage) (any, *rpcError) {
 
 // writeResult sends a successful response. Callers must ensure ID is valid.
 func (s *Server) writeResult(id json.RawMessage, result any) {
-	s.outMu.Lock()
-	defer s.outMu.Unlock()
-	_ = s.enc.Encode(response{JSONRPC: "2.0", ID: id, Result: result})
-	_ = s.out.Flush()
+	s.writeJSON(response{JSONRPC: "2.0", ID: id, Result: result})
 }
 
 func (s *Server) writeError(id json.RawMessage, code int, msg string) {
+	s.writeJSON(response{JSONRPC: "2.0", ID: id, Error: &rpcError{Code: code, Message: msg}})
+}
+
+// writeJSON encodes one frame, applies redaction to the serialized text, and
+// writes it. Redacting the wire form covers tool content, resources, errors,
+// and structured payloads with one choke point.
+func (s *Server) writeJSON(value any) {
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(value); err != nil {
+		return
+	}
+	out := s.applyRedaction(buf.String())
 	s.outMu.Lock()
 	defer s.outMu.Unlock()
-	_ = s.enc.Encode(response{JSONRPC: "2.0", ID: id, Error: &rpcError{Code: code, Message: msg}})
+	_, _ = s.out.WriteString(out)
 	_ = s.out.Flush()
+}
+
+// writeNotification sends a JSON-RPC notification. Notifications are disabled
+// for stateless HTTP request/response calls, where progress must travel over a
+// persistent SSE stream instead.
+func (s *Server) writeNotification(method string, params any) {
+	if s.suppressNotifications {
+		return
+	}
+	s.writeJSON(map[string]any{"jsonrpc": "2.0", "method": method, "params": params})
+}
+
+// NotifyLog sends a structured log notification.
+func (s *Server) NotifyLog(level, message string) {
+	s.writeNotification("notifications/message", map[string]any{
+		"level": level, "logger": "krate", "data": map[string]any{"message": message},
+	})
+}
+
+// NotifyResourceUpdated sends a resources/updated notification to subscribed
+// clients. It is a no-op when the client did not subscribe.
+func (s *Server) NotifyResourceUpdated(uri string) {
+	if s.suppressNotifications {
+		return
+	}
+	s.pmu.Lock()
+	subscribed := s.subscriptions[uri]
+	s.pmu.Unlock()
+	if !subscribed {
+		return
+	}
+	s.writeNotification("notifications/resources/updated", map[string]any{"uri": uri})
+}
+
+func (s *Server) setSubscription(raw json.RawMessage, on bool) (any, *rpcError) {
+	var params struct {
+		URI string `json:"uri"`
+	}
+	if err := json.Unmarshal(raw, &params); err != nil || params.URI == "" {
+		return nil, &rpcError{Code: codeInvalidParams, Message: "resources/subscribe requires uri"}
+	}
+	s.pmu.Lock()
+	if on {
+		s.subscriptions[params.URI] = true
+	} else {
+		delete(s.subscriptions, params.URI)
+	}
+	s.pmu.Unlock()
+	return map[string]any{}, nil
+}
+
+func (s *Server) writeProgress(token any, progress, total float64, message string) {
+	params := map[string]any{"progressToken": token, "progress": progress, "total": total}
+	if message != "" {
+		params["message"] = message
+	}
+	s.writeNotification("notifications/progress", params)
 }
 
 // Errorf builds an internal RPC error.

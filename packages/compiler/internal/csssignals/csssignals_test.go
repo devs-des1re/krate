@@ -359,7 +359,7 @@ func TestAnalyzeStack(t *testing.T) {
 		t.Fatalf("kind=%v", s.Kind)
 	}
 	if s.Tree["settings"] != "root" {
-		t.Errorf("tree=%v (want settings→root)", s.Tree)
+		t.Errorf("tree=%v (want settings->root)", s.Tree)
 	}
 }
 
@@ -393,7 +393,7 @@ func TestAnalyzeUnknownRole(t *testing.T) {
 	}
 }
 
-// ─── Hard-error cases (no fallback) ─────────────────────────────────────────
+// Hard-error cases (no fallback)
 
 func TestErrorNonLabelableTrigger(t *testing.T) {
 	src := `export default function T() {
@@ -409,14 +409,14 @@ func TestErrorNonLabelableTrigger(t *testing.T) {
 	}
 }
 
-func TestErrorDynamicTriggerClass(t *testing.T) {
+func TestDynamicTriggerClassIsAllowed(t *testing.T) {
 	src := `export default function T() {
 	const [tab, setTab] = createCSSChoice('a');
 	return <div><button class={x} onClick={() => setTab('b')}>B</button><div showIf={tab() === 'b'}>B</div></div>;
 }`
 	a := analyze(t, src)
-	if a.OK() {
-		t.Fatal("expected an error for a dynamic trigger class")
+	if !a.OK() {
+		t.Fatalf("a computed trigger class should be accepted, got %v", a.Errors())
 	}
 }
 
@@ -455,7 +455,7 @@ func TestNoPrimitivesIsNotAnError(t *testing.T) {
 	}
 }
 
-// ─── CSS generation ─────────────────────────────────────────────────────────
+// CSS generation
 
 func TestStylesheetChoiceWellFormed(t *testing.T) {
 	css := Stylesheet(analyze(t, tabSrc).Scopes(), nil)
@@ -495,5 +495,146 @@ func TestClassNamesAreCompact(t *testing.T) {
 	s.Class = s.base()
 	if got := s.RadioClass("overview"); got != "krcz-r-overview" {
 		t.Errorf("radio class = %q", got)
+	}
+}
+
+func TestStylesheetLegacyMode(t *testing.T) {
+	a := analyze(t, tabSrc)
+	css := StylesheetMode(a.Scopes(), a.Conditions(), StyleLegacy)
+	if strings.Contains(css, ":has(") {
+		t.Errorf("legacy stylesheet must not reference :has():\n%s", css)
+	}
+	if !strings.Contains(css, ".krc0.krc0-r-overview-on .krc0-t-overview") {
+		t.Errorf("missing legacy trigger selector:\n%s", css)
+	}
+	if !strings.Contains(css, ".krc0.krc0-r-overview-on .krc0-p-overview") {
+		t.Errorf("missing legacy panel selector:\n%s", css)
+	}
+	if strings.Contains(css, "@supports not selector(:has(*))") {
+		t.Errorf("legacy must not emit the reveal-all fallback:\n%s", css)
+	}
+	if !strings.Contains(css, ".krc-f{") {
+		t.Errorf("legacy must emit the focus marker rule:\n%s", css)
+	}
+}
+
+func TestStylesheetHybridMode(t *testing.T) {
+	a := analyze(t, tabSrc)
+	css := StylesheetMode(a.Scopes(), a.Conditions(), StyleHybrid)
+	if !strings.Contains(css, "@supports selector(:has(*)){") {
+		t.Errorf("hybrid missing the modern @supports block:\n%s", css)
+	}
+	if !strings.Contains(css, "@supports not selector(:has(*)){") {
+		t.Errorf("hybrid missing the legacy @supports block:\n%s", css)
+	}
+	if !strings.Contains(css, ".krc0:has(.krc0-r-overview:checked)") {
+		t.Errorf("hybrid missing the modern selector:\n%s", css)
+	}
+	if !strings.Contains(css, ".krc0.krc0-r-overview-on") {
+		t.Errorf("hybrid missing the legacy selector:\n%s", css)
+	}
+	// The reveal-all fallback would fight the shim's real behavior.
+	if strings.Contains(css, "display:contents}}") {
+		t.Errorf("hybrid must not emit the reveal-all fallback:\n%s", css)
+	}
+}
+
+func TestParseStyleMode(t *testing.T) {
+	cases := map[string]StyleMode{
+		"":        StyleModern,
+		"modern":  StyleModern,
+		"legacy":  StyleLegacy,
+		"hybrid":  StyleHybrid,
+		" Hybrid": StyleHybrid,
+	}
+	for in, want := range cases {
+		if got := ParseStyleMode(in); got != want {
+			t.Errorf("ParseStyleMode(%q) = %v, want %v", in, got, want)
+		}
+	}
+}
+
+// TestStylesheetLegacyOmitsAnchor verifies legacy mode drops CSS anchor
+// positioning (components provide their own positioning fallback instead of a
+// generated one, which could fight the component's own offsets).
+func TestStylesheetLegacyOmitsAnchor(t *testing.T) {
+	s := &Scope{Kind: KindChoice, Index: 0, Initial: "a", Options: []string{"a", "b"}, Anchor: "bottom-start"}
+	s.Class = s.base()
+
+	modern := StylesheetMode([]*Scope{s}, nil, StyleModern)
+	if !strings.Contains(modern, "anchor-name:") || !strings.Contains(modern, "position-anchor:") {
+		t.Errorf("modern should emit anchor positioning:\n%s", modern)
+	}
+	legacy := StylesheetMode([]*Scope{s}, nil, StyleLegacy)
+	if strings.Contains(legacy, "anchor-name:") || strings.Contains(legacy, "anchor(") {
+		t.Errorf("legacy must omit anchor positioning:\n%s", legacy)
+	}
+}
+
+func TestTransitionCSSHonorsReducedMotion(t *testing.T) {
+	s := &Scope{Kind: KindChoice, Index: 0, Initial: "a", Options: []string{"a", "b"}, Transition: true}
+	s.Class = s.base()
+	css := s.transitionCSS()
+	guard := "@media (prefers-reduced-motion:no-preference){"
+	if !strings.HasPrefix(css, guard) || !strings.HasSuffix(css, "}\n") {
+		t.Fatalf("transition CSS must be wrapped in %q:\n%s", guard, css)
+	}
+	inner := css[len(guard):]
+	for _, want := range []string{"transition:opacity .18s ease", "@starting-style{"} {
+		if !strings.Contains(inner, want) {
+			t.Errorf("missing %q inside the guard:\n%s", want, css)
+		}
+	}
+	if strings.Count(css, "@media") != 1 {
+		t.Errorf("expected a single media block:\n%s", css)
+	}
+	if strings.Count(css, "{") != strings.Count(css, "}") {
+		t.Errorf("unbalanced braces:\n%s", css)
+	}
+
+	s.Transition = false
+	if got := s.transitionCSS(); got != "" {
+		t.Errorf("no transition requested, got %q", got)
+	}
+}
+
+// TestRolePresetsAccessibleSurface pins the widget roles the keyboard enhancer
+// relies on: triggers are buttons/tabs, close items have their own role, and a
+// native switch keeps its role on the input.
+func TestRolePresetsAccessibleSurface(t *testing.T) {
+	cases := []struct {
+		as                                string
+		trigger, item, panel, control, hp string
+		modal, anchored                   bool
+	}{
+		{"dialog", "button", "", "dialog", "", "dialog", true, false},
+		{"modal", "button", "", "alertdialog", "", "dialog", true, false},
+		{"popover", "button", "", "dialog", "", "dialog", false, true},
+		{"menu", "button", "menuitem", "menu", "", "menu", false, true},
+		{"menubar", "button", "menuitem", "menu", "", "menu", false, true},
+		{"nav", "button", "", "", "", "", false, true},
+		{"tabs", "tab", "", "tabpanel", "", "", false, false},
+		{"switch", "", "", "", "switch", "", false, false},
+	}
+	for _, c := range cases {
+		r, ok := rolePresets[c.as]
+		if !ok {
+			t.Fatalf("missing preset %q", c.as)
+		}
+		if r.Trigger != c.trigger || r.Item != c.item || r.Panel != c.panel || r.Control != c.control || r.Haspopup != c.hp || r.Modal != c.modal || r.Anchored != c.anchored {
+			t.Errorf("%s: got %+v", c.as, r)
+		}
+		if r.Name != c.as {
+			t.Errorf("%s: Name=%q", c.as, r.Name)
+		}
+		if want := c.trigger != ""; r.NeedsRuntime() != want {
+			t.Errorf("%s: NeedsRuntime=%v want %v", c.as, r.NeedsRuntime(), want)
+		}
+	}
+	// No preset puts a container role over the panels of a menu or tabs.
+	for _, as := range []string{"menu", "menubar", "tabs", "tablist"} {
+		if rolePresets[as].Container != "" {
+			t.Errorf("%s must not set a container role", as)
+		}
 	}
 }

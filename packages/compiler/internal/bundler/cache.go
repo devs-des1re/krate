@@ -1,0 +1,281 @@
+package bundler
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"os"
+	"sync"
+	"time"
+
+	"github.com/kratejs/krate/packages/compiler/ast"
+	"github.com/kratejs/krate/packages/compiler/internal/diag"
+)
+
+// Small modules are verified by content hash on every cache lookup. mtime can be
+// coarse (or deliberately preserved) on some filesystems, so a same-size edit
+// would otherwise replay a stale AST/CSS/asset URL across dev rebuilds.
+const contentVerifyLimit = 512 << 10
+
+func fileContentHash(abs string, size int64) string {
+	if size < 0 || size > contentVerifyLimit {
+		return ""
+	}
+	data, err := os.ReadFile(abs)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+func stampMatches(abs string, mtime time.Time, size int64, hash string) bool {
+	if size > contentVerifyLimit {
+		return true
+	}
+	return hash != "" && fileContentHash(abs, size) == hash
+}
+
+// ModuleCache memoizes per-file parse results across every Bundler in a build.
+// Bundles previously re-read, re-lexed, and re-parsed each imported module once
+// per page (the docs theme/components/runtime were parsed once per page), so a
+// build was O(pages x modules). Sharing this cache makes it O(modules).
+// Cached values are immutable after creation. The parsed *ast.Program is shared
+// by reference across bundles; callers must treat it as read-only for shared
+// (non-entry) modules - see the once-per-module transform guard in the build.
+type ModuleCache struct {
+	mu       sync.Mutex
+	programs map[string]*programEntry
+	css      map[string]*cssEntry
+	assets   map[string]*assetEntry
+	res      *resolverMemo
+	renamed  map[string]*renamedEntry
+}
+
+// renamedEntry holds copies of one parsed module with private names renamed,
+// keyed by the names. It belongs to one parse of the module.
+type renamedEntry struct {
+	orig   *ast.Program
+	copies map[string]*ast.Program
+}
+
+func (c *ModuleCache) getRenamed(path string, orig *ast.Program, names string) *ast.Program {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if e := c.renamed[path]; e != nil && e.orig == orig {
+		return e.copies[names]
+	}
+	return nil
+}
+
+func (c *ModuleCache) putRenamed(path string, orig *ast.Program, names string, prog *ast.Program) {
+	if c == nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.renamed == nil {
+		c.renamed = map[string]*renamedEntry{}
+	}
+	e := c.renamed[path]
+	if e == nil || e.orig != orig {
+		e = &renamedEntry{orig: orig, copies: map[string]*ast.Program{}}
+		c.renamed[path] = e
+	}
+	e.copies[names] = prog
+}
+
+// resolverMemo memoizes filesystem-existence probes and import resolutions for a
+// build. It is shared across every Bundler in the build (like the parse cache),
+// so pages don't repeat the same os.Stat probes and node_modules walks. It is
+// reset at the start of each build (file adds/removes between dev rebuilds must
+// not be served from a stale negative entry); the parse cache is unaffected.
+type resolverMemo struct {
+	mu      sync.Mutex
+	exists  map[string]bool
+	imports map[string]string
+}
+
+func newResolverMemo() *resolverMemo {
+	return &resolverMemo{exists: map[string]bool{}, imports: map[string]string{}}
+}
+
+func (m *resolverMemo) existsResult(path string) (bool, bool) {
+	if m == nil {
+		return false, false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	v, ok := m.exists[path]
+	return v, ok
+}
+
+func (m *resolverMemo) putExists(path string, v bool) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.exists[path] = v
+	m.mu.Unlock()
+}
+
+func (m *resolverMemo) importResult(key string) (string, bool) {
+	if m == nil {
+		return "", false
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	v, ok := m.imports[key]
+	return v, ok
+}
+
+func (m *resolverMemo) putImport(key, v string) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.imports[key] = v
+	m.mu.Unlock()
+}
+
+func (m *resolverMemo) reset() {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	m.exists = map[string]bool{}
+	m.imports = map[string]string{}
+	m.mu.Unlock()
+}
+
+// ResetResolver clears the filesystem-existence and import-resolution memo so a
+// new build re-probes the filesystem. Call once per build.
+func (c *ModuleCache) ResetResolver() {
+	if c == nil {
+		return
+	}
+	c.res.reset()
+}
+
+type programEntry struct {
+	mtime       time.Time
+	size        int64
+	hash        string
+	program     *ast.Program
+	source      string
+	imports     []string
+	compClass   ComponentClass
+	frontmatter map[string]any
+	diags       []diag.Diagnostic
+}
+
+type cssEntry struct {
+	mtime    time.Time
+	size     int64
+	hash     string
+	css      string
+	mapping  map[string]string
+	isModule bool
+	// assets are the `url(...)` assets this sheet references (source path ->
+	// hashed URL), replayed into every bundle that reuses the cached CSS.
+	assets map[string]string
+	// deps are the imported sheets, url() assets and composes sources the
+	// cached CSS was built from; the entry is stale when any of them changed.
+	deps []cssDep
+	// composesFrom are the CSS module files this sheet composes from.
+	composesFrom []string
+	// diags are the warnings produced while building the sheet, replayed with it.
+	diags []diag.Diagnostic
+}
+
+type assetEntry struct {
+	mtime time.Time
+	size  int64
+	hash  string
+	url   string
+}
+
+// NewModuleCache creates an empty cache. One cache is shared per build (and,
+// in dev, across partial rebuilds) so repeated work is done once.
+func NewModuleCache() *ModuleCache {
+	return &ModuleCache{
+		programs: make(map[string]*programEntry),
+		css:      make(map[string]*cssEntry),
+		assets:   make(map[string]*assetEntry),
+		res:      newResolverMemo(),
+	}
+}
+
+func (c *ModuleCache) getProgram(abs string, mtime time.Time, size int64) (*programEntry, bool) {
+	if c == nil {
+		return nil, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.programs[abs]
+	if !ok || !e.mtime.Equal(mtime) || e.size != size || !stampMatches(abs, mtime, size, e.hash) {
+		return nil, false
+	}
+	return e, true
+}
+
+func (c *ModuleCache) putProgram(abs string, e *programEntry) {
+	if c == nil {
+		return
+	}
+	e.hash = fileContentHash(abs, e.size)
+	c.mu.Lock()
+	c.programs[abs] = e
+	c.mu.Unlock()
+}
+
+func (c *ModuleCache) getCSS(abs string, mtime time.Time, size int64) (*cssEntry, bool) {
+	if c == nil {
+		return nil, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.css[abs]
+	if !ok || !e.mtime.Equal(mtime) || e.size != size || !stampMatches(abs, mtime, size, e.hash) {
+		return nil, false
+	}
+	if !cssDepsCurrent(e.deps) {
+		return nil, false
+	}
+	return e, true
+}
+
+func (c *ModuleCache) putCSS(abs string, e *cssEntry) {
+	if c == nil {
+		return
+	}
+	e.hash = fileContentHash(abs, e.size)
+	c.mu.Lock()
+	c.css[abs] = e
+	c.mu.Unlock()
+}
+
+func (c *ModuleCache) getAsset(abs string, mtime time.Time, size int64) (*assetEntry, bool) {
+	if c == nil {
+		return nil, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	e, ok := c.assets[abs]
+	if !ok || !e.mtime.Equal(mtime) || e.size != size || !stampMatches(abs, mtime, size, e.hash) {
+		return nil, false
+	}
+	return e, true
+}
+
+func (c *ModuleCache) putAsset(abs string, e *assetEntry) {
+	if c == nil {
+		return
+	}
+	e.hash = fileContentHash(abs, e.size)
+	c.mu.Lock()
+	c.assets[abs] = e
+	c.mu.Unlock()
+}

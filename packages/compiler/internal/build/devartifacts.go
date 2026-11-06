@@ -16,7 +16,6 @@ import (
 // is exactly what makes dev mode feel slow. Instead, only the artifacts owned by
 // the rebuilt pages are refreshed, and their entries are merged into the
 // on-disk manifests so the running sidecar sees them.
-//
 // Specifically:
 //   - a rebuilt page whose mode is not SSG gets its server bundle recompiled
 //     (CompileServerBundles re-emits the same deterministic bundle path), and
@@ -26,9 +25,9 @@ import (
 //
 // The manifest merge is deliberately additive: entries for pages and components
 // outside this rebuild are preserved untouched.
-func (b *Builder) refreshPageServerArtifacts(results []*PageResult, runtimeJS string, globalCSS []string) {
+func (b *Builder) refreshPageServerArtifacts(results []*PageResult, runtimeJS string, globalCSS []string) error {
 	if !b.DevMode || len(results) == 0 {
-		return
+		return nil
 	}
 
 	ssrPages := make([]*PageResult, 0, len(results))
@@ -41,7 +40,10 @@ func (b *Builder) refreshPageServerArtifacts(results []*PageResult, runtimeJS st
 	// Recompile server bundles only for the pages in this rebuild.
 	var serverBundles map[string]string
 	if len(ssrPages) > 0 {
-		serverBundles = CompileServerBundles(ssrPages, b.Root, b.Cfg.OutDir)
+		serverBundles = CompileServerBundles(b.importResolver(), ssrPages, b.Root, b.Cfg.OutDir, b.Cfg.Sourcemap, b.actionModules(), b.Cfg.BaseURLPath())
+		if err := b.writeHighlightTables(serverBundles); err != nil {
+			return err
+		}
 	}
 
 	// Collect runtime component sources referenced by this rebuild's regions
@@ -49,14 +51,14 @@ func (b *Builder) refreshPageServerArtifacts(results []*PageResult, runtimeJS st
 	runtimeBundles := b.refreshRuntimeComponents(results)
 
 	if len(serverBundles) == 0 && len(runtimeBundles) == 0 {
-		return
+		return nil
 	}
 
 	if len(serverBundles) > 0 {
-		fmt.Printf("  %s⚡%s Refreshed %d server bundle(s)\n", cCyan, cReset, len(serverBundles))
+		printf("  %s*%s Refreshed %d server bundle(s)\n", cCyan, cReset, len(serverBundles))
 	}
 	if len(runtimeBundles) > 0 {
-		fmt.Printf("  %s⚡%s Refreshed %d runtime component(s)\n", cCyan, cReset, len(runtimeBundles))
+		printf("  %s*%s Refreshed %d runtime component(s)\n", cCyan, cReset, len(runtimeBundles))
 	}
 
 	manifestCSS := ""
@@ -64,8 +66,9 @@ func (b *Builder) refreshPageServerArtifacts(results []*PageResult, runtimeJS st
 		manifestCSS = globalCSS[0]
 	}
 	if err := b.mergeManifests(manifestCSS, runtimeJS, serverBundles, runtimeBundles); err != nil {
-		fmt.Fprintf(os.Stderr, "  %sWarning: failed to refresh manifest:%s %v\n", cYellow, cReset, err)
+		return fmt.Errorf("refreshing the build manifest under %s: %w", b.Cfg.OutDir, err)
 	}
+	return nil
 }
 
 // refreshRuntimeComponents recompiles the runtime component bundles referenced by
@@ -107,12 +110,14 @@ func (b *Builder) refreshRuntimeComponents(results []*PageResult) []RuntimeCompo
 // the entries for the rebuilt pages/components, and writes them back. Missing
 // manifests are left absent (nothing to update).
 func (b *Builder) mergeManifests(cssFile, runtimeJS string, serverBundles map[string]string, runtimeBundles []RuntimeComponentBundle) error {
-	manifestPath := filepath.Join(b.Cfg.OutDir, "manifest.json")
-	serverManifestPath := filepath.Join(b.Cfg.OutDir, "server-manifest.json")
+	manifestPath := ManifestPath(b.Cfg.OutDir)
+	serverManifestPath := ServerManifestPath(b.Cfg.OutDir)
+	readManifest := ResolveManifestPath(b.Cfg.OutDir, "manifest.json")
+	readServerManifest := ResolveManifestPath(b.Cfg.OutDir, "server-manifest.json")
 
-	// ── Full manifest ────────────────────────────────────────────────────────
+	// Full manifest
 	var man Manifest
-	if data, err := os.ReadFile(manifestPath); err == nil {
+	if data, err := os.ReadFile(readManifest); err == nil {
 		_ = json.Unmarshal(data, &man)
 	}
 	if man.Routes == nil {
@@ -131,9 +136,9 @@ func (b *Builder) mergeManifests(cssFile, runtimeJS string, serverBundles map[st
 		return fmt.Errorf("writing manifest.json: %w", err)
 	}
 
-	// ── Server manifest (read by the Node sidecar) ────────────────────────────
+	// Server manifest (read by the Node sidecar)
 	var sm ServerManifest
-	if data, err := os.ReadFile(serverManifestPath); err == nil {
+	if data, err := os.ReadFile(readServerManifest); err == nil {
 		_ = json.Unmarshal(data, &sm)
 	}
 	if cssFile != "" {
@@ -199,6 +204,9 @@ func writeJSONIfChanged(path string, v any) error {
 	}
 	if existing, err := os.ReadFile(path); err == nil && strings.TrimSpace(string(existing)) == strings.TrimSpace(string(data)) {
 		return nil
+	}
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return err
 	}
 	return os.WriteFile(path, data, 0644)
 }

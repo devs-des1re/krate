@@ -1,11 +1,41 @@
 import { defineDocsTheme } from "@krate/plugin";
 
+export {
+  defineSite,
+  SiteHeader,
+  SiteNav,
+  SiteFooter,
+  HomeLayout,
+  ThemeToggle,
+  ThemePrePaint,
+} from "./shell";
+export type {
+  SiteConfig,
+  SiteNavLink,
+  SiteSocial,
+  SiteFooterColumn,
+} from "./shell";
+export { activeNavLink, normalizeNavPath } from "./nav";
+export type { ActiveNav, ActiveNavLink } from "./nav";
+export { DocsSearch, DocsSearchComponent } from "./search";
+export type { DocsSearchProps } from "./search";
+
 /**
- * Options for the base docs theme. Reserved for forward compatibility — the
- * layout currently renders the stock light/dark theme that Krate ships in the
- * examples and docs sites.
+ * Options for the base docs theme.
  */
 export interface BaseDocsThemeOptions {
+  /** localStorage key used to persist the light/dark choice (default `theme`). */
+  themeStorageKey?: string;
+  /**
+   * "Was this helpful?" feedback. Thumbs up/down open a prefilled GitHub issue
+   * (or discussion when `discussions` is true) on the given `owner/repo`.
+   */
+  feedback?: {
+    repo: string;
+    discussions?: boolean;
+    label?: string;
+  };
+  /** Forward-compatible escape hatch for future options. */
   [key: string]: unknown;
 }
 
@@ -27,6 +57,7 @@ export function baseDocsTheme(options: BaseDocsThemeOptions = {}) {
     name: "@krate/base-docs-theme",
     module: new URL("./layout.tsx", import.meta.url).href,
     options,
+    titleSlot: true,
   });
 }
 

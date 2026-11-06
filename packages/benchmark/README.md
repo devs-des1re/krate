@@ -1,24 +1,31 @@
 # @krate/benchmark
 
-Benchmarks for Krate: build time and API throughput versus other web
-frameworks. The results are rendered to `results/latest.md` (Markdown) and
-`results/latest.json` (machine-readable).
+Benchmarks for Krate: build time, API throughput, and SSR page throughput
+versus other web frameworks. The results are rendered to `results/latest.md`
+(Markdown) and `results/latest.json` (machine-readable).
 
 ## What's measured
 
-1. **Build time** — a cold production build of a single page (reactive counter +
+1. **Build time** - a cold production build of a single page (reactive counter +
    a 100-item list) across Krate, Next.js, Vite + React, Astro, SvelteKit, and
    Remix. Krate's fixture uses a TypeScript API route (mirroring Next.js's route
    handler). Dependencies are installed once; the median of N timed runs is
    reported, along with the emitted output size.
 
-2. **API throughput** — `GET /api/json` served by Krate's **Go API routes**
+2. **API throughput** - `GET /api/json` served by Krate's **Go API routes**
    (compiled to a native Go sidecar), Krate's **TypeScript API routes** (served
    by `krate serve`, which runs the compiled route on its embedded JS runtime),
-   and Next.js route handlers — plus two baselines: a plain Node `http` server
+   and Next.js route handlers - plus two baselines: a plain Node `http` server
    and a plain Go `net/http` server. Each server is warmed up and load-tested
    with a fixed concurrency of keep-alive connections; requests/second and
    p50/p99 latency are reported.
+
+3. **SSR page throughput** - a streaming page whose only dynamic content is one
+   **runtime-tier component**, rendered two ways: **TSX** on the Node SSR sidecar
+   (with the sidecar runtime set to `node` and `bun`, clustered across cores) and
+   **Go** on the compiled Go host (no Node renderer in the path). A
+   `--connections` sweep (e.g. `16,64,256`) reports requests/sec per level so
+   scaling is visible.
 
 > **Note on installs:** dependencies are installed with `--ignore-scripts`
 > (lifecycle scripts are not needed by any fixture), which also avoids npm
@@ -30,8 +37,10 @@ frameworks. The results are rendered to `results/latest.md` (Markdown) and
 
 - **Node.js 20+** (runs the harness and the JS fixtures)
 - **Go 1.25+** (builds the Krate CLI, the Go API sidecar, and the Go baseline)
+- **bun** (optional) - required only for the `krate-ssr-tsx-bun` SSR target
 - Network access on the first run (dependencies for every fixture are installed
-  automatically)
+  automatically). The SSR fixtures link the monorepo `@krate/runtime`, so run
+  `pnpm build` at the repo root once before benchmarking.
 
 ## Quick start
 
@@ -42,6 +51,7 @@ pnpm --filter @krate/benchmark bench
 # individual commands
 node src/run.mjs build            # build-time only
 node src/run.mjs api              # API throughput only
+node src/run.mjs ssr              # SSR page throughput only
 node src/run.mjs report           # print latest.md to stdout
 ```
 
@@ -49,24 +59,24 @@ node src/run.mjs report           # print latest.md to stdout
 
 | Flag | Description |
 |------|-------------|
-| `--filter <id>` | Run one target: `krate`, `nextjs`, `vite`, `astro`, `sveltekit`, `remix`, `krate-go`, `krate-ts`, `node-http`, `go-nethttp` |
+| `--filter <id>` | Run one target: `krate`, `nextjs`, `vite`, `astro`, `sveltekit`, `remix`, `krate-go`, `krate-ts`, `node-http`, `go-nethttp`, `krate-ssr-tsx-node`, `krate-ssr-tsx-bun`, `krate-ssr-go` |
 | `--runs N` | Build timing runs (default `3`) |
-| `--duration ms` | API load-test duration (default `5000`) |
-| `--connections N` | API load-test concurrency (default `32`) |
+| `--duration ms` | Load-test duration (default `5000`) |
+| `--connections N` | Load-test concurrency; a comma list sweeps the SSR test (e.g. `16,64,256`) |
 | `--pm <name>` | Installer: `npm` (default), `pnpm`, `yarn`, or `bun` |
 
 ## Methodology
 
-- **Fair comparison** — the Krate CLI is compiled once (cached in
+- **Fair comparison** - the Krate CLI is compiled once (cached in
   `.krate-bench/`) and reused for every timed run, so its own Go compilation is
   excluded from build times, just like the preinstalled binaries of the other
   frameworks.
-- **Cold builds** — every timed build starts from a clean output directory.
-- **Stable samples** — the median of several runs is reported to reduce noise;
+- **Cold builds** - every timed build starts from a clean output directory.
+- **Stable samples** - the median of several runs is reported to reduce noise;
   each API server is warmed up before the timed window. When `autocannon` is
   installed (a devDependency), it drives the load test; otherwise a built-in
   keep-alive client is used.
-- **Apples-to-apples payload** — every API endpoint returns the same
+- **Apples-to-apples payload** - every API endpoint returns the same
   `{"message":"hello","id":42}` JSON body.
 
 ## Fixtures
@@ -77,6 +87,8 @@ Each framework has a minimal, committed fixture under `fixtures/`:
 fixtures/
   krate/        Krate site with a signal counter + a TypeScript API route
   krate-go/     Krate site with a Go API route (for the API throughput benchmark)
+  krate-ssr-tsx/ Krate streaming page with a runtime-tier TSX component (SSR benchmark)
+  krate-ssr-go/  Krate streaming page with a runtime-tier Go component (SSR benchmark)
   next/         Next.js app router with a client counter + a route handler
   vite/         Vite + React SPA
   astro/        Astro static site

@@ -3,16 +3,115 @@ package config
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/kratejs/krate/packages/compiler/internal/markdown"
+)
+
+// Default request body caps (bytes). API requests may be larger than page
+// form/middleware payloads.
+const (
+	defaultMaxBodyBytes    int64 = 1 << 20  // 1 MiB
+	defaultMaxAPIBodyBytes int64 = 25 << 20 // 25 MiB
 )
 
 type DevServer struct {
 	Port int  `json:"port"`
 	Open bool `json:"open"`
+	// Overlay toggles the dev error overlay (default true). A pointer so an
+	// explicit `false` is distinguishable from "unset".
+	Overlay *bool `json:"overlay,omitempty"`
+	// Toolbar toggles the dev toolbar (default true).
+	Toolbar *bool `json:"toolbar,omitempty"`
+	// Host is the dev server bind address. Empty means loopback only
+	// (127.0.0.1), so the dev endpoints are not reachable from the network.
+	// Set "0.0.0.0" (or a LAN address) to expose the dev server deliberately.
+	Host string `json:"host,omitempty"`
+	// Editor is the command used by the overlay's "open in editor" action
+	// (default "code", i.e. VS Code). May include flags, e.g. "code -g".
+	Editor string `json:"editor,omitempty"`
+	// Proxy forwards matching path prefixes to a backend during dev, e.g.
+	// { "/api": "http://localhost:8080" }.
+	Proxy map[string]string `json:"proxy,omitempty"`
+}
+
+// OverlayEnabled reports whether the dev error overlay is enabled (default on).
+func (d DevServer) OverlayEnabled() bool { return d.Overlay == nil || *d.Overlay }
+
+// ToolbarEnabled reports whether the dev toolbar is enabled (default on).
+func (d DevServer) ToolbarEnabled() bool { return d.Toolbar == nil || *d.Toolbar }
+
+// ServerConfig holds production/preview (`krate serve`) server settings. When
+// Port is 0, Serve falls back to DevServer.Port (then 3000) for compatibility
+// with projects that only configure devServer.
+type ServerConfig struct {
+	// Host is the bind address (default "" = all interfaces).
+	Host string `json:"host,omitempty"`
+	// Port is the listen port. 0 falls back to devServer.port (then 3000).
+	Port int `json:"port,omitempty"`
+	// MaxBodySize caps request bodies in bytes. 0 uses defaults (1 MiB for
+	// pages/middleware, larger for API routes).
+	MaxBodySize int64 `json:"maxBodySize,omitempty"`
+	// TrustProxy makes the server honor X-Forwarded-Proto, X-Forwarded-Host and
+	// X-Forwarded-For (request URLs, CSRF origin checks, client IPs). Enable it
+	// only behind a proxy that sets or strips those headers.
+	TrustProxy bool `json:"trustProxy,omitempty"`
+	// TrustProxySet records that the project set trustProxy at all, true or
+	// false: the serverless targets use what their platform guarantees when it
+	// is unset and follow the value when it is set.
+	TrustProxySet bool `json:"-"`
+	// TrustedProxies is how many reverse proxies sit in front of Krate when
+	// TrustProxy is on (default 1). The client address is the X-Forwarded-For
+	// entry that many hops from the right, so entries a client puts at the front
+	// of the header never count.
+	TrustedProxies int `json:"trustedProxies,omitempty"`
+	// ShutdownTimeout is the graceful-shutdown drain period in seconds
+	// (default 15). In-flight requests get this long to finish after SIGTERM.
+	ShutdownTimeout int `json:"shutdownTimeout,omitempty"`
+}
+
+// CORSConfig configures cross-origin resource sharing headers. Disabled by
+// default (the framework serves same-origin by default).
+type CORSConfig struct {
+	Enabled     bool     `json:"enabled,omitempty"`
+	Origins     []string `json:"origins,omitempty"` // default ["*"]
+	Methods     []string `json:"methods,omitempty"`
+	Headers     []string `json:"headers,omitempty"`
+	Credentials bool     `json:"credentials,omitempty"`
+	MaxAge      int      `json:"maxAge,omitempty"` // seconds
+}
+
+// SidecarConfig is a custom API sidecar: a user-provided HTTP service that owns
+// some or all `/api/*` routes. In supervised mode, Command (+Args/Port) starts
+// and manages the process; in proxy-only mode, Target points at an
+// already-running service. Requests are always forwarded first; a 404 falls
+// through to Krate's built-in Go/TS/QuickJS API handlers, so the sidecar can own
+// exactly the routes it wants (including dynamic segments like /users/[id]) with
+// no route declaration needed.
+type SidecarConfig struct {
+	// Command starts a supervised sidecar process (e.g. "node", "go", "python").
+	// When set, Krate launches and stops it with the server.
+	Command string            `json:"command,omitempty"`
+	Args    []string          `json:"args,omitempty"`
+	Cwd     string            `json:"cwd,omitempty"`
+	Env     map[string]string `json:"env,omitempty"`
+	// Port the sidecar listens on. Required in supervised mode; with Target
+	// empty it also defines the proxy target (http://127.0.0.1:<port>).
+	Port int `json:"port,omitempty"`
+	// Target is a base URL for proxy-only mode, e.g. "http://localhost:8080".
+	Target string `json:"target,omitempty"`
+	// Prefix is the path prefix the sidecar owns (default "/api"). Requests
+	// under it are forwarded first.
+	Prefix string `json:"prefix,omitempty"`
+}
+
+// APIConfig groups API-related configuration.
+type APIConfig struct {
+	Sidecar *SidecarConfig `json:"sidecar,omitempty"`
 }
 
 // PluginConfig represents a plugin entry from the krate config file.
@@ -36,19 +135,63 @@ type TailwindCfg struct {
 	// Content is the Tailwind-style content glob list; when set it takes
 	// precedence over ScanDirs.
 	Content []string `json:"content,omitempty"`
-	// Preflight enables the Tailwind base reset (opt-in; changes page styling).
+	// Preflight enables the Tailwind base reset. It defaults to true to match
+	// Tailwind; set it to false to opt out.
 	Preflight bool `json:"preflight,omitempty"`
 	// Strict reports classes that produced no rule as build warnings.
 	Strict bool `json:"strict,omitempty"`
 	// DarkMode is "media" (default), "class", or "selector".
 	DarkMode string `json:"darkMode,omitempty"`
-	// ExecuteConfig runs tailwind.config via `npx tsx` instead of static parse.
+	// ExecuteConfig evaluates tailwind.config in-process instead of static parse.
 	ExecuteConfig bool `json:"executeConfig,omitempty"`
+}
+
+// HighlightConfig configures code highlighting that happens after the build:
+// in the browser, for code that changes at run time, and at request time.
+// Code known at build time is always highlighted by the compiler.
+type HighlightConfig struct {
+	// Languages are loaded for highlighting when the language of a snippet is
+	// not known at build time (a variable lang, or a highlight() call). A
+	// literal lang on a dynamic <Code> is found automatically.
+	Languages StringList `json:"languages,omitempty"`
 }
 
 type CSPConfig struct {
 	Enabled   bool   `json:"enabled,omitempty"`
 	Directive string `json:"directive,omitempty"` // custom CSP directive string; empty = auto-generate
+}
+
+// CacheConfig selects where request-time caches live. The default keeps the ISR
+// page cache, the data cache and the region caches in each process's memory.
+// With a shared adapter, instances behind a load balancer serve and invalidate
+// the same pages (see the caching guide).
+type CacheConfig struct {
+	// Adapter is "memory" (default), "redis", or the path or package name of a
+	// module that default-exports a cache adapter factory.
+	Adapter string `json:"adapter,omitempty"`
+	// URL is the store's address (redis://[user:password@]host:6379/0, or
+	// rediss:// for TLS). Read it from the environment in krate.config.ts:
+	// `url: process.env.REDIS_URL`.
+	URL string `json:"url,omitempty"`
+	// URLEnv names the environment variable that holds the URL at run time. A
+	// deployed bundle never contains the URL itself; it reads this variable (or
+	// KRATE_CACHE_URL).
+	URLEnv string `json:"urlEnv,omitempty"`
+	// Prefix namespaces the keys, so several apps can share one store.
+	// Default "krate:".
+	Prefix string `json:"prefix,omitempty"`
+	// TimeoutMs bounds one cache call; a slower store counts as down and the
+	// page is rendered instead. Default 250.
+	TimeoutMs int `json:"timeoutMs,omitempty"`
+	// TTLSeconds is how long ISR entries stay in the shared store. Default 7 days.
+	TTLSeconds int `json:"ttlSeconds,omitempty"`
+	// Options are passed to a custom adapter factory.
+	Options map[string]any `json:"options,omitempty"`
+}
+
+// Shared reports whether the config selects a store other than process memory.
+func (c CacheConfig) Shared() bool {
+	return c.Adapter != "" && c.Adapter != "memory"
 }
 
 type SSRConfig struct {
@@ -67,14 +210,32 @@ type SSRConfig struct {
 	// APIRuntime controls which runtime executes API routes.
 	// "quickjs" (default) = embedded, "node"/"bun"/"deno" = sidecar.
 	APIRuntime string `json:"apiRuntime,omitempty"`
+	// APIWorkers is the size of the embedded QuickJS API worker pool. The pool
+	// runs that many requests concurrently and reuses VMs, so module state
+	// persists across requests (Node/Next semantics). Default: min(NumCPU, 8).
+	// Ignored when APIIsolation is set.
+	APIWorkers int `json:"apiWorkers,omitempty"`
+	// APIIsolation runs every API request in a fresh VM, so no module state is
+	// shared between requests. Slower; used automatically in dev so edits are
+	// picked up. Default false.
+	APIIsolation bool `json:"apiIsolation,omitempty"`
+	// NodeWorkers forks this many Node worker processes for the API sidecar
+	// (node/bun/deno runtimes) to use more than one CPU. Default:
+	// min(NumCPU, 8).
+	NodeWorkers int `json:"nodeWorkers,omitempty"`
 	// SSRRuntime selects which runtime launches the SSR sidecar renderer.
 	// "node" (default) = plain node on the staged driver, "bun" = `bun run`,
 	// "deno" = `deno run --allow-net --allow-read --allow-env --allow-sys`.
 	SSRRuntime string `json:"ssrRuntime,omitempty"`
+	// RendererWorkers forks this many SSR renderer processes (node cluster) so
+	// page/region rendering uses more than one CPU. Default 1 (single process).
+	// Region/ISR caches are per-worker, and ISR disk persistence is disabled when
+	// clustered.
+	RendererWorkers int `json:"rendererWorkers,omitempty"`
 	// Streaming forces ALL pages to render in streaming SSR mode,
 	// regardless of per-page `export const config = { streaming: true }`.
 	// When enabled, every page goes through the server renderer with
-	// Suspense-based streaming (fallback → resolved replacement).
+	// Suspense-based streaming (fallback -> resolved replacement).
 	Streaming bool `json:"streaming,omitempty"`
 }
 
@@ -146,10 +307,59 @@ type Rewrite struct {
 }
 
 type SEOConfig struct {
-	BaseURL     string `json:"baseUrl,omitempty"`     // e.g. "https://example.com"
-	SiteName    string `json:"siteName,omitempty"`    // e.g. "My Site"
-	Description string `json:"description,omitempty"` // default meta description
-	Image       string `json:"image,omitempty"`       // default OG image URL
+	BaseURL       string `json:"baseUrl,omitempty"`     // e.g. "https://example.com"
+	SiteName      string `json:"siteName,omitempty"`    // e.g. "My Site"
+	Description   string `json:"description,omitempty"` // default meta description
+	Image         string `json:"image,omitempty"`       // default OG image URL
+	TitleTemplate string `json:"titleTemplate,omitempty"`
+	Twitter       string `json:"twitter,omitempty"`    // default twitter:site handle
+	ThemeColor    string `json:"themeColor,omitempty"` // browser theme-color
+	Locale        string `json:"locale,omitempty"`     // default <html lang> / og:locale
+}
+
+// SiteConfig is the canonical site metadata block. It overlaps `seo` (which is
+// retained as an alias) and adds title template, twitter handle, theme color,
+// and locale. Values here win over the equivalent `seo` fields.
+type SiteConfig struct {
+	URL           string `json:"url,omitempty"`
+	Name          string `json:"name,omitempty"`
+	Description   string `json:"description,omitempty"`
+	Image         string `json:"image,omitempty"`
+	TitleTemplate string `json:"titleTemplate,omitempty"`
+	Twitter       string `json:"twitter,omitempty"`
+	ThemeColor    string `json:"themeColor,omitempty"`
+	Locale        string `json:"locale,omitempty"`
+}
+
+// EffectiveSEO folds the `site` block over `seo` (site wins per field).
+func (c *Config) EffectiveSEO() SEOConfig {
+	s := c.SEO
+	site := c.Site
+	if site.URL != "" {
+		s.BaseURL = site.URL
+	}
+	if site.Name != "" {
+		s.SiteName = site.Name
+	}
+	if site.Description != "" {
+		s.Description = site.Description
+	}
+	if site.Image != "" {
+		s.Image = site.Image
+	}
+	if site.TitleTemplate != "" {
+		s.TitleTemplate = site.TitleTemplate
+	}
+	if site.Twitter != "" {
+		s.Twitter = site.Twitter
+	}
+	if site.ThemeColor != "" {
+		s.ThemeColor = site.ThemeColor
+	}
+	if site.Locale != "" {
+		s.Locale = site.Locale
+	}
+	return s
 }
 
 type RobotsConfig struct {
@@ -158,29 +368,292 @@ type RobotsConfig struct {
 	Sitemap  string `json:"sitemap,omitempty"`  // e.g. "https://example.com/sitemap.xml"
 }
 
+// I18nConfig configures multi-language docs. Locales live in subdirectories of
+// the docs content dir (e.g. src/content/docs/fr/...); the default locale is
+// unprefixed (/docs/...) and other locales are path-prefixed (/fr/docs/...).
+type I18nConfig struct {
+	// DefaultLocale is the unprefixed locale (e.g. "en").
+	DefaultLocale string `json:"defaultLocale,omitempty"`
+	// Locales lists every locale, including the default (e.g. ["en","fr","ja"]).
+	Locales []string `json:"locales,omitempty"`
+	// LocaleLabels maps a locale code to a display label (e.g. {"fr":"Français"}).
+	LocaleLabels map[string]string `json:"localeLabels,omitempty"`
+	// Routing is the URL strategy; only "prefix" is supported.
+	Routing string `json:"routing,omitempty"`
+}
+
+// Enabled reports whether multi-language docs are configured.
+func (c I18nConfig) Enabled() bool { return len(c.Locales) > 0 }
+
+// VersionsConfig configures versioned docs. Each version lives in a
+// subdirectory of the docs content dir (src/content/docs/<version>/...); the
+// current version is mounted unprefixed.
+type VersionsConfig struct {
+	// Current is the unprefixed version (e.g. "v2").
+	Current string `json:"current,omitempty"`
+	// Versions lists every version, newest first (e.g. ["v2","v1"]).
+	Versions []string `json:"versions,omitempty"`
+	// Labels maps a version to a display label (e.g. {"v2":"Latest"}).
+	Labels map[string]string `json:"labels,omitempty"`
+	// Banner shows an "old version" banner when viewing a non-current version.
+	// A nil pointer defaults to true.
+	Banner *bool `json:"banner,omitempty"`
+}
+
+// Enabled reports whether versioned docs are configured.
+func (c VersionsConfig) Enabled() bool { return len(c.Versions) > 0 }
+
+// BannerEnabled reports whether the old-version banner is on (default true).
+func (c VersionsConfig) BannerEnabled() bool { return c.Banner == nil || *c.Banner }
+
+// DceCfg configures dead-code elimination for emitted CSS and JS. Both default
+// on (conservative). Aggressive additionally drops local helper functions the
+// reference scan cannot prove are unused, which is riskier.
+type DceCfg struct {
+	CSS        *bool `json:"css,omitempty"`
+	JS         *bool `json:"js,omitempty"`
+	Aggressive *bool `json:"aggressive,omitempty"`
+}
+
+func (d DceCfg) CSSEnabled() bool        { return d.CSS == nil || *d.CSS }
+func (d DceCfg) JSEnabled() bool         { return d.JS == nil || *d.JS }
+func (d DceCfg) AggressiveEnabled() bool { return d.Aggressive != nil && *d.Aggressive }
+
+// GoAPIDep is a third-party module required by Go API routes.
+type GoAPIDep struct {
+	Path    string `json:"path"`
+	Version string `json:"version"`
+}
+
+// GoAPIReplace is a `replace` directive for the generated Go API module.
+type GoAPIReplace struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+// GoAPICfg configures the Go API sidecar build (src/api/*.go).
+type GoAPICfg struct {
+	Enabled  *bool          `json:"enabled,omitempty"`
+	Module   string         `json:"module,omitempty"`
+	Deps     []GoAPIDep     `json:"deps,omitempty"`
+	Replaces []GoAPIReplace `json:"replaces,omitempty"`
+	Tidy     *bool          `json:"tidy,omitempty"`
+}
+
+func (g GoAPICfg) EnabledOrDefault() bool { return g.Enabled == nil || *g.Enabled }
+
+// GoDep is a third-party module required by the generated Go module.
+type GoDep struct {
+	Path    string `json:"path"`
+	Version string `json:"version"`
+}
+
+// GoExclude is an `exclude` directive for the generated Go module.
+type GoExclude struct {
+	Path    string `json:"path"`
+	Version string `json:"version"`
+}
+
+// GoReplace is a `replace` directive for the generated Go module.
+type GoReplace struct {
+	From string `json:"from"`
+	To   string `json:"to"`
+}
+
+// GoCfg configures the unified Go module that hosts API routes (src/api/*.go)
+// and Go components (src/components/*.go). It folds in and supersedes the older
+// goApi config (see EffectiveGo).
+type GoCfg struct {
+	Enabled       *bool       `json:"enabled,omitempty"`
+	Module        string      `json:"module,omitempty"`
+	Deps          []GoDep     `json:"deps,omitempty"`
+	Replaces      []GoReplace `json:"replaces,omitempty"`
+	Exclude       []GoExclude `json:"exclude,omitempty"`
+	Tidy          *bool       `json:"tidy,omitempty"`
+	ComponentDirs []string    `json:"componentDirs,omitempty"`
+	APIDirs       []string    `json:"apiDirs,omitempty"`
+	APIEnabled    *bool       `json:"apiEnabled,omitempty"`
+}
+
+func (g GoCfg) EnabledOrDefault() bool { return g.Enabled == nil || *g.Enabled }
+func (g GoCfg) APIEnabledOrDefault() bool {
+	if g.APIEnabled != nil {
+		return *g.APIEnabled
+	}
+	return true
+}
+func (g GoCfg) TidyOrDefault() bool { return g.Tidy != nil && *g.Tidy }
+
+// ComponentDirList returns the component search dirs (default src/components).
+func (g GoCfg) ComponentDirList() []string {
+	if len(g.ComponentDirs) > 0 {
+		return g.ComponentDirs
+	}
+	return []string{"src/components"}
+}
+
+// APIDirList returns the API route search dirs (default src/api).
+func (g GoCfg) APIDirList() []string {
+	if len(g.APIDirs) > 0 {
+		return g.APIDirs
+	}
+	return []string{"src/api"}
+}
+
+// EffectiveGo returns the unified Go config, folding in legacy goApi values for
+// any field the `go` block leaves unset.
+func (c *Config) EffectiveGo() GoCfg {
+	g := c.Go
+	legacy := c.GoAPI
+	if g.Enabled == nil {
+		g.Enabled = legacy.Enabled
+	}
+	if g.Module == "" {
+		g.Module = legacy.Module
+	}
+	if len(g.Deps) == 0 && len(legacy.Deps) > 0 {
+		for _, d := range legacy.Deps {
+			g.Deps = append(g.Deps, GoDep(d))
+		}
+	}
+	if len(g.Replaces) == 0 && len(legacy.Replaces) > 0 {
+		for _, r := range legacy.Replaces {
+			g.Replaces = append(g.Replaces, GoReplace(r))
+		}
+	}
+	if g.Tidy == nil {
+		g.Tidy = legacy.Tidy
+	}
+	return g
+}
+
+// FontsCfg configures web-font handling. Preload emits `<link rel="preload">`
+// for fonts declared in the global stylesheet; Display sets the default
+// `font-display` applied to `@font-face` blocks that omit it.
+type FontsCfg struct {
+	Preload *bool  `json:"preload,omitempty"`
+	Display string `json:"display,omitempty"`
+	// PreloadLimit caps how many fonts are preloaded per page (default 4). A
+	// `/* no-preload */` comment inside an @font-face block opts that face out.
+	PreloadLimit int `json:"preloadLimit,omitempty"`
+}
+
+func (f FontsCfg) PreloadEnabled() bool { return f.Preload == nil || *f.Preload }
+
+// DisplayValue returns the `font-display` keyword to inject, or "" to leave
+// `@font-face` blocks untouched. Defaults to "swap"; "off"/"none" disables it.
+func (f FontsCfg) DisplayValue() string {
+	v := f.Display
+	if v == "" {
+		v = "swap"
+	}
+	if v == "off" || v == "none" {
+		return ""
+	}
+	return v
+}
+
+// CompatConfig selects the browser-compatibility output mode. In "legacy" and
+// "hybrid" modes, CSS Signals compile to class-based CSS plus a tiny scoped
+// shim instead of :has(), so the same page works on browsers without :has().
+type CompatConfig struct {
+	// Mode is "modern" (default), "legacy", or "hybrid". "hybrid" emits both
+	// the :has() rules and the legacy rules, selected at runtime by a feature
+	// query, so modern browsers keep zero-JS CSS signals.
+	Mode string `json:"mode,omitempty"`
+	// UserAgent (hybrid only) additionally emits a legacy-optimized document
+	// that `krate serve`/SSR may select from the User-Agent header, so strictly
+	// legacy visitors download less. Opt-in; ignored by static hosts.
+	UserAgent bool `json:"userAgent,omitempty"`
+}
+
+// ModeOrDefault returns the normalized compat mode (default "modern").
+func (c CompatConfig) ModeOrDefault() string {
+	m := strings.ToLower(strings.TrimSpace(c.Mode))
+	if m == "" {
+		return "modern"
+	}
+	return m
+}
+
+// CompressConfig controls build-time precompression: `krate build` writes `.br`
+// and/or `.gz` siblings beside compressible assets, which `krate serve` (and
+// static hosts like Cloudflare Pages/Netlify) can send when the client supports
+// them. Opt-in; also enabled by `krate build --precompress`.
+type CompressConfig struct {
+	Brotli bool `json:"brotli,omitempty"`
+	Gzip   bool `json:"gzip,omitempty"`
+}
+
 type Config struct {
-	Entry       string          `json:"entry"`
-	OutDir      string          `json:"outDir"`
-	PagesDir    string          `json:"pagesDir"`
-	PublicDir   string          `json:"publicDir"`
+	Entry     string `json:"entry"`
+	OutDir    string `json:"outDir"`
+	PagesDir  string `json:"pagesDir"`
+	PublicDir string `json:"publicDir"`
+	// Extends merges one or more base configs (relative paths or packages)
+	// underneath this one. Additive array keys (plugins, redirects, ...) are
+	// concatenated; objects are deep-merged with this config winning.
+	Extends     StringList      `json:"extends,omitempty"`
 	Minify      bool            `json:"minify"`
 	MinifyHTML  bool            `json:"minifyHTML,omitempty"`
 	MinifyCSS   bool            `json:"minifyCSS,omitempty"`
 	MinifyJS    bool            `json:"minifyJS,omitempty"`
 	Sourcemap   bool            `json:"sourcemap"`
 	DevServer   DevServer       `json:"devServer"`
+	Server      ServerConfig    `json:"server,omitempty"`
+	CORS        CORSConfig      `json:"cors,omitempty"`
+	API         APIConfig       `json:"api,omitempty"`
 	Plugins     []PluginConfig  `json:"plugins,omitempty"`
 	Markdown    markdown.Config `json:"markdown,omitempty"`
+	Highlight   HighlightConfig `json:"highlight,omitempty"`
 	Tailwind    TailwindCfg     `json:"tailwind,omitempty"`
 	CSP         CSPConfig       `json:"csp,omitempty"`
 	Runtime     string          `json:"runtime,omitempty"`
 	SSR         SSRConfig       `json:"ssr,omitempty"`
+	Cache       CacheConfig     `json:"cache,omitempty"`
 	PathAliases PathAliases     `json:"pathAliases,omitempty"` // from tsconfig.json paths or config object
 	TSBaseDir   string          `json:"tsBaseDir,omitempty"`   // baseUrl resolved to absolute path
+	TSBaseURL   string          `json:"-"`                     // tsconfig baseUrl, absolute; empty when tsconfig sets none
 	Redirects   []Redirect      `json:"redirects,omitempty"`   // config-based redirects
 	Rewrites    []Rewrite       `json:"rewrites,omitempty"`    // config-based rewrites
 	SEO         SEOConfig       `json:"seo,omitempty"`         // SEO metadata (baseUrl, siteName, description)
+	Site        SiteConfig      `json:"site,omitempty"`        // canonical site metadata (supersedes seo)
 	Robots      RobotsConfig    `json:"robots,omitempty"`      // robots.txt config
+	I18n        I18nConfig      `json:"i18n,omitempty"`        // multi-language docs
+	Versions    VersionsConfig  `json:"versions,omitempty"`    // versioned docs
+	Dce         DceCfg          `json:"dce,omitempty"`         // CSS/JS dead-code elimination
+	Fonts       FontsCfg        `json:"fonts,omitempty"`       // web-font preload + font-display
+	GoAPI       GoAPICfg        `json:"goApi,omitempty"`       // Go API sidecar module/deps (legacy; see Go)
+	Go          GoCfg           `json:"go,omitempty"`          // unified Go module: API routes + components
+	Compat      CompatConfig    `json:"compat,omitempty"`      // browser compatibility output mode
+	Compress    CompressConfig  `json:"compress,omitempty"`    // build-time precompression (.br/.gz)
+	Head        HeadConfig      `json:"head,omitempty"`        // site-wide <head> injection
+	Security    SecurityConfig  `json:"security,omitempty"`    // security header overrides
+	Headers     []HeaderRule    `json:"headers,omitempty"`     // custom response headers
+	Images      ImagesConfig    `json:"images,omitempty"`      // responsive-image pipeline
+	Deploy      DeployConfig    `json:"deploy,omitempty"`      // deploy adapter + options
+
+	// BasePath is the URL path prefix the whole site is served under (e.g.
+	// "/docs"). Empty means root. Used for emitted asset URLs and the SPA
+	// router so the site works when hosted under a sub-path.
+	BasePath string `json:"basePath,omitempty"`
+
+	// SPA enables the client-side router (link interception, prefetch, and
+	// history navigation). Nil means enabled; false keeps normal full-page
+	// navigation and omits the router from the shared runtime.
+	SPA *bool `json:"spa,omitempty"`
+
+	// ViewTransitions controls the View Transitions API integration. "" or
+	// "auto" (default) enables it (same-document SPA morphs + a cross-document
+	// @view-transition rule); "off" disables it.
+	ViewTransitions string `json:"-"`
+
+	// PPR enables Partial Prerendering region caching for non-ISR pages: every
+	// dynamic region is cached with PPRRevalidate seconds and revalidated in
+	// the background (stale-while-revalidate). Per-region `export const
+	// revalidate` directives override the window.
+	PPR           bool `json:"-"`
+	PPRRevalidate int  `json:"-"`
 
 	// Output selects the site output mode. "" (default) allows request-time
 	// rendering (SSR/ISR/streaming + dynamic route fallbacks). "static" makes
@@ -216,11 +689,78 @@ type Config struct {
 	// or above the configured `failOn` severity. `krate check` uses the same
 	// rules. See internal/check.
 	Checks map[string]any `json:"checks,omitempty"`
+
+	// TSCompilerOptions holds the tsconfig.json compilerOptions that change
+	// how TypeScript is lowered when Krate strips types (see internal/tsstrip).
+	// Read from tsconfig.json, not krate.config, so it is not a config key.
+	TSCompilerOptions TSCompilerOptions `json:"-"`
 }
 
 func (c *Config) ShouldMinifyHTML() bool { return c.MinifyHTML || c.Minify }
 func (c *Config) ShouldMinifyCSS() bool  { return c.MinifyCSS || c.Minify }
 func (c *Config) ShouldMinifyJS() bool   { return c.MinifyJS || c.Minify }
+
+// ShouldPrecompress reports whether build-time precompression is enabled.
+func (c *Config) ShouldPrecompress() bool { return c.Compress.Brotli || c.Compress.Gzip }
+
+// ServerPort returns the listen port for `krate serve`: server.port, else
+// devServer.port, else 3000.
+func (c *Config) ServerPort() int {
+	if c.Server.Port != 0 {
+		return c.Server.Port
+	}
+	if c.DevServer.Port != 0 {
+		return c.DevServer.Port
+	}
+	return 3000
+}
+
+// DevPort returns the listen port for `krate dev`: devServer.port wins, then
+// server.port, then 3000.
+func (c *Config) DevPort() int {
+	if c.DevServer.Port != 0 {
+		return c.DevServer.Port
+	}
+	if c.Server.Port != 0 {
+		return c.Server.Port
+	}
+	return 3000
+}
+
+// MaxBodyBytes returns the request body cap for general (page/middleware)
+// requests, honoring server.maxBodySize when set.
+func (c *Config) MaxBodyBytes() int64 {
+	if c.Server.MaxBodySize > 0 {
+		return c.Server.MaxBodySize
+	}
+	return defaultMaxBodyBytes
+}
+
+// MaxAPIBodyBytes returns the request body cap for API requests (larger default).
+func (c *Config) MaxAPIBodyBytes() int64 {
+	if c.Server.MaxBodySize > 0 {
+		return c.Server.MaxBodySize
+	}
+	return defaultMaxAPIBodyBytes
+}
+
+// SPAEnabled reports whether the client-side router is enabled (default true).
+func (c *Config) SPAEnabled() bool {
+	return c.SPA == nil || *c.SPA
+}
+
+// BaseURLPath returns BasePath normalized to either "" or "/prefix" (no trailing
+// slash). Used for asset URLs and the SPA router base.
+func (c *Config) BaseURLPath() string {
+	p := strings.TrimSpace(c.BasePath)
+	if p == "" || p == "/" {
+		return ""
+	}
+	if !strings.HasPrefix(p, "/") {
+		p = "/" + p
+	}
+	return strings.TrimRight(p, "/")
+}
 
 func Default() *Config {
 	return &Config{
@@ -231,6 +771,7 @@ func Default() *Config {
 		Minify:    true,
 		Sourcemap: false,
 		Markdown:  markdown.DefaultConfig(),
+		Tailwind:  TailwindCfg{Preflight: true},
 	}
 }
 
@@ -249,39 +790,125 @@ func (c *Config) ValidateConfig() error {
 	return nil
 }
 
+// LoadOptions carries the build context: the config path plus the command and
+// resolved mode, which are passed to a function-form `defineConfig` and used to
+// pick environment files.
+type LoadOptions struct {
+	ConfigPath string
+	Command    string // "build" | "dev" | "serve" | ...
+	Mode       string // resolved environment mode (production/development/custom)
+}
+
 // Load reads the krate config. If configPath is provided and non-empty, it uses
 // that file directly. Otherwise it looks for krate.config.ts in root.
 func Load(root string, configPath ...string) (*Config, error) {
+	opts := LoadOptions{}
+	if len(configPath) > 0 {
+		opts.ConfigPath = configPath[0]
+	}
+	return LoadWith(root, opts)
+}
+
+// resolveConfigPath resolves an explicit config path against the project root.
+func resolveConfigPath(root, path string) string {
+	if filepath.IsAbs(path) {
+		return path
+	}
+	return filepath.Join(root, path)
+}
+
+// CheckExplicitConfig fails when a config file named on the command line
+// (--config) is missing or not a regular file. Without it a mistyped path would
+// silently fall back to the defaults. Auto-discovery with no config file is
+// still valid and never reaches this check.
+func CheckExplicitConfig(root, path string) error {
+	if path == "" {
+		return nil
+	}
+	resolved := resolveConfigPath(root, path)
+	info, err := os.Stat(resolved)
+	switch {
+	case err == nil && info.IsDir():
+		return fmt.Errorf("--config %s is a directory, expected a config file such as krate.config.ts", path)
+	case err == nil:
+		return nil
+	case os.IsNotExist(err):
+		msg := fmt.Sprintf("--config %s: file not found", path)
+		if !filepath.IsAbs(path) {
+			msg += fmt.Sprintf(" (looked in %s; relative paths are resolved against the project directory)", resolved)
+		}
+		return errors.New(msg)
+	default:
+		return fmt.Errorf("--config %s: cannot read the config file: %w", path, err)
+	}
+}
+
+// LoadWith loads the config with an explicit command/mode context.
+func LoadWith(root string, opts LoadOptions) (*Config, error) {
 	Warnings = nil
 	cfg := Default()
 
 	tsPath := ""
-	if len(configPath) > 0 && configPath[0] != "" {
-		tsPath = configPath[0]
-		if !filepath.IsAbs(tsPath) {
-			tsPath = filepath.Join(root, tsPath)
+	if opts.ConfigPath != "" {
+		if err := CheckExplicitConfig(root, opts.ConfigPath); err != nil {
+			return nil, err
 		}
+		tsPath = resolveConfigPath(root, opts.ConfigPath)
 	} else {
-		tsPath = filepath.Join(root, "krate.config.ts")
+		for _, name := range []string{"krate.config.ts", "krate.config.js", "krate.config.mjs", "krate.config.json"} {
+			p := filepath.Join(root, name)
+			if _, err := os.Stat(p); err == nil {
+				tsPath = p
+				break
+			}
+		}
+		if tsPath == "" {
+			tsPath = filepath.Join(root, "krate.config.ts")
+		}
 	}
 
 	if _, err := os.Stat(tsPath); err == nil {
-		data, readErr := os.ReadFile(tsPath)
-		if readErr != nil {
-			return nil, fmt.Errorf("reading config %s: %w", tsPath, readErr)
-		}
-		// Try JS execution first (resolves imports, plugin factories, etc.)
-		if err := executeTSConfig(tsPath, cfg); err != nil {
-			// A config that uses module imports cannot be handled by the static
-			// parser. Falling back to it would only produce a misleading
-			// "expected export, got import" error — so surface the real reason
-			// (most commonly: packages aren't installed correctly).
-			if configUsesModules(string(data)) {
-				return nil, configNotExecutableError(tsPath, err)
+		merged, loadErr := loadConfigMerged(tsPath, opts, map[string]bool{})
+		switch {
+		case loadErr == nil:
+			if uerr := json.Unmarshal(merged, cfg); uerr != nil {
+				return nil, describeUnmarshalError(filepath.Base(tsPath), uerr)
 			}
-			// Otherwise fall back to static parse (simple literal configs).
-			if parseErr := parseTSConfig(string(data), cfg); parseErr != nil {
+			Warnings = append(Warnings, UnknownKeyWarnings(merged)...)
+		case errors.Is(loadErr, errStaticFallback):
+			// Simple literal configs the embedded runtime cannot run are parsed
+			// statically (extends is not supported on this path).
+			src, _ := os.ReadFile(tsPath)
+			var cause error
+			var fb *staticFallbackError
+			if errors.As(loadErr, &fb) {
+				cause = fb.cause
+			}
+			if parseErr := parseTSConfig(string(src), cfg); parseErr != nil {
+				var te *staticTypeError
+				if errors.As(parseErr, &te) {
+					return nil, describeUnmarshalError(filepath.Base(tsPath), te.err)
+				}
+				if cause != nil {
+					return nil, fmt.Errorf("parsing config %s: %w (the embedded evaluator could not run it either: %v; "+
+						"the static parser only reads a plain `export default { ... }` literal)", tsPath, parseErr, cause)
+				}
 				return nil, fmt.Errorf("parsing config %s: %w", tsPath, parseErr)
+			}
+			if cause != nil {
+				Warnings = append(Warnings, "config was parsed statically because the embedded evaluator could not run it: "+cause.Error())
+			}
+			if bytes.Contains(src, []byte("extends")) {
+				Warnings = append(Warnings, "extends is ignored when the config is parsed statically")
+			}
+		default:
+			return nil, loadErr
+		}
+		// Resolve plugin module paths relative to the config directory.
+		dir := filepath.Dir(tsPath)
+		for i, p := range cfg.Plugins {
+			if p.Module != "" && !filepath.IsAbs(p.Module) {
+				cfg.Plugins[i].Module = filepath.Join(dir, p.Module)
 			}
 		}
 	}
@@ -322,57 +949,44 @@ func (c *Config) Resolve(root string) {
 	if !filepath.IsAbs(c.PublicDir) {
 		c.PublicDir = filepath.Join(root, c.PublicDir)
 	}
+	// Fold the legacy goApi block into the unified go config once, so the rest
+	// of the codebase reads a single normalized field (c.Go).
+	c.Go = c.EffectiveGo()
+	// Fold the `site` block over `seo` so downstream code reads c.SEO.
+	c.SEO = c.EffectiveSEO()
+	// Config-level markdown transforms become community plugins that run on
+	// AfterMarkdownParse (see defineMarkdownPlugin).
+	if len(c.Markdown.Plugins) > 0 {
+		existing := make(map[string]bool, len(c.Plugins))
+		for _, p := range c.Plugins {
+			if p.Module != "" {
+				existing[p.Module] = true
+			}
+		}
+		for i, mod := range c.Markdown.Plugins {
+			if mod == "" {
+				continue
+			}
+			abs := mod
+			if !filepath.IsAbs(abs) {
+				abs = filepath.Join(root, abs)
+			}
+			if existing[abs] {
+				continue
+			}
+			c.Plugins = append(c.Plugins, PluginConfig{
+				Name:   fmt.Sprintf("markdown-transform-%d", i+1),
+				Module: abs,
+				Order:  60,
+			})
+			existing[abs] = true
+		}
+	}
 }
 
-// LoadTSConfigPaths reads tsconfig.json and extracts compilerOptions.paths
-// and compilerOptions.baseUrl into the Config's PathAliases and TSBaseDir fields.
-func (c *Config) LoadTSConfigPaths(root string) {
-	tsconfigPath := filepath.Join(root, "tsconfig.json")
-	data, err := os.ReadFile(tsconfigPath)
-	if err != nil {
-		return // no tsconfig.json, nothing to do
-	}
-
-	var raw map[string]interface{}
-	if err := json.Unmarshal(data, &raw); err != nil {
-		return // invalid JSON, skip silently
-	}
-
-	compilerOpts, ok := raw["compilerOptions"].(map[string]interface{})
-	if !ok {
-		return
-	}
-
-	var baseDir string
-	if baseUrl, ok := compilerOpts["baseUrl"].(string); ok && baseUrl != "" {
-		baseDir = filepath.Join(root, baseUrl)
-	} else {
-		baseDir = root
-	}
-	c.TSBaseDir = baseDir
-
-	pathsRaw, ok := compilerOpts["paths"].(map[string]interface{})
-	if !ok {
-		return
-	}
-
-	for prefix, targetsRaw := range pathsRaw {
-		var targets []string
-		switch v := targetsRaw.(type) {
-		case []interface{}:
-			for _, t := range v {
-				if s, ok := t.(string); ok {
-					targets = append(targets, s)
-				}
-			}
-		case string:
-			targets = []string{v}
-		}
-		if len(targets) > 0 {
-			c.PathAliases = append(c.PathAliases, PathAlias{
-				Prefix:  prefix,
-				Targets: targets,
-			})
-		}
-	}
+// TSCompilerOptions are the tsconfig.json compilerOptions Krate honours when
+// stripping TypeScript from pages and components.
+type TSCompilerOptions struct {
+	ExperimentalDecorators  bool
+	UseDefineForClassFields *bool
 }

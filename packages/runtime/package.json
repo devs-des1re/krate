@@ -1,7 +1,7 @@
 {
   "name": "@krate/runtime",
   "version": "0.1.0",
-  "description": "Client-side runtime for Krate — signals, hydration, SPA router, resources, and context.",
+  "description": "Client-side runtime for Krate - signals, hydration, SPA router, resources, and context.",
   "license": "Apache-2.0",
   "type": "module",
   "homepage": "https://krate.js.org",
@@ -34,6 +34,14 @@
       "types": "./dist/server.d.ts",
       "default": "./dist/server.js"
     },
+    "./highlight": {
+      "types": "./dist/highlight.d.ts",
+      "default": "./dist/highlight.js"
+    },
+    "./cache": {
+      "types": "./dist/cache.d.ts",
+      "default": "./dist/cache.js"
+    },
     "./server/jsx-runtime": {
       "types": "./dist/server-jsx-runtime.d.ts",
       "default": "./dist/server-jsx-runtime.js"
@@ -49,6 +57,42 @@
     "./jsx-types": {
       "types": "./dist/jsx-types.d.ts",
       "default": "./dist/jsx-types.js"
+    },
+    "./react": {
+      "types": "./dist/react.d.ts",
+      "default": "./dist/react.js"
+    },
+    "./react/jsx-runtime": {
+      "types": "./dist/react-jsx-runtime.d.ts",
+      "default": "./dist/react-jsx-runtime.js"
+    },
+    "./slot": {
+      "types": "./dist/slot.d.ts",
+      "default": "./dist/slot.js"
+    },
+    "./server-handler": {
+      "types": "./dist/server-handler.d.ts",
+      "default": "./dist/server-handler.js"
+    },
+    "./node-server": {
+      "types": "./dist/node-server.d.ts",
+      "default": "./dist/node-server.js"
+    },
+    "./assets-static": {
+      "types": "./dist/assets-static.d.ts",
+      "default": "./dist/assets-static.js"
+    },
+    "./cache-adapter": {
+      "types": "./dist/cache-adapter.d.ts",
+      "default": "./dist/cache-adapter.js"
+    },
+    "./cache-redis": {
+      "types": "./dist/cache-redis.d.ts",
+      "default": "./dist/cache-redis.js"
+    },
+    "./og": {
+      "types": "./dist/og.d.ts",
+      "default": "./dist/og.js"
     }
   },
   "files": [
@@ -56,11 +100,15 @@
   ],
   "scripts": {
     "build": "tsc && node bundle.cjs",
-    "dev": "tsc --watch"
+    "dev": "tsc --watch",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",
     "esbuild": "^0.28.0",
-    "typescript": "^5.5.0"
+    "happy-dom": "^20.14.5",
+    "typescript": "^5.5.0",
+    "vitest": "^5.0.3"
   }
 }

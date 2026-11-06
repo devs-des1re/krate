@@ -8,6 +8,7 @@ import (
 
 	"github.com/kratejs/krate/packages/compiler/internal/config"
 	"github.com/kratejs/krate/packages/compiler/internal/fsutil"
+	"github.com/kratejs/krate/packages/compiler/internal/gohost"
 	"github.com/kratejs/krate/packages/compiler/internal/routetypes"
 )
 
@@ -42,6 +43,12 @@ func GenerateTypes(root string, cfg *config.Config) []error {
 	cres := b.prepareContent()
 	errs = append(errs, cres.Warnings...)
 	errs = append(errs, cres.Validation...)
+	// Go component declarations (used by `import { X } from "./x.go"`).
+	if _, typeFiles, gerr := gohost.ScanComponents(cfg.Go.ComponentDirList(), root); gerr != nil {
+		errs = append(errs, gerr)
+	} else {
+		gohost.WriteTypes(root, typeFiles)
+	}
 	if len(errs) == 0 {
 		return nil
 	}
@@ -58,7 +65,7 @@ func GenerateTypes(root string, cfg *config.Config) []error {
 func (b *Builder) writeRouteTypes(results []*PageResult) error {
 	routes := make([]routetypes.Route, 0, len(results))
 	for _, r := range results {
-		if r == nil || r.IsErrorPage {
+		if r == nil || r.IsErrorPage || isFragmentOut(r.OutName) {
 			continue
 		}
 		src := r.SourcePath
@@ -68,7 +75,7 @@ func (b *Builder) writeRouteTypes(results []*PageResult) error {
 		// 404/500 pages are served at the root as error handlers, not as
 		// navigable routes.
 		base := strings.TrimSuffix(filepath.Base(src), filepath.Ext(src))
-		if base == "404" || base == "500" {
+		if isSegmentPageBase(base) {
 			continue
 		}
 		// SourcePath is already project-relative; only relativize if absolute.

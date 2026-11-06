@@ -1,5 +1,6 @@
 ---
 title: Runtime API
+description: Every export from @krate/runtime.
 order: 2
 ---
 
@@ -18,6 +19,40 @@ setValue(next)        // set value (triggers subscribers)
 setValue(prev => ...) // functional update
 ```
 
+#### Persistent state (`persist`)
+
+Pass a `persist` option to survive reloads. The value is read from storage when
+the signal is created and written on every change. This is SSR-safe (storage is
+only touched in the browser) and syncs across tabs by default.
+
+```typescript
+// localStorage under the key "count"
+const [count, setCount] = createSignal(0, { persist: 'count' })
+
+// sessionStorage, or full control
+const [theme, setTheme] = createSignal('light', {
+  persist: {
+    key: 'theme',
+    store: 'session',            // 'local' (default) | 'session' | 'memory' | Storage
+    serialize: JSON.stringify,   // optional
+    deserialize: JSON.parse,     // optional
+    sync: false,                 // cross-tab sync (default true for 'local')
+  },
+})
+```
+
+If storage is unavailable (private mode, quota exceeded) the signal falls back
+to an in-memory store instead of throwing; clear a stored value with
+`clearPersisted`.
+
+#### Durable SSR state
+
+When a page embeds `window.__KRATE_STATE__` (a JSON object keyed by persistence
+key), that server-chosen value takes precedence over browser storage on the
+first hydration, so the hydrated value matches what the server rendered. A
+project can provide it with a `krate.state.json` file at the root, which the
+build injects into every page.
+
 ### `createCSSChoice` / `createCSSToggle` / `createCSSFlags`
 
 Zero-JS state compiled to hidden inputs + `:has()` CSS. `createCSSChoice` is a
@@ -34,7 +69,7 @@ const [flags, setFlag] = createCSSFlags(['bold', 'italic'])     // flags.bold()
 
 ### `createCSSGroup`
 
-An optional radio group with an explicit closed (`null`) state — accordions,
+An optional radio group with an explicit closed (`null`) state - accordions,
 disclosures, dialogs, popovers, dropdown menus.
 
 ```typescript
@@ -44,7 +79,7 @@ setOpen('faq'); setOpen(null)
 
 ### `createCSSRange`
 
-A discrete integer range — steppers, stepped sliders, progress indicators.
+A discrete integer range - steppers, stepped sliders, progress indicators.
 `set(n() +/- 1)` compiles to bounded stepper labels.
 
 ```typescript
@@ -81,7 +116,7 @@ const [tier, setTier] = createCSSChoice('solo', {
 Every CSS primitive accepts an options object with an `as` role preset
 (`radio`/`tabs`/`listbox`/`menu`/`accordion`/`disclosure`/`dialog`/`popover`/
 `switch`), plus `label` and raw `aria` overrides. Native presets stay zero-JS;
-`tabs`/`listbox`/disclosure presets inject a tiny ARIA synchroniser (no page
+`tabs`/`listbox`/disclosure presets inject a tiny keyboard and ARIA enhancer (no page
 hydration bundle).
 
 ```typescript
@@ -152,7 +187,7 @@ harnesses).
 
 ## DOM helpers
 
-### `h` — hyperscript
+### `h` - hyperscript
 
 ```typescript
 const el = h('div', { class: 'foo', onClick: () => {} }, child1, child2)
@@ -185,23 +220,53 @@ clearNodes(start, end)               // clear nodes between two markers
 Low-level helpers used by the compiled hydration code to manage dynamic
 regions delimited by `<!--k-->` comment markers.
 
+### Conditional markup and `krateCondSwap`
+
+A reactive conditional (`{open() ? <A/> : <B/>}`, `{open() && <A/>}`) renders
+no wrapper element. The active branch sits between comment markers and the
+inactive branch is carried in a `<template>` placed after the page content:
+
+```html
+<ul><li>a</li><!--k:c1--><li>shown</li><!--/k:c1--></ul>
+...
+<template data-kc="c1" data-kb="a"><li>hidden</li></template>
+```
+
+Conditionals are therefore valid inside `<table>`, `<tbody>`, `<tr>`, `<ul>`,
+`<ol>`, `<select>` and `<p>`, and CSS child selectors (`li:last-child`,
+`tr + tr`) see only the real children. Hydration binds handlers and nested
+slots in both branches; `krateCondSwap(startMarker, show, template)` moves the
+bound nodes between the markers and a detached fragment when the condition
+changes, so state in either branch survives toggling. Marker ids and list keys
+are percent-encoded (`%`, `<`, `>`) so user data cannot close a comment.
+
+### `krateHighlight`
+
+```ts
+import { krateHighlight } from '@krate/runtime'
+
+const html = await krateHighlight(code, 'ts') // inner HTML of a highlighted block, or null
+```
+
+Highlights code with the same lexers the build uses, loading the language's tables on first use. It resolves to `null` when the language is not available on the page (list it in `highlight.languages`, or use a literal `lang` on a `<Code>`) or the text is over the limits, and the markup is identical to what `<Code>` writes at build time, so it takes the same stylesheet. See [Code Highlighting](/docs/guides/code-highlighting/). `krateHighlightInit(root?)` is what the compiler calls for `<Code>` whose text changes at run time.
+
 ## JSX runtime
 
 ```typescript
 import { jsx, jsxs, Fragment } from '@krate/runtime/jsx-runtime'
 ```
 
-Automatic JSX transform — use `<div>` syntax in TSX files.
+Automatic JSX transform - use `<div>` syntax in TSX files.
 
 Every JSX element accepts a `showIf` prop (alias `visibleIf`) for conditional
-rendering — sugar for `{expr && <el/>}`, compiled away at build time:
+rendering - sugar for `{expr && <el/>}`, compiled away at build time:
 
 ```tsx
 <div showIf={count() > 0}>Shown when count is positive</div>
 ```
 
 With the zero-JS CSS primitives, `showIf` also accepts compound boolean logic
-over state — `&&`, `||`, `!`, `===` / `==`, `!==` / `!=` — across one or more
+over state - `&&`, `||`, `!`, `===` / `==`, `!==` / `!=` - across one or more
 scopes, compiled to `:has()` selector chains:
 
 ```tsx
@@ -214,23 +279,135 @@ class; unclassifiable expressions remain a build error.
 
 ## SPA router
 
+The router initializes itself from every page's hydration script
+(`initRouter()` / `reinitRouter()` are idempotent). It intercepts clicks on
+`<Link>` anchors (`data-krate-link`) and same-origin `GET` form submissions,
+fetches the target document and swaps it in place. Shared layouts stay
+mounted (see [Routing & Layouts](/docs/core-concepts/routing/#layout-persistence)).
+
 ```typescript
-import { initRouter } from '@krate/runtime'
-initRouter()
+import { krateRouter, navigate } from '@krate/runtime'
+
+await krateRouter.push('/about', { scroll: true, state: { from: 'nav' } })
+await krateRouter.replace('/search?q=krate')
+krateRouter.back()
+krateRouter.forward()
+await krateRouter.refresh()          // re-fetch the current route, keep scroll + history
+await krateRouter.prefetch('/pricing') // warm the document and its page chunk
+
+navigate('/about', { replace: false, scroll: true }) // returns false when handled client-side
 ```
 
-Call once to enable client-side navigation via `data-krate-link` anchors and
-`<Link>`. Handles `pushState`, `popstate`, stylesheet diffing, and tree
-reconciliation. On navigation the router diffs the live content root against
-the parsed new page via `reconcileTrees` — unchanged nodes (keyed by
-`<!--k:-->` comment markers, `data-k` attributes, and `id` anchors) are kept in
-place so their state (focus, scroll, media, CSS animations) survives. Effects
-are disposed before the diff and stale `__krate_*` handler props are stripped;
-the new page's hydration JS then rebinds the kept nodes. Emits a
-`krate:navigate` CustomEvent after each navigation.
+Every navigation method resolves once the new route's DOM and URL are in place
+(page scripts may still be loading). With `spa: false` the same API performs
+full-page navigations (`refresh()` reloads, `prefetch()` resolves immediately).
 
-`reinitRouter()` tears down and re-registers the router listeners — useful
-after a full page replacement or for HMR in dev.
+| API | Description |
+|-----|-------------|
+| `krateRouter.push/replace(url, opts)` | Client navigation. `opts`: `scroll` (default `true`), `state` (stored on the history entry). |
+| `krateRouter.back()/forward()` | History traversal. |
+| `krateRouter.refresh()` | Re-fetches the current route bypassing the prefetch cache; scroll position and history are kept. |
+| `krateRouter.prefetch(url)` | Fetches and caches a same-origin document. |
+| `subscribeNavigation(fn)` | Calls `fn({ url, pathname, search, hash, status })` on URL and loading-status changes; returns an unsubscribe function. `pathname` excludes the base path. |
+| `getNavigationState()` | The current value delivered to subscribers. |
+| `getHistoryState()` | The `state` passed to the navigation that created the current entry. |
+| `invalidatePrefetchCache(url?)` | Drops one prefetched document, or all of them. |
+
+**Events** (on `window`, `detail` in parentheses):
+
+- `krate:navigate-start` (`url`, `from`, `kind`): before fetching. Cancelable for
+  `push`/`replace`/`refresh` (call `preventDefault()` to veto the navigation).
+- `krate:navigate` (`url`, `status`): after the DOM swap, history and scroll update.
+- `krate:navigate-end` (`url`, `status`): after the new page scripts ran.
+- `krate:navigate-error` (`url`, `status`, `error`): a non-2xx response
+  (`status`), a network failure (`status: 0`, cancelable: `preventDefault()`
+  keeps the current page instead of the hard-reload fallback), or a page chunk
+  that failed to load (`error: "script-load"`, followed by a full load).
+- `krate:revalidate`: dispatch it (server actions that call `revalidatePath` /
+  `revalidateTag` do) to clear the prefetch cache and `refresh()` the current route.
+
+**Behavior details**
+
+- **Scroll restoration** is keyed by history entry: back/forward restores the
+  position the entry had when you left it; new navigations scroll to the top
+  or to the URL hash. `scroll: false` / `<Link scroll={false}>` keeps the position.
+- **Hash links** to the current page scroll in place without a fetch; back/forward
+  between hash entries never refetches.
+- **Redirects** are followed: the address bar shows the final URL. A response that
+  is not HTML (a download, JSON) or a redirect to another origin falls back to a
+  full navigation.
+- **Error statuses**: a server-rendered error document (`404`, `500`, ...) is shown
+  in place, keeping the SPA alive. Without an HTML body, `404`/`410` load
+  `<basePath>/404.html` and `5xx` load `<basePath>/500.html`; other statuses
+  (`401`, `403`, `429`) do a full navigation so the browser shows the real response.
+- **Prefetch cache**: documents prefetched by hover, viewport or `prefetch()` stay
+  fresh for 30 seconds (`window.__KRATE_CFG__.prefetchTTL`), are used at most once,
+  and are bounded (LRU). `refresh()` and `krate:revalidate` bypass it.
+- **Races**: a newer navigation aborts the older fetch; a superseded response never
+  replaces newer content.
+- **Accessibility**: after a navigation focus moves to `#root` (its temporary
+  `tabindex` is removed on blur) unless it is inside a kept layout, and a
+  live region (`#__krate-route-announcer`) announces the new page title.
+- **Active links**: the link to the current path gets `aria-current="page"` and
+  `data-krate-active="exact"`; links to an ancestor segment (`/docs` on
+  `/docs/intro`, never `/docs-old`) get `data-krate-active="segment"`.
+- **Forms**: same-origin `GET` forms navigate client-side with the form fields as
+  the query string. Add `data-krate-reload` to a form to opt out; forms with file
+  inputs are left to the browser.
+- **View Transitions**: elements with `data-view-transition="name"` get a matching
+  `view-transition-name`, and the swap runs inside `document.startViewTransition`
+  when supported (honoring `prefers-reduced-motion`). History, scroll and focus
+  update after the transition's update callback ran.
+
+## Router hooks
+
+`@krate/runtime` exports the Next.js navigation hooks, so code written for
+`next/navigation` runs unchanged (the migration CLI rewrites the import).
+
+```tsx
+import { usePathname, useParams, useSearchParams, useRouter } from '@krate/runtime'
+
+export function Crumb() {
+  const pathname = usePathname()        // "/blog/hello" (no trailing slash, no base path)
+  const { slug } = useParams()          // { slug: "hello" } on /blog/[slug]
+  const search = useSearchParams()      // URLSearchParams of the query
+  const router = useRouter()
+  return <button onClick={() => router.push('/blog/')}>{pathname} {slug} {search.get('q')}</button>
+}
+```
+
+| Hook | Returns |
+|------|---------|
+| `usePathname()` | The URL path without the base path, query, hash or trailing slash (`/` stays). |
+| `useParams()` | The dynamic params of the page. A `[...rest]` param is an array; an optional catch-all that matched nothing is absent. `{}` on a static route. |
+| `useSearchParams()` | The query as a `URLSearchParams`. |
+| `useRouter()` | `{ push, replace, back, forward, refresh, prefetch }`, the [router API](#spa-router) with Next.js names. `push(href, { scroll })` and `replace` accept `scroll`. |
+| `useSelectedLayoutSegment()` / `useSelectedLayoutSegments()` | The first / all URL segments below the layout that calls it, so a nested layout sees `settings` where the root layout sees `dashboard`. In a file other than the layout they count from the root. |
+
+How they behave:
+
+- **Live.** A module that imports one of them is compiled like React source, so
+  `const pathname = usePathname()` reads the current URL wherever it is used
+  (JSX, handlers, effects) and updates after every SPA navigation, back and
+  forward included. The SPA router is not required: with `spa: false` they read
+  the address bar after each full load.
+- **Right in the static HTML.** For a page, the build folds the hooks to the
+  page's own route: `/blog/a` for a page expanded from `generateStaticParams`,
+  the placeholder the server fills in for an unbaked param of a dynamic route.
+  The query string is a request value, so a static page renders `useSearchParams()`
+  as empty; it is filled in when the page hydrates. A layout is built once for
+  every page it wraps, so its hook values (an active link, say) are filled in by
+  the browser.
+- **During SSR.** On an SSR, ISR or streaming page the hooks return the values
+  of the request being rendered, query string included. `useRouter()` methods
+  throw on the server: navigate from an event handler.
+- **In the trimmed runtime.** The hooks ship as their own runtime feature (about
+  1.3 KB gzip), included only in builds whose client code calls them.
+
+`redirect`, `permanentRedirect`, `notFound`, `forbidden` and `unauthorized` are
+exported from `@krate/runtime` too, for client files. Server files import them
+from `@krate/runtime/server`; see
+[Forbidden and unauthorized](/docs/core-concepts/routing/#forbidden-and-unauthorized).
 
 ## Context
 
@@ -238,9 +415,9 @@ after a full page replacement or for HMR in dev.
 import { createContext } from '@krate/runtime'
 
 const ThemeCtx = createContext('light')
-// ThemeCtx.Provider — wraps children with a context value
-// ThemeCtx.useContext() — reads nearest Provider value
-// ThemeCtx.defaultValue — fallback when no Provider
+// ThemeCtx.Provider - wraps children with a context value
+// ThemeCtx.useContext() - reads nearest Provider value
+// ThemeCtx.defaultValue - fallback when no Provider
 ```
 
 ## Resources
@@ -287,13 +464,13 @@ The compiler rewrites React hooks and `React.*` calls to the primitives above at
 build time, so React source runs unchanged (no React runtime is shipped). In
 particular:
 
-- `useState` → `createSignal`, `useEffect` → `createEffect`,
-  `useMemo` → `createMemo`, `useReducer` → `createReducer`.
-- `useRef` → `{ current: initial }`, `useCallback` → the function,
-  `useContext` → `Context.useContext()`.
-- `memo`/`lazy` → identity, `createElement` → `h`,
-  `<Fragment>` → a JSX fragment.
-- `useId` → a stable per-instance build-time literal.
+- `useState` -> `createSignal`, `useEffect` -> `createEffect`,
+  `useMemo` -> `createMemo`, `useReducer` -> `createReducer`.
+- `useRef` -> `{ current: initial }`, `useCallback` -> the function,
+  `useContext` -> `Context.useContext()`.
+- `memo`/`lazy` -> identity, `createElement` -> `h`,
+  `<Fragment>` -> a JSX fragment.
+- `useId` -> a stable per-instance build-time literal.
 - Bare reads (`{count}`) are auto-called (`count()`).
 
 See the [React Compatibility guide](/docs/guides/react-compatibility/) for the

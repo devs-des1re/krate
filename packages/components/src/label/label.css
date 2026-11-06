@@ -2,7 +2,7 @@
   display: inline-block;
   font-size: 0.875rem;
   font-weight: 500;
-  color: var(--krate-text, #fafafa);
+  color: var(--krate-text, #0a0a0a);
   cursor: default;
   user-select: none;
   line-height: 1.4;
@@ -12,6 +12,6 @@
   cursor: not-allowed;
 }
 .krate-label-required {
-  color: var(--krate-danger, #ef4444);
-  margin-left: 2px;
+  color: var(--krate-danger-text, #b91c1c);
+  margin-inline-start: 2px;
 }

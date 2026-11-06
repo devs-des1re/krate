@@ -8,6 +8,7 @@ import (
 
 	"github.com/evanw/esbuild/pkg/api"
 	"github.com/kratejs/krate/packages/compiler/internal/bundler"
+	"github.com/kratejs/krate/packages/compiler/internal/tsstrip"
 )
 
 // RuntimeComponentBundle represents a compiled runtime server component
@@ -15,7 +16,7 @@ import (
 type RuntimeComponentBundle struct {
 	Name       string // Component name derived from filename (e.g. "Counter")
 	SourcePath string // Absolute path to original source file
-	BundlePath string // Path to compiled JS relative to outDir (e.g. "server-components/Counter.runtime.js")
+	BundlePath string // Path to compiled JS relative to outDir (e.g. ".krate/server-components/Counter.runtime.js")
 }
 
 // jsxShimCode is the server-side JSX runtime that serializes JSX to HTML strings.
@@ -58,6 +59,9 @@ var Fragment={__fragment:true};
 function createSignal(initial){var v=initial;return[function(){return v;},function(n){v=n;}];}
 function createEffect(){}
 function createMemo(fn){return fn;}
+function krateDerived(fn){fn.__krateDerived=true;return fn;}
+function krateHook(v){return typeof v==='function'&&v.__krateDerived?v:function(){return v;};}
+function krateParam(v){return typeof v==='function'&&v.__krateDerived?v():v;}
 function onMount(){}
 function onCleanup(){}
 function createContext(def){return{Provider:function(p){return p.children;},useContext:function(){return def;},defaultValue:def};}
@@ -78,10 +82,10 @@ function forwardRef(fn){return fn;}
 function createElement(tag,props){var ch=[];for(var i=2;i<arguments.length;i++)ch.push(arguments[i]);props=props||{};props.children=ch.length<=1?ch[0]:ch;return jsx(tag,props);}
 if(typeof globalThis!=='undefined'){
 globalThis.__krate_jsx={jsx:jsx,jsxs:jsxs,Fragment:Fragment};
-globalThis.__krate_runtime={createSignal:createSignal,createEffect:createEffect,createMemo:createMemo,onMount:onMount,onCleanup:onCleanup,createContext:createContext,createResource:createResource,h:h,mount:mount,hydrate:hydrate,useRef:useRef,useCallback:useCallback,forwardRef:forwardRef,createElement:createElement};
+globalThis.__krate_runtime={createSignal:createSignal,createEffect:createEffect,createMemo:createMemo,krateDerived:krateDerived,krateHook:krateHook,krateParam:krateParam,onMount:onMount,onCleanup:onCleanup,createContext:createContext,createResource:createResource,h:h,mount:mount,hydrate:hydrate,useRef:useRef,useCallback:useCallback,forwardRef:forwardRef,createElement:createElement};
 globalThis.__krate_server={Head:Head,Suspense:Suspense,Script:Script,Style:Style,Link:Link,Image:Image,Icon:Icon};
 }
-export {jsx,jsxs,Fragment,createSignal,createEffect,createMemo,onMount,onCleanup,createContext,createResource,h,mount,hydrate,Head,Suspense,Script,Style,Link,Image,Icon,useRef,useCallback,forwardRef,createElement};
+export {jsx,jsxs,Fragment,createSignal,createEffect,createMemo,krateDerived,krateHook,krateParam,onMount,onCleanup,createContext,createResource,h,mount,hydrate,Head,Suspense,Script,Style,Link,Image,Icon,useRef,useCallback,forwardRef,createElement};
 export default jsx;
 `
 
@@ -94,19 +98,19 @@ func CompileRuntimeComponents(root, outDir string, serverComponents, runtimeComp
 		return nil
 	}
 
-	bundleDir := filepath.Join(outDir, "server-components")
+	bundleDir := ServerOutPath(outDir, "server-components")
 	if err := os.MkdirAll(bundleDir, 0755); err != nil {
-		fmt.Fprintf(os.Stderr, "  %s✗ Runtime components: cannot create output dir:%s %v\n", cRed, cReset, err)
+		fmt.Fprintf(os.Stderr, "  %sx Runtime components: cannot create output dir:%s %v\n", cRed, cReset, err)
 		return nil
 	}
 
 	var bundles []RuntimeComponentBundle
 	for _, file := range files {
 		name := extractBuildComponentName(file)
-		fmt.Printf("  %s▸ Runtime%s %s\n", cCyan, cReset, filepath.Base(file))
+		printf("  %s> Runtime%s %s\n", cCyan, cReset, filepath.Base(file))
 		bundle, err := compileSingleRuntimeComponent(root, outDir, file)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "  %s✗ Runtime component error (%s):%s %v\n", cRed, name, cReset, err)
+			fmt.Fprintf(os.Stderr, "  %sx Runtime component error (%s):%s %v\n", cRed, name, cReset, err)
 			continue
 		}
 		bundles = append(bundles, *bundle)
@@ -116,7 +120,8 @@ func CompileRuntimeComponents(root, outDir string, serverComponents, runtimeComp
 }
 
 // findRuntimeComponentFiles walks src/ (and pagesDir) to find files that are
-// runtime components by convention (*.runtime.tsx), directive (// @runtime),
+// runtime components by convention (*.runtime.tsx), directive (// @runtime or a
+// file-level @runtime decorator),
 // config list (runtimeComponents), or directory membership (runtimeDirs).
 func findRuntimeComponentFiles(root string, serverComponents, runtimeComponents []string, runtimeDirs []string) []string {
 	dirs := []string{filepath.Join(root, "src")}
@@ -128,7 +133,7 @@ func findRuntimeComponentFiles(root string, serverComponents, runtimeComponents 
 		if err != nil || !info.IsDir() {
 			continue
 		}
-		filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		_ = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 			if err != nil || info.IsDir() {
 				return nil
 			}
@@ -157,7 +162,7 @@ func findRuntimeComponentFiles(root string, serverComponents, runtimeComponents 
 				return nil
 			}
 			src := string(data)
-			if bundler.HasRuntimeDirective(src) {
+			if bundler.HasRuntimeDirective(src) || tsstrip.ModuleTier(path, src) == "runtime" {
 				seen[path] = true
 				files = append(files, path)
 				return nil
@@ -208,7 +213,7 @@ func isPathInDirs(filePath string, dirs []string) bool {
 // compileSingleRuntimeComponent compiles one runtime component source file into
 // a self-contained IIFE bundle that defines globalThis.__krate_render(propsJSON).
 func compileSingleRuntimeComponent(root, outDir, sourcePath string) (*RuntimeComponentBundle, error) {
-	bundleDir := filepath.Join(outDir, "server-components")
+	bundleDir := ServerOutPath(outDir, "server-components")
 	componentName := extractBuildComponentName(sourcePath)
 	outPath := filepath.Join(bundleDir, componentName+".runtime.js")
 
@@ -240,6 +245,7 @@ if (!__Comp) throw new Error('Runtime component must export a default function o
 globalThis.__krate_render = function(__propsJSON) {
   var __props = typeof __propsJSON === 'string' ? JSON.parse(__propsJSON) : (__propsJSON || {});
   var __result = __Comp(__props);
+  if (__result && typeof __result.then === 'function') throw new Error('Runtime component returned a Promise: async components render through the page server bundle, not the runtime component bundle');
   if (typeof __result === 'string') return __result;
   if (__result && typeof __result.__html === 'string') return __result.__html;
   return '';
@@ -260,7 +266,7 @@ globalThis.__krate_render = function(__propsJSON) {
 	defer os.Remove(shimPath)
 
 	// Compile with esbuild: IIFE format, all deps bundled, JSX automatic transform
-	result := api.Build(api.BuildOptions{
+	result := esbuildBuild(api.BuildOptions{
 		EntryPoints:       []string{wrapperPath},
 		Bundle:            true,
 		Format:            api.FormatIIFE,

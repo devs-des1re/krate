@@ -3,32 +3,130 @@ package build
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/evanw/esbuild/pkg/api"
 	"github.com/kratejs/krate/packages/compiler/internal/environ"
+	"github.com/kratejs/krate/packages/compiler/internal/execx"
 )
+
+// errSSRNotRunning is the shared sentinel returned by SSR operations that need a
+// live sidecar renderer. Callers start one by building a page that requires
+// SSR/ISR/streaming (or by running `krate serve`).
+var errSSRNotRunning = errors.New("SSR renderer not running (start it by building a page that requires SSR, or run `krate serve`)")
 
 // SSRServer manages the SSR sidecar renderer process (node/bun/deno).
 type SSRServer struct {
-	port         int
-	root         string
-	runtime      string // "node" (default) | "bun" | "deno"
-	env          []string
-	cmd          *exec.Cmd
-	done         chan struct{} // closed when the sidecar process exits
-	mu           sync.Mutex
-	running      bool
-	manifest     *ServerManifest
-	timeout      int // per-render timeout (ms); 0 = sidecar default
-	maxCacheSize int // ISR cache entries; 0 = sidecar default
+	port            int
+	root            string
+	runtime         string // "node" (default) | "bun" | "deno"
+	env             []string
+	cmd             *exec.Cmd
+	done            chan struct{} // closed when the sidecar process exits
+	startedAt       time.Time     // when the current process was launched
+	mu              sync.Mutex
+	running         bool
+	closed          bool // set by Shutdown: Start refuses to launch again
+	manifest        *ServerManifest
+	timeout         int // per-render timeout (ms); 0 = sidecar default
+	maxCacheSize    int // ISR cache entries; 0 = sidecar default
+	ppr             bool
+	pprRevalidate   int
+	rendererWorkers int
+	outDir          string
+	// secret authenticates the mutating internal endpoints
+	// (/__krate/ssr/revalidate, /refresh, /invalidate, /cache-invalidate).
+	secret string
+}
+
+// SetInternalSecret sets the shared secret exported to the sidecar as
+// KRATE_INTERNAL_SECRET and sent on every internal request.
+func (s *SSRServer) SetInternalSecret(secret string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.secret = secret
+}
+
+// InternalSecret returns the per-process secret used for authenticated
+// sidecar requests.
+func (s *SSRServer) InternalSecret() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.secret
+}
+
+// internalPost POSTs a JSON body to an authenticated sidecar endpoint.
+func (s *SSRServer) internalPost(endpoint string, payload any) error {
+	if !s.IsRunning() {
+		return errSSRNotRunning
+	}
+	body, _ := json.Marshal(payload)
+	req, err := http.NewRequest(http.MethodPost, fmt.Sprintf("http://localhost:%d%s", s.port, endpoint), bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	s.mu.Lock()
+	secret := s.secret
+	s.mu.Unlock()
+	if secret != "" {
+		req.Header.Set(internalSecretHeader, secret)
+	}
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		msg, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		return fmt.Errorf("%s: status %d: %s", endpoint, resp.StatusCode, strings.TrimSpace(string(msg)))
+	}
+	return nil
+}
+
+// InvalidateDev drops a changed page's module and caches in the renderer (dev).
+func (s *SSRServer) InvalidateDev(route, source, bundlePath string) error {
+	return s.internalPost("/__krate/ssr/invalidate", map[string]string{"route": route, "source": source, "bundlePath": bundlePath})
+}
+
+// InvalidateDevRoutes refreshes the server manifest after a dev rebuild and
+// drops the renderer's cached modules for the rebuilt routes (every request-time
+// page when routes is empty, as after a full rebuild). It runs once per rebuild
+// regardless of how many browser tabs are connected.
+func (s *SSRServer) InvalidateDevRoutes(routes []string) {
+	want := make(map[string]bool, len(routes))
+	for _, r := range routes {
+		want[r] = true
+	}
+	s.mu.Lock()
+	if err := s.loadManifestLocked(); err != nil && !errors.Is(err, errServerManifestMissing) {
+		fmt.Fprintf(os.Stderr, "  %sSSR manifest not reloaded, keeping the last good one:%s %v\n", cYellow, cReset, err)
+	}
+	var pages []ManifestPage
+	if s.manifest != nil {
+		for _, p := range s.manifest.Pages {
+			if p.Source != "" && (len(want) == 0 || want[p.Route]) {
+				pages = append(pages, p)
+			}
+		}
+	}
+	s.mu.Unlock()
+	for _, p := range pages {
+		if err := s.InvalidateDev(p.Route, p.Source, p.BundlePath); err != nil && !errors.Is(err, errSSRNotRunning) {
+			fmt.Fprintf(os.Stderr, "  %sSSR invalidation failed (%s):%s %v\n", cYellow, p.Route, cReset, err)
+		}
+	}
 }
 
 // SetTuning configures the render timeout (ms) and ISR cache size exported to
@@ -38,6 +136,38 @@ func (s *SSRServer) SetTuning(timeoutMs, maxCacheSize int) {
 	defer s.mu.Unlock()
 	s.timeout = timeoutMs
 	s.maxCacheSize = maxCacheSize
+}
+
+// SetPPR configures partial-prerendering region caching for non-ISR pages,
+// exported to the sidecar via KRATE_PPR / KRATE_PPR_REVALIDATE.
+func (s *SSRServer) SetPPR(enabled bool, revalidate int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.ppr = enabled
+	s.pprRevalidate = revalidate
+}
+
+// SetRendererWorkers sets the number of clustered SSR renderer processes
+// (node cluster). 1 (the default) keeps a single process.
+func (s *SSRServer) SetRendererWorkers(n int) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rendererWorkers = n
+}
+
+// SetOutDir points the renderer at a custom build output directory.
+func (s *SSRServer) SetOutDir(dir string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.outDir = dir
+}
+
+// outputDirLocked returns the build output directory. The caller must hold s.mu.
+func (s *SSRServer) outputDirLocked() string {
+	if s.outDir != "" {
+		return s.outDir
+	}
+	return filepath.Join(s.root, "dist")
 }
 
 // SetEnv provides environment variables for the sidecar process.
@@ -58,33 +188,108 @@ func NewSSRServer(root string, port int, runtime string) *SSRServer {
 	}
 }
 
+// LoadManifest reads dist/server-manifest.json for route lookup without
+// spawning the sidecar process. It lets request-time pages whose regions are all
+// rendered by the Go host be served without starting a Node/bun renderer.
+func (s *SSRServer) LoadManifest() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.loadManifestLocked()
+}
+
+// errServerManifestMissing marks an app with no request-time pages: the build
+// writes server-manifest.json only when there is something to render. Any other
+// error from loading the manifest means it exists but cannot be used.
+var errServerManifestMissing = errors.New("server-manifest.json not found in dist/ - no SSR/ISR pages to render")
+
+// readServerManifest loads and parses the server manifest under outDir. A
+// missing file wraps errServerManifestMissing; an unreadable or corrupt one
+// returns an error naming the path.
+func readServerManifest(outDir string) (*ServerManifest, error) {
+	path := ResolveManifestPath(outDir, "server-manifest.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("%w (looked for %s)", errServerManifestMissing, path)
+		}
+		return nil, fmt.Errorf("reading SSR manifest %s: %w\n  hint: check the file permissions, or run `krate build` to regenerate it", path, err)
+	}
+	m := &ServerManifest{}
+	if err := json.Unmarshal(data, m); err != nil {
+		return nil, fmt.Errorf("SSR manifest %s is corrupt: %w\n  hint: run `krate build` to regenerate it; serving would otherwise return the stale build HTML for request-time pages", path, err)
+	}
+	return m, nil
+}
+
+// loadManifestLocked reads the server manifest into s.manifest. The caller must
+// hold s.mu. On any error the previously loaded manifest is kept.
+func (s *SSRServer) loadManifestLocked() error {
+	m, err := readServerManifest(s.outputDirLocked())
+	if err != nil {
+		return err
+	}
+	s.manifest = m
+	return nil
+}
+
+// HasManifest reports whether the server manifest has been loaded.
+func (s *SSRServer) HasManifest() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.manifest != nil
+}
+
+// NeedsNodeRenderer reports whether any request-time page or region must be
+// rendered by the Node/bun sidecar: an SSR/ISR coarse page region, or any region
+// whose engine is not the Go host. When false, the site is served by the Go
+// server + Go host alone. Requires the manifest to be loaded.
+func (s *SSRServer) NeedsNodeRenderer() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.manifest == nil {
+		return false
+	}
+	for _, p := range s.manifest.Pages {
+		if p.Mode == "ssr" || p.Mode == "isr" {
+			return true
+		}
+	}
+	for _, regs := range s.manifest.Regions {
+		for _, r := range regs {
+			if r.Runtime != "go" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // Start launches the SSR renderer server process under the configured runtime
 // (node | bun | deno). Prefers the staged driver (.krate/server-renderer.mjs)
-// bundled at build time so plain runtimes work without tsx.
+// bundled at build time so plain runtimes can execute it directly.
 func (s *SSRServer) Start() error {
 	s.mu.Lock()
 
+	if s.closed {
+		s.mu.Unlock()
+		return errors.New("SSR renderer is shut down")
+	}
 	if s.running {
 		s.mu.Unlock()
 		return nil
 	}
 
-	rendererPath := s.findRendererScript()
+	rendererPath := s.findRendererScriptLocked()
 	if rendererPath == "" {
 		s.mu.Unlock()
-		return fmt.Errorf("krate SSR renderer not found — ensure @krate/runtime is installed")
+		return fmt.Errorf("krate SSR renderer not found - ensure @krate/runtime is installed")
 	}
 
-	manifestPath := filepath.Join(s.root, "dist", "server-manifest.json")
-	if _, err := os.Stat(manifestPath); os.IsNotExist(err) {
+	if err := s.loadManifestLocked(); err != nil {
 		s.mu.Unlock()
-		return fmt.Errorf("server-manifest.json not found in dist/ — no SSR/ISR pages to render")
+		return err
 	}
-
-	// Load manifest for route lookup
-	data, _ := os.ReadFile(manifestPath)
-	s.manifest = &ServerManifest{}
-	json.Unmarshal(data, s.manifest)
+	manifestPath := ResolveManifestPath(s.outputDirLocked(), "server-manifest.json")
 
 	runtimeCmd, runtimeArgs, err := ssrRuntimeCommand(s.runtime, rendererPath)
 	if err != nil {
@@ -98,6 +303,8 @@ func (s *SSRServer) Start() error {
 		fmt.Sprintf("KRATE_SSR_PORT=%d", s.port),
 		fmt.Sprintf("KRATE_MANIFEST=%s", manifestPath),
 		fmt.Sprintf("KRATE_ROOT=%s", s.root),
+		fmt.Sprintf("KRATE_OUT_DIR=%s", s.outputDirLocked()),
+		fmt.Sprintf("KRATE_PARENT_PID=%d", os.Getpid()),
 	)
 	if s.timeout > 0 {
 		env = append(env, fmt.Sprintf("KRATE_SSR_TIMEOUT=%d", s.timeout))
@@ -105,8 +312,21 @@ func (s *SSRServer) Start() error {
 	if s.maxCacheSize > 0 {
 		env = append(env, fmt.Sprintf("KRATE_SSR_MAX_CACHE=%d", s.maxCacheSize))
 	}
+	if s.rendererWorkers > 1 {
+		env = append(env, fmt.Sprintf("KRATE_SSR_WORKERS=%d", s.rendererWorkers))
+	}
+	if s.secret != "" {
+		env = append(env, "KRATE_INTERNAL_SECRET="+s.secret)
+	}
+	if s.ppr {
+		env = append(env, "KRATE_PPR=1")
+		if s.pprRevalidate > 0 {
+			env = append(env, fmt.Sprintf("KRATE_PPR_REVALIDATE=%d", s.pprRevalidate))
+		}
+	}
 
 	s.cmd = exec.Command(runtimeCmd, runtimeArgs...)
+	execx.ConfigureTree(s.cmd)
 	s.cmd.Env = env
 	s.cmd.Stdout = os.Stdout
 	s.cmd.Stderr = os.Stderr
@@ -117,22 +337,34 @@ func (s *SSRServer) Start() error {
 	}
 
 	s.running = true
-	s.done = make(chan struct{})
+	s.startedAt = time.Now()
+	done := make(chan struct{})
+	s.done = done
 
-	// Wait for server to be ready
+	// The goroutine owns this process: a later restart gets its own cmd/done, so
+	// it must only clear the running flag when it is still the current process.
+	cmd := s.cmd
 	go func() {
-		s.cmd.Wait()
+		_ = cmd.Wait()
 		s.mu.Lock()
-		s.running = false
+		if s.cmd == cmd {
+			s.running = false
+		}
 		s.mu.Unlock()
-		close(s.done)
+		close(done)
 	}()
 	s.mu.Unlock()
 
 	// Poll for readiness
 	ready := false
 	for i := 0; i < 50; i++ { // 5 seconds max
-		time.Sleep(100 * time.Millisecond)
+		select {
+		case <-done:
+			// The process died while starting (bad script, port in use).
+			s.Stop()
+			return fmt.Errorf("SSR renderer exited during startup")
+		case <-time.After(100 * time.Millisecond):
+		}
 		resp, err := sidecarClient.Get(fmt.Sprintf("http://localhost:%d/__krate/ssr/health", s.port))
 		if err == nil && resp.StatusCode == 200 {
 			ready = true
@@ -174,7 +406,7 @@ func (s *SSRServer) Stop() {
 		select {
 		case <-done:
 		case <-time.After(5 * time.Second):
-			_ = cmd.Process.Kill()
+			execx.KillTree(cmd)
 			<-done
 		}
 	}
@@ -182,6 +414,67 @@ func (s *SSRServer) Stop() {
 	s.mu.Lock()
 	s.running = false
 	s.mu.Unlock()
+}
+
+// Shutdown stops the renderer for good: no supervisor restart or later Start
+// brings it back.
+func (s *SSRServer) Shutdown() {
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
+	s.Stop()
+}
+
+// Supervise restarts the renderer when it exits unexpectedly, with a growing
+// delay between attempts, until stop is closed. It blocks, so run it in a
+// goroutine after a successful Start. The renderer keeps its port and secret,
+// so everything holding the SSRServer sees the new process without re-registering.
+func (s *SSRServer) Supervise(stop <-chan struct{}) {
+	delay := 100 * time.Millisecond
+	for {
+		s.mu.Lock()
+		done := s.done
+		started := s.startedAt
+		s.mu.Unlock()
+		if done == nil {
+			return
+		}
+		select {
+		case <-stop:
+			return
+		case <-done:
+		}
+		select {
+		case <-stop:
+			return
+		default:
+		}
+		if time.Since(started) > 10*time.Second {
+			delay = 100 * time.Millisecond
+		}
+		fmt.Fprintf(os.Stderr, "  %s! SSR renderer exited unexpectedly; restarting in %s%s\n", cYellow, delay, cReset)
+		for {
+			select {
+			case <-stop:
+				return
+			case <-time.After(delay):
+			}
+			if delay < 5*time.Second {
+				delay *= 2
+			}
+			err := s.Start()
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			if err == nil {
+				fmt.Fprintf(os.Stderr, "  %s+%s SSR renderer restarted\n", cGreen, cReset)
+				break
+			}
+			fmt.Fprintf(os.Stderr, "  %s! SSR renderer restart failed:%s %v\n", cYellow, cReset, err)
+		}
+	}
 }
 
 // IsRunning returns whether the SSR server process is alive.
@@ -196,46 +489,16 @@ func (s *SSRServer) IsRunning() bool {
 // explicit invalidation only. For time-based ISR regeneration use RefreshPage,
 // which re-renders cached variants in place without evicting them.
 func (s *SSRServer) RevalidatePage(route string) error {
-	if !s.IsRunning() {
-		return fmt.Errorf("SSR renderer not running")
-	}
-
-	body, _ := json.Marshal(map[string]string{"route": route})
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Post(
-		fmt.Sprintf("http://localhost:%d/__krate/ssr/revalidate", s.port),
-		"application/json",
-		bytes.NewReader(body),
-	)
-	if err != nil {
-		return err
-	}
-	resp.Body.Close()
-	return nil
+	return s.internalPost("/__krate/ssr/revalidate", map[string]string{"route": route})
 }
 
 // RefreshPage triggers a non-destructive time-based ISR refresh for a route:
 // every cached variant is re-rendered in place, so cached dynamic variants stay
 // fresh instead of being evicted. The periodic ISR timer uses this rather than
-// RevalidatePage — invalidation would clear dynamic variants and turn the next
+// RevalidatePage - invalidation would clear dynamic variants and turn the next
 // request into a cache miss.
 func (s *SSRServer) RefreshPage(route string) error {
-	if !s.IsRunning() {
-		return fmt.Errorf("SSR renderer not running")
-	}
-
-	body, _ := json.Marshal(map[string]string{"route": route})
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Post(
-		fmt.Sprintf("http://localhost:%d/__krate/ssr/refresh", s.port),
-		"application/json",
-		bytes.NewReader(body),
-	)
-	if err != nil {
-		return err
-	}
-	resp.Body.Close()
-	return nil
+	return s.internalPost("/__krate/ssr/refresh", map[string]string{"route": route})
 }
 
 // IsSSRPage checks if a route needs server-side rendering based on the manifest.
@@ -303,57 +566,82 @@ func (s *SSRServer) GetISRPages() []ISRPage {
 	return pages
 }
 
-// findPage returns the ManifestPage for a given route, or nil if not found.
-func (s *SSRServer) findPage(route string) *ManifestPage {
-	if s.manifest == nil {
-		return nil
-	}
-	for i := range s.manifest.Pages {
-		if s.manifest.Pages[i].Route == route {
-			return &s.manifest.Pages[i]
-		}
-	}
-	return nil
-}
-
 // FindPageForRoute matches a URL path against route patterns (including [param] segments)
 // and returns the matching page with extracted params. Returns nil if no match.
 func (s *SSRServer) FindPageForRoute(urlPath string) (*ManifestPage, map[string]string) {
 	if s.manifest == nil {
 		return nil, nil
 	}
-	for i := range s.manifest.Pages {
+	// Most specific pattern first: static > [param] > [...catchAll] > [[...optional]].
+	order := make([]int, len(s.manifest.Pages))
+	for i := range order {
+		order[i] = i
+	}
+	sort.SliceStable(order, func(a, b int) bool {
+		return compareRouteSpecificity(s.manifest.Pages[order[a]].Route, s.manifest.Pages[order[b]].Route) < 0
+	})
+	for _, i := range order {
 		p := &s.manifest.Pages[i]
 		if params, ok := matchRoute(urlPath, p.Route); ok {
+			if len(params) == 0 {
+				params = s.patternParams(p, urlPath)
+			}
 			return p, params
 		}
 	}
 	return nil, nil
 }
 
-func (s *SSRServer) findRendererScript() string {
-	// Prefer the bundled driver staged into dist by the build (runs with plain
-	// node, no npx/tsx dependency at serve time).
-	staged := filepath.Join(s.root, "dist", ".krate", "server-renderer.mjs")
-	if _, err := os.Stat(staged); err == nil {
-		abs, _ := filepath.Abs(staged)
-		return abs
+// patternParams returns the dynamic params of a pre-generated page (a
+// generateStaticParams variant such as "/blog/hello", whose route is a plain
+// path) from the [param] route its source file also serves. Without them the
+// page would render with empty params at request time.
+func (s *SSRServer) patternParams(page *ManifestPage, urlPath string) map[string]string {
+	for i := range s.manifest.Pages {
+		q := &s.manifest.Pages[i]
+		if q.Source != page.Source || q.Route == page.Route || !strings.Contains(q.Route, "[") {
+			continue
+		}
+		if params, ok := matchRoute(urlPath, q.Route); ok {
+			return params
+		}
 	}
-	return findServerRendererSource(s.root)
+	return nil
 }
 
-// ssrRuntimeCommand returns the exec command + args that launch the SSR
+func (s *SSRServer) findRendererScript() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.findRendererScriptLocked()
+}
+
+// findRendererScriptLocked resolves the renderer script. The caller must hold
+// s.mu.
+func (s *SSRServer) findRendererScriptLocked() string {
+	// Prefer the bundled driver staged into dist by the build. If it is missing
+	// (for example an older dist), bundle the renderer now so serve never needs
+	// a TypeScript runtime.
+	outDir := s.outputDirLocked()
+	staged := filepath.Join(outDir, ".krate", "server-renderer.mjs")
+	if _, err := os.Stat(staged); err != nil {
+		staged = stageServerRenderer(s.root, outDir)
+		if staged == "" {
+			return ""
+		}
+	}
+	abs, _ := filepath.Abs(staged)
+	return abs
+}
+
+// ssrRuntimeCommand returns the exec command + args that launch the bundled SSR
 // renderer script under the configured runtime. bun and deno get the flags the
 // renderer needs (network to listen, filesystem to read dist + the ISR cache).
-// When the script is raw TypeScript source (no staged driver), node runs it via
-// tsx (legacy dev path).
 func ssrRuntimeCommand(runtime, rendererPath string) (string, []string, error) {
-	isTS := strings.HasSuffix(strings.ToLower(rendererPath), ".ts")
+	if strings.EqualFold(filepath.Ext(rendererPath), ".ts") {
+		return "", nil, fmt.Errorf("SSR renderer must be bundled JavaScript, got %s", rendererPath)
+	}
 	switch runtime {
 	case "", "node":
-		if isTS {
-			return "npx", []string{"--yes", "tsx", rendererPath}, nil
-		}
 		return "node", []string{rendererPath}, nil
 	case "bun":
 		return "bun", append([]string{"run"}, rendererPath), nil
@@ -374,7 +662,7 @@ func findServerRendererSource(root string) string {
 		filepath.Join(root, "packages", "runtime", "src", "server-renderer.ts"),
 		// Monorepo from compiler dir
 		filepath.Join(root, "..", "runtime", "src", "server-renderer.ts"),
-		// npm installed — the published @krate/runtime ships only compiled dist/,
+		// npm installed - the published @krate/runtime ships only compiled dist/,
 		// so the renderer lives at dist/server-renderer.js (never src/).
 		filepath.Join(root, "node_modules", "@krate", "runtime", "dist", "server-renderer.js"),
 		// npm installed via a nested/hosted workspace root
@@ -414,8 +702,8 @@ func findServerRendererSource(root string) string {
 // stageServerRenderer bundles the @krate/runtime server-renderer entrypoint into
 // a standalone node-runnable ESM driver at <outDir>/.krate/server-renderer.mjs.
 // The driver bundles the SSR runtime (server.ts) so `krate serve` only needs a
-// plain `node <driver>` process instead of `npx tsx <source>.ts`. Returns the
-// absolute staged path, or "" if the source couldn't be located or bundled.
+// plain runtime process. Returns the absolute staged path, or "" if the source
+// couldn't be located or bundled.
 func stageServerRenderer(root, outDir string) string {
 	source := findServerRendererSource(root)
 	if source == "" {
@@ -428,7 +716,7 @@ func stageServerRenderer(root, outDir string) string {
 	}
 	outPath := filepath.Join(stageDir, "server-renderer.mjs")
 
-	result := api.Build(api.BuildOptions{
+	result := esbuildBuild(api.BuildOptions{
 		AbsWorkingDir: root,
 		Bundle:        true,
 		Format:        api.FormatESModule,
@@ -464,22 +752,54 @@ func readFileString(path string) string {
 }
 
 func matchRoute(urlPath, pattern string) (map[string]string, bool) {
-	urlParts := strings.Split(strings.Trim(urlPath, "/"), "/")
-	patParts := strings.Split(strings.Trim(pattern, "/"), "/")
+	return matchRoutePattern(urlPath, pattern)
+}
 
-	if len(urlParts) != len(patParts) {
-		return nil, false
+// stageCacheRuntime bundles the @krate/runtime data-cache runtime (the
+// Next-style fetch wrapper and the shared cache state) into
+// <outDir>/.krate/cache-runtime.mjs for the Node API/action sidecar, which
+// imports it at startup (KRATE_CACHE_RUNTIME) so fetch cache options and tag
+// invalidation work in API routes and server actions. Returns "" (after
+// printing why) when the runtime source cannot be found or bundled.
+func stageCacheRuntime(root, outDir string) string {
+	source := findServerRendererSource(root)
+	if source == "" {
+		fmt.Fprintf(os.Stderr, "  %sWarning: @krate/runtime not found; fetch cache options are not applied in Node API routes and actions%s\n", cYellow, cReset)
+		return ""
 	}
-
-	params := make(map[string]string)
-	for i, pp := range patParts {
-		if strings.HasPrefix(pp, "[") && strings.HasSuffix(pp, "]") {
-			paramName := pp[1 : len(pp)-1]
-			params[paramName] = urlParts[i]
-		} else if pp != urlParts[i] {
-			return nil, false
+	stageDir := filepath.Join(outDir, ".krate")
+	if err := os.MkdirAll(stageDir, 0755); err != nil {
+		return ""
+	}
+	outPath := filepath.Join(stageDir, "cache-runtime.mjs")
+	result := esbuildBuild(api.BuildOptions{
+		AbsWorkingDir: root,
+		Bundle:        true,
+		Format:        api.FormatESModule,
+		Platform:      api.PlatformNode,
+		Outfile:       outPath,
+		Write:         true,
+		LogLevel:      api.LogLevelSilent,
+		Stdin: &api.StdinOptions{
+			Loader: api.LoaderTS,
+			Contents: "import { patchFetch, cacheRuntime } from './cache-scope.js';\n" +
+				"import { loadCacheAdapter, installCacheAdapter, cacheSpecFromEnv } from './cache-adapter.js';\n" +
+				"cacheRuntime();\npatchFetch();\n" +
+				"const spec = cacheSpecFromEnv(process.env);\n" +
+				"if (spec && spec.adapter && spec.adapter !== 'memory') {\n" +
+				"  try { const adapter = await loadCacheAdapter(spec); if (adapter) installCacheAdapter(adapter, spec); }\n" +
+				"  catch (e) { console.error('[krate] cache adapter failed to start; using the in-process data cache:', e); }\n" +
+				"}\n",
+			ResolveDir: filepath.Dir(source),
+			Sourcefile: "krate-cache-runtime.ts",
+		},
+	})
+	if len(result.Errors) > 0 {
+		for _, e := range result.Errors {
+			fmt.Fprintf(os.Stderr, "  %sCache runtime bundle error:%s %s\n", cYellow, cReset, e.Text)
 		}
+		return ""
 	}
-
-	return params, true
+	abs, _ := filepath.Abs(outPath)
+	return abs
 }

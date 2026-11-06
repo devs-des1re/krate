@@ -1,0 +1,563 @@
+package jsvalue
+
+import (
+	"github.com/kratejs/krate/packages/compiler/ast"
+	"math"
+	"math/rand/v2"
+	"strconv"
+	"strings"
+)
+
+// globalObject returns the built-in global with the given name. Only pure,
+// deterministic built-ins are provided; everything else (Date, Intl, Math.random,
+// ...) is left to the host (see Hooks) or reported as unresolved.
+func globalObject(in *Interp, name string) (Value, bool) {
+	v, ok := globalValue(in, name)
+	if !ok {
+		return v, false
+	}
+	switch v.kind {
+	case KindObject:
+		v.obj.builtin = name
+	case KindFunction:
+		v.fn.Builtin = true
+		if name == "Number" {
+			v.fn.Props = numberStatics()
+		}
+	}
+	return v, true
+}
+
+// numberStatics are the constants and predicates of the Number constructor.
+func numberStatics() map[string]Value {
+	const maxSafe = 1<<53 - 1
+	num := func(name string, f func(float64) bool) Value {
+		return Func(name, func(args []Value) Value {
+			if a := arg(args, 0); a.IsUnknown() {
+				return a
+			}
+			a := arg(args, 0)
+			return Bool(a.kind == KindNumber && f(a.n))
+		})
+	}
+	integer := func(x float64) bool { return !math.IsInf(x, 0) && !math.IsNaN(x) && x == math.Trunc(x) }
+	return map[string]Value{
+		"MAX_SAFE_INTEGER":  Number(maxSafe),
+		"MIN_SAFE_INTEGER":  Number(-maxSafe),
+		"MAX_VALUE":         Number(math.MaxFloat64),
+		"MIN_VALUE":         Number(math.SmallestNonzeroFloat64),
+		"EPSILON":           Number(math.Pow(2, -52)),
+		"POSITIVE_INFINITY": Number(math.Inf(1)),
+		"NEGATIVE_INFINITY": Number(math.Inf(-1)),
+		"NaN":               Number(math.NaN()),
+		"isInteger":         num("isInteger", integer),
+		"isSafeInteger":     num("isSafeInteger", func(x float64) bool { return integer(x) && math.Abs(x) <= maxSafe }),
+		"isFinite":          num("isFinite", func(x float64) bool { return !math.IsInf(x, 0) && !math.IsNaN(x) }),
+		"isNaN":             num("isNaN", math.IsNaN),
+	}
+}
+
+func globalValue(in *Interp, name string) (Value, bool) {
+	switch name {
+	case "Math":
+		m := mathObject()
+		m.Set("random", Func("random", func([]Value) Value { return in.mathRandom() }))
+		return m, true
+	case "Date":
+		return dateCtor(in), true
+	case "Map":
+		return mapCtor(), true
+	case "Set":
+		return setCtor(), true
+	case "Object":
+		return objectCtor(), true
+	case "Array":
+		ctor := arrayCtor()
+		fn := Func("Array", arrayFromArgs)
+		fn.fn.Props = ctor.obj.props
+		return fn, true
+	case "JSON":
+		o := NewObject()
+		o.Set("stringify", Func("stringify", func(args []Value) Value {
+			v := arg(args, 0)
+			if v.ContainsUnknown() {
+				return v.firstUnknown()
+			}
+			if len(args) > 1 && !args[1].IsNullish() {
+				return Unsupported("JSON.stringify with a replacer")
+			}
+			if hasToJSON(v) {
+				return Unsupported("JSON.stringify of a value with a toJSON method")
+			}
+			gap := ""
+			if len(args) > 2 {
+				if args[2].ContainsUnknown() {
+					return args[2].firstUnknown()
+				}
+				gap = JSONGap(args[2])
+			}
+			s, ok := JSONStringifyGap(v, gap)
+			if !ok {
+				if v.kind == KindUndefined || v.kind == KindFunction {
+					return Undefined()
+				}
+				return Unsupported("JSON.stringify of a value with no build-time JSON form")
+			}
+			return String(s)
+		}))
+		return o, true
+	case "String":
+		return Func("String", func(args []Value) Value {
+			if len(args) == 0 {
+				return String("")
+			}
+			if args[0].IsUnknown() {
+				return args[0]
+			}
+			p := args[0].ToPrimitive()
+			if p.IsUnknown() {
+				return p
+			}
+			return String(p.ToString())
+		}), true
+	case "Number":
+		return Func("Number", func(args []Value) Value {
+			if len(args) == 0 {
+				return Number(0)
+			}
+			if args[0].IsUnknown() {
+				return args[0]
+			}
+			return Number(args[0].ToNumber())
+		}), true
+	case "Boolean":
+		return Func("Boolean", func(args []Value) Value {
+			if args := args; len(args) > 0 && args[0].IsUnknown() {
+				return args[0]
+			}
+			return Bool(arg(args, 0).ToBoolean())
+		}), true
+	case "parseInt":
+		return Func("parseInt", func(args []Value) Value {
+			if a := arg(args, 0); a.IsUnknown() {
+				return a
+			}
+			return Number(parseInt(arg(args, 0).ToString(), arg(args, 1)))
+		}), true
+	case "parseFloat":
+		return Func("parseFloat", func(args []Value) Value {
+			if a := arg(args, 0); a.IsUnknown() {
+				return a
+			}
+			return Number(parseFloat(arg(args, 0).ToString()))
+		}), true
+	case "isNaN":
+		return Func("isNaN", func(args []Value) Value {
+			if a := arg(args, 0); a.IsUnknown() {
+				return a
+			}
+			return Bool(math.IsNaN(arg(args, 0).ToNumber()))
+		}), true
+	case "krateDerived":
+		// The compiled form of a React render value: at build time its getter
+		// simply computes the value.
+		return Func("krateDerived", func(args []Value) Value {
+			fn := arg(args, 0)
+			if fn.kind != KindFunction {
+				return fn
+			}
+			return Func(derivedGetterName, func([]Value) Value { return fn.Call() })
+		}), true
+	case "krateParam":
+		// A custom hook parameter: a derived getter argument yields its value.
+		return Func("krateParam", func(args []Value) Value {
+			v := arg(args, 0)
+			if v.kind == KindFunction && v.fn != nil && v.fn.Name == derivedGetterName {
+				return v.Call()
+			}
+			return v
+		}), true
+	case "krateHook":
+		// A custom hook result normalized to a getter (see krateDerived).
+		return Func("krateHook", func(args []Value) Value {
+			v := arg(args, 0)
+			if v.kind == KindUnknown {
+				return v
+			}
+			if v.kind == KindFunction && v.fn != nil && v.fn.Name == derivedGetterName {
+				return v
+			}
+			return Func(derivedGetterName, func([]Value) Value { return v })
+		}), true
+	case "isFinite":
+		return Func("isFinite", func(args []Value) Value {
+			if a := arg(args, 0); a.IsUnknown() {
+				return a
+			}
+			f := arg(args, 0).ToNumber()
+			return Bool(!math.IsNaN(f) && !math.IsInf(f, 0))
+		}), true
+	}
+	return Value{}, false
+}
+
+// derivedGetterName names the getter functions krateDerived and krateHook
+// return, so krateHook passes a derived getter through unchanged.
+const derivedGetterName = "__krate_derived"
+
+func numericFn(name string, f func(xs []float64) float64) Value {
+	return Func(name, func(args []Value) Value {
+		xs := make([]float64, len(args))
+		for i, a := range args {
+			if a.IsUnknown() {
+				return a
+			}
+			xs[i] = a.ToNumber()
+		}
+		return Number(f(xs))
+	})
+}
+
+func first(xs []float64) float64 {
+	if len(xs) == 0 {
+		return math.NaN()
+	}
+	return xs[0]
+}
+
+func mathObject() Value {
+	o := NewObject()
+	o.Set("PI", Number(math.Pi))
+	o.Set("E", Number(math.E))
+	o.Set("LN2", Number(math.Ln2))
+	o.Set("LN10", Number(math.Ln10))
+	o.Set("LOG2E", Number(math.Log2E))
+	o.Set("LOG10E", Number(math.Log10E))
+	o.Set("SQRT2", Number(math.Sqrt2))
+	o.Set("SQRT1_2", Number(math.Sqrt2/2))
+	unary := map[string]func(float64) float64{
+		"abs": math.Abs, "floor": math.Floor, "ceil": math.Ceil, "trunc": math.Trunc,
+		"sqrt": math.Sqrt, "cbrt": math.Cbrt, "log": math.Log, "log10": math.Log10, "log2": math.Log2,
+		"exp": math.Exp, "sin": math.Sin, "cos": math.Cos, "tan": math.Tan,
+		"round": func(x float64) float64 {
+			// JS rounds half toward +Infinity.
+			if math.IsNaN(x) || math.IsInf(x, 0) || x == 0 {
+				return x
+			}
+			r := math.Floor(x + 0.5)
+			if r == 0 && x < 0 {
+				return math.Copysign(0, -1)
+			}
+			return r
+		},
+		"sign": func(x float64) float64 {
+			switch {
+			case math.IsNaN(x) || x == 0:
+				return x
+			case x > 0:
+				return 1
+			}
+			return -1
+		},
+	}
+	for name, fn := range unary {
+		fn := fn
+		o.Set(name, numericFn(name, func(xs []float64) float64 { return fn(first(xs)) }))
+	}
+	o.Set("max", numericFn("max", func(xs []float64) float64 {
+		r := math.Inf(-1)
+		for _, x := range xs {
+			if math.IsNaN(x) {
+				return x
+			}
+			if x > r || (x == 0 && r == 0 && !math.Signbit(x)) {
+				r = x
+			}
+		}
+		return r
+	}))
+	o.Set("min", numericFn("min", func(xs []float64) float64 {
+		r := math.Inf(1)
+		for _, x := range xs {
+			if math.IsNaN(x) {
+				return x
+			}
+			if x < r || (x == 0 && r == 0 && math.Signbit(x)) {
+				r = x
+			}
+		}
+		return r
+	}))
+	o.Set("pow", numericFn("pow", func(xs []float64) float64 {
+		if len(xs) < 2 {
+			return math.NaN()
+		}
+		return Pow(xs[0], xs[1])
+	}))
+	return o
+}
+
+func objectCtor() Value {
+	o := NewObject()
+	entriesOf := func(v Value) ([]string, []Value, bool) {
+		switch v.kind {
+		case KindObject:
+			keys := v.Keys()
+			vals := make([]Value, len(keys))
+			for i, k := range keys {
+				vals[i], _ = v.Get(k)
+			}
+			return keys, vals, true
+		case KindArray:
+			keys := make([]string, len(v.Elems()))
+			for i := range keys {
+				keys[i] = strconv.Itoa(i)
+			}
+			return keys, v.Elems(), true
+		case KindString:
+			var keys []string
+			var vals []Value
+			for i, c := range units(v.s) {
+				keys = append(keys, strconv.Itoa(i))
+				vals = append(vals, String(fromUnits([]uint16{c})))
+			}
+			return keys, vals, true
+		case KindNumber, KindBool, KindDate, KindMap, KindSet, KindIterator:
+			return nil, nil, true
+		}
+		return nil, nil, false
+	}
+	method := func(name string, f func(keys []string, vals []Value) Value) {
+		o.Set(name, Func(name, func(args []Value) Value {
+			v := arg(args, 0)
+			if v.IsUnknown() {
+				return v
+			}
+			keys, vals, ok := entriesOf(v)
+			if !ok {
+				return Unsupported("Object." + name + " of " + v.Kind().String())
+			}
+			return f(keys, vals)
+		}))
+	}
+	method("keys", func(keys []string, _ []Value) Value {
+		out := make([]Value, len(keys))
+		for i, k := range keys {
+			out[i] = String(k)
+		}
+		return NewArray(out...)
+	})
+	method("values", func(_ []string, vals []Value) Value {
+		return ArrayOf(vals)
+	})
+	method("entries", func(keys []string, vals []Value) Value {
+		out := make([]Value, len(keys))
+		for i, k := range keys {
+			out[i] = NewArray(String(k), vals[i])
+		}
+		return NewArray(out...)
+	})
+	o.Set("fromEntries", Func("fromEntries", func(args []Value) Value {
+		src := arg(args, 0)
+		if src.IsUnknown() {
+			return src
+		}
+		entries, ok := iterate(src)
+		if !ok {
+			return Unsupported("Object.fromEntries of a non-iterable value")
+		}
+		out := NewObject()
+		for _, e := range entries {
+			if !e.IsArray() {
+				return unknownOr(e, "Object.fromEntries entry is not an array")
+			}
+			out.Set(arg(e.Elems(), 0).ToPrimitive().ToString(), arg(e.Elems(), 1))
+		}
+		return out
+	}))
+	o.Set("assign", Func("assign", func(args []Value) Value {
+		if len(args) == 0 || !args[0].IsObject() {
+			return unknownOr(arg(args, 0), "Object.assign target is not an object")
+		}
+		for _, src := range args[1:] {
+			if src.IsUnknown() {
+				return src
+			}
+			for _, k := range src.Keys() {
+				v, _ := src.Get(k)
+				args[0].Set(k, v)
+			}
+		}
+		return args[0]
+	}))
+	return o
+}
+
+// arrayFromArgs is Array(...) and new Array(...): a single number is a length
+// (the items are undefined), anything else the items themselves.
+func arrayFromArgs(args []Value) Value {
+	for _, a := range args {
+		if a.IsUnknown() {
+			return a
+		}
+	}
+	if len(args) == 1 && args[0].kind == KindNumber {
+		n := args[0].n
+		if n < 0 || n != math.Trunc(n) || n > maxLoopIterations {
+			return Unsupported("Array length out of range")
+		}
+		items := make([]Value, int(n))
+		for i := range items {
+			items[i] = Undefined()
+		}
+		return NewArray(items...)
+	}
+	return ArrayOf(args)
+}
+
+func arrayCtor() Value {
+	o := NewObject()
+	o.Set("isArray", Func("isArray", func(args []Value) Value {
+		if a := arg(args, 0); a.IsUnknown() {
+			return a
+		}
+		return Bool(arg(args, 0).IsArray())
+	}))
+	o.Set("from", Func("from", func(args []Value) Value {
+		src := arg(args, 0)
+		if src.IsUnknown() {
+			return src
+		}
+		var items []Value
+		if it, ok := iterate(src); ok {
+			if len(it) > maxIterated {
+				return Unsupported("Array.from of a very long iterable")
+			}
+			items = append([]Value(nil), it...)
+		} else if src.IsObject() {
+			// Array-like `{ length: n }`.
+			l, _ := src.Get("length")
+			n := int(ToIntegerOrInfinity(l.ToNumber()))
+			if n < 0 || n > maxLoopIterations {
+				return Unsupported("Array.from length out of range")
+			}
+			for i := 0; i < n; i++ {
+				v, _ := src.Get(strconv.Itoa(i))
+				items = append(items, v)
+			}
+		} else {
+			return Unsupported("Array.from of " + src.Kind().String())
+		}
+		if fn := arg(args, 1); fn.IsFunction() {
+			for i, el := range items {
+				items[i] = fn.Call(el, Number(float64(i)))
+			}
+		}
+		return NewArray(items...)
+	}))
+	o.Set("of", Func("of", func(args []Value) Value { return ArrayOf(args) }))
+	return o
+}
+
+func parseInt(s string, radixV Value) float64 {
+	s = strings.TrimLeftFunc(s, isJSWhitespace)
+	sign := 1.0
+	if s != "" && (s[0] == '+' || s[0] == '-') {
+		if s[0] == '-' {
+			sign = -1
+		}
+		s = s[1:]
+	}
+	radix := int(ToInt32(radixV.ToNumber()))
+	stripPrefix := true
+	if radix != 0 {
+		if radix < 2 || radix > 36 {
+			return math.NaN()
+		}
+		if radix != 16 {
+			stripPrefix = false
+		}
+	} else {
+		radix = 10
+	}
+	if stripPrefix && len(s) >= 2 && s[0] == '0' && (s[1] == 'x' || s[1] == 'X') {
+		s = s[2:]
+		radix = 16
+	}
+	end := 0
+	for end < len(s) {
+		c := s[end]
+		var d int
+		switch {
+		case c >= '0' && c <= '9':
+			d = int(c - '0')
+		case c >= 'a' && c <= 'z':
+			d = int(c-'a') + 10
+		case c >= 'A' && c <= 'Z':
+			d = int(c-'A') + 10
+		default:
+			d = 99
+		}
+		if d >= radix {
+			break
+		}
+		end++
+	}
+	if end == 0 {
+		return math.NaN()
+	}
+	if radix == 10 {
+		f, _ := strconv.ParseFloat(s[:end], 64)
+		return sign * f
+	}
+	return sign * parseRadix(strings.ToLower(s[:end]), radix)
+}
+
+func parseFloat(s string) float64 {
+	s = strings.TrimLeftFunc(s, isJSWhitespace)
+	body := s
+	sign := 1.0
+	if body != "" && (body[0] == '+' || body[0] == '-') {
+		if body[0] == '-' {
+			sign = -1
+		}
+		body = body[1:]
+	}
+	if strings.HasPrefix(body, "Infinity") {
+		return sign * math.Inf(1)
+	}
+	// Longest prefix that is a StrDecimalLiteral.
+	for end := len(body); end > 0; end-- {
+		if isStrDecimal(body[:end]) {
+			f, _ := strconv.ParseFloat(body[:end], 64)
+			return sign * f
+		}
+	}
+	return math.NaN()
+}
+
+// mathRandom is Math.random(). It is only known where the host allows volatile
+// values; with SOURCE_DATE_EPOCH set it is a function of the epoch, the call
+// site and how often the site ran, so reproducible builds repeat.
+func (in *Interp) mathRandom() Value {
+	if !in.Volatile {
+		return Dynamic("Math.random() has no value that holds at run time")
+	}
+	epoch, ok := SourceDateEpoch()
+	if !ok {
+		return Number(rand.Float64())
+	}
+	pos := in.callPos
+	if in.randSeq == nil {
+		in.randSeq = map[ast.Pos]int{}
+	}
+	n := in.randSeq[pos]
+	in.randSeq[pos] = n + 1
+	x := uint64(epoch.Unix()) ^ uint64(pos.Line)<<40 ^ uint64(pos.Col)<<24 ^ uint64(n)*0x9e3779b97f4a7c15
+	// splitmix64
+	x += 0x9e3779b97f4a7c15
+	x = (x ^ x>>30) * 0xbf58476d1ce4e5b9
+	x = (x ^ x>>27) * 0x94d049bb133111eb
+	x ^= x >> 31
+	return Number(float64(x>>11) / (1 << 53))
+}

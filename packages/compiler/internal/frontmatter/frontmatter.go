@@ -1,8 +1,7 @@
 // Package frontmatter parses YAML-style frontmatter found at the top of krate
 // markdown/MDX doc files. It is a deliberately small, dependency-free subset of
-// YAML — a single source of truth shared by the markdown renderer and the docs
+// YAML - a single source of truth shared by the markdown renderer and the docs
 // plugin (docs package), which both previously carried separate flat parsers.
-//
 // Supported YAML subset:
 //
 //	---
@@ -24,11 +23,12 @@
 // Supported: scalars (string / number / bool / null), double and single quoted
 // strings, inline `[a, b]` arrays and `{k: v}` objects, indented object blocks,
 // and `- item` list blocks (including maps of key/value pairs as list items).
-//
+// Block scalars (`|` literal, `>` folded, with `-`/`+` chomping) and the YAML
+// double-quote escapes (\n \t \xXX \uXXXX ...) are supported.
 // Unsupported YAML (by design): anchors (`&name`) and aliases (`*name`),
-// merge keys (`<<`), block scalar folding (`|`, `>`), multi-document streams
+// merge keys (`<<`), multi-document streams
 // (`---`/`...` separators inside the block), flow-format nesting of arrays
-// inside inline objects, YAML tags (`!!str`), and fancy escape sequences.
+// inside inline objects, and YAML tags (`!!str`).
 // Anything the parser cannot interpret is left as a plain string.
 package frontmatter
 
@@ -126,12 +126,204 @@ func parseMap(lines []string, indent int) (map[string]any, int) {
 				continue
 			}
 			out[key] = ""
+		} else if style, chomp, ok := blockScalarHeader(rest); ok {
+			val, n := parseBlockScalar(lines[i+1:], indent, style, chomp)
+			out[key] = val
+			i += 1 + n
+			continue
+		} else if joined, n, ok := multiLineQuoted(rest, lines[i+1:]); ok {
+			out[key] = joined
+			i += 1 + n
+			continue
 		} else {
 			out[key] = parseScalar(rest)
 		}
 		i++
 	}
 	return out, i
+}
+
+// quoteEnd returns the index of the quote that closes the quoted scalar
+// starting at s[0], or -1 when it is not closed in s.
+func quoteEnd(s string) int {
+	q := s[0]
+	for i := 1; i < len(s); i++ {
+		switch {
+		case q == '"' && s[i] == '\\':
+			i++
+		case s[i] == q:
+			if q == '\'' && i+1 < len(s) && s[i+1] == '\'' {
+				i++ // '' is an escaped single quote
+				continue
+			}
+			return i
+		}
+	}
+	return -1
+}
+
+// multiLineQuoted joins a quoted scalar that continues onto the following
+// lines, folding line breaks the YAML way: a break becomes one space, and a
+// blank line becomes a newline. It returns the decoded value and the number of
+// extra lines consumed, or ok=false when rest is not an unterminated quote.
+func multiLineQuoted(rest string, following []string) (any, int, bool) {
+	if rest == "" || (rest[0] != '"' && rest[0] != '\'') || quoteEnd(rest) >= 0 {
+		return "", 0, false
+	}
+	var b strings.Builder
+	b.WriteString(rest)
+	pendingBreaks := 0
+	for n, l := range following {
+		t := strings.TrimSpace(l)
+		if t == "" {
+			pendingBreaks++
+			continue
+		}
+		if pendingBreaks > 0 {
+			b.WriteString(strings.Repeat("\n", pendingBreaks))
+		} else {
+			b.WriteByte(' ')
+		}
+		pendingBreaks = 0
+		b.WriteString(t)
+		if quoteEnd(strings.TrimSpace(b.String())) >= 0 {
+			return parseScalar(strings.TrimSpace(b.String())), n + 1, true
+		}
+	}
+	return "", 0, false
+}
+
+// Problem describes frontmatter that Parse cannot read, so a caller can warn
+// instead of silently treating it as body text. Kind is "toml" or
+// "unterminated"; both are empty for readable or absent frontmatter.
+type Problem struct {
+	Kind string
+	Line int
+}
+
+// Detect reports a frontmatter block that Parse ignores: a +++ (TOML) block,
+// or a --- block that is never closed.
+func Detect(src string) (Problem, bool) {
+	src = strings.TrimPrefix(src, "\ufeff")
+	lines := strings.Split(src, "\n")
+	if len(lines) < 2 {
+		return Problem{}, false
+	}
+	switch strings.TrimSpace(lines[0]) {
+	case "+++":
+		for i := 1; i < len(lines); i++ {
+			if strings.TrimSpace(lines[i]) == "+++" {
+				return Problem{Kind: "toml", Line: 1}, true
+			}
+		}
+	case "---":
+		for i := 1; i < len(lines); i++ {
+			if strings.TrimSpace(lines[i]) == "---" {
+				return Problem{}, false
+			}
+		}
+		// Only suspicious when the first line after it looks like a key.
+		if _, _, ok := splitKeyValue(strings.TrimSpace(lines[1])); ok {
+			return Problem{Kind: "unterminated", Line: 1}, true
+		}
+	}
+	return Problem{}, false
+}
+
+// blockScalarHeader recognises a YAML block scalar indicator: `|` (literal) or
+// `>` (folded), optionally with a chomping flag (`-` strip, `+` keep) and an
+// indentation digit, followed by an optional comment.
+func blockScalarHeader(rest string) (style, chomp byte, ok bool) {
+	if rest == "" || (rest[0] != '|' && rest[0] != '>') {
+		return 0, 0, false
+	}
+	style = rest[0]
+	for _, c := range rest[1:] {
+		switch {
+		case c == '-' || c == '+':
+			chomp = byte(c)
+		case c >= '1' && c <= '9':
+		default:
+			if c == ' ' || c == '#' {
+				return style, chomp, true
+			}
+			return 0, 0, false
+		}
+	}
+	return style, chomp, true
+}
+
+// parseBlockScalar reads the indented lines under a block scalar key and
+// returns its text plus the number of lines consumed.
+func parseBlockScalar(lines []string, parentIndent int, style, chomp byte) (string, int) {
+	end := 0
+	blockIndent := -1
+	for end < len(lines) {
+		t := strings.TrimSpace(lines[end])
+		if t != "" {
+			ind := indentation(lines[end])
+			if ind <= parentIndent {
+				break
+			}
+			if blockIndent < 0 {
+				blockIndent = ind
+			}
+			if ind < blockIndent {
+				break
+			}
+		}
+		end++
+	}
+	// Trailing blank lines belong to the chomping rule, not to the next key.
+	body := lines[:end]
+	if blockIndent < 0 {
+		return "", end
+	}
+	text := make([]string, len(body))
+	for i, l := range body {
+		if len(l) >= blockIndent {
+			text[i] = l[blockIndent:]
+		} else {
+			text[i] = strings.TrimLeft(l, " \t")
+		}
+	}
+	trailing := 0
+	for len(text) > 0 && strings.TrimSpace(text[len(text)-1]) == "" {
+		text = text[:len(text)-1]
+		trailing++
+	}
+	var out string
+	if style == '|' {
+		out = strings.Join(text, "\n")
+	} else {
+		var b strings.Builder
+		for i, l := range text {
+			if i > 0 {
+				prev := text[i-1]
+				switch {
+				case strings.TrimSpace(l) == "":
+					b.WriteByte('\n')
+				case strings.TrimSpace(prev) == "":
+				case strings.HasPrefix(l, " ") || strings.HasPrefix(prev, " "):
+					b.WriteByte('\n')
+				default:
+					b.WriteByte(' ')
+				}
+			}
+			b.WriteString(l)
+		}
+		out = b.String()
+	}
+	switch chomp {
+	case '-':
+	case '+':
+		out += strings.Repeat("\n", trailing+1)
+	default:
+		if out != "" {
+			out += "\n"
+		}
+	}
+	return out, end
 }
 
 // parseList parses consecutive `- item` lines indented at `indent`. Items may
@@ -281,27 +473,60 @@ func parseScalar(raw string) any {
 	return raw
 }
 
-// unescapeDoubleQuoted decodes the double-quoted escape sequences krate
-// supports: \" \\ and \n (anything else keeps its backslash removed).
+// unescapeDoubleQuoted decodes YAML double-quoted escape sequences: \" \\ \/
+// \n \r \t \0 \a \b \e \f \v \_ \N \L \P, \xXX, \uXXXX and \UXXXXXXXX.
+// An unknown escape keeps the escaped character without its backslash.
 func unescapeDoubleQuoted(s string) string {
 	if !strings.Contains(s, "\\") {
 		return s
 	}
 	var b strings.Builder
 	for i := 0; i < len(s); i++ {
-		if s[i] == '\\' && i+1 < len(s) {
-			switch s[i+1] {
-			case 'n':
-				b.WriteByte('\n')
-			case '"', '\\':
-				b.WriteByte(s[i+1])
-			default:
-				b.WriteByte(s[i+1])
-			}
-			i++
+		if s[i] != '\\' || i+1 >= len(s) {
+			b.WriteByte(s[i])
 			continue
 		}
-		b.WriteByte(s[i])
+		i++
+		switch c := s[i]; c {
+		case 'n':
+			b.WriteByte('\n')
+		case 'r':
+			b.WriteByte('\r')
+		case 't':
+			b.WriteByte('\t')
+		case '0':
+			b.WriteByte(0)
+		case 'a':
+			b.WriteByte(7)
+		case 'b':
+			b.WriteByte(8)
+		case 'e':
+			b.WriteByte(27)
+		case 'f':
+			b.WriteByte(12)
+		case 'v':
+			b.WriteByte(11)
+		case '_':
+			b.WriteString("\u00a0")
+		case 'N':
+			b.WriteString("\u0085")
+		case 'L':
+			b.WriteString("\u2028")
+		case 'P':
+			b.WriteString("\u2029")
+		case 'x', 'u', 'U':
+			n := map[byte]int{'x': 2, 'u': 4, 'U': 8}[c]
+			if i+1+n <= len(s) {
+				if v, err := strconv.ParseUint(s[i+1:i+1+n], 16, 32); err == nil {
+					b.WriteRune(rune(v))
+					i += n
+					continue
+				}
+			}
+			b.WriteByte(c)
+		default:
+			b.WriteByte(c)
+		}
 	}
 	return b.String()
 }
@@ -391,7 +616,7 @@ func splitOutsideQuotes(s string, sep byte) []string {
 
 // splitSimpleKeyValue is splitKeyValue restricted to "simple" keys (used for
 // `- key: value` list items): the key must not start with a flow marker or
-// quote and must contain no spaces — so `- [meta, {...}]` is a scalar element,
+// quote and must contain no spaces - so `- [meta, {...}]` is a scalar element,
 // not a malformed map entry.
 func splitSimpleKeyValue(s string) (key, value string, ok bool) {
 	key, value, ok = splitKeyValue(s)

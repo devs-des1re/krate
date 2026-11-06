@@ -7,13 +7,15 @@ import (
 	"log/slog"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mattn/go-isatty"
 )
 
-// ─── request-line formatting ────────────────────────────────────────────────
+// request-line formatting
 
 // colorStatus renders an HTTP status code with a severity colour: green for
 // 2xx, cyan for 3xx, yellow for 4xx, red for 5xx.
@@ -34,15 +36,46 @@ func colorStatus(code int) string {
 // sub-millisecond requests so fast static hits are not shown as "0ms".
 func formatDuration(d time.Duration) string {
 	if d < time.Millisecond {
-		return strconv.FormatInt(d.Microseconds(), 10) + "μs"
+		return strconv.FormatInt(d.Microseconds(), 10) + "us"
 	}
 	return strconv.FormatInt(d.Milliseconds(), 10) + "ms"
+}
+
+// safeLogText makes request-controlled text safe to print on one log line:
+// control characters (including ESC and newlines) and Unicode line separators
+// become %XX escapes, so a crafted URL cannot forge log lines or terminal
+// escape sequences.
+func safeLogText(s string) string {
+	clean := true
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f || r == 0x85 || r == 0x2028 || r == 0x2029 {
+			clean = false
+			break
+		}
+	}
+	if clean {
+		return s
+	}
+	var b strings.Builder
+	for _, r := range s {
+		if r < 0x20 || r == 0x7f || r == 0x85 || r == 0x2028 || r == 0x2029 {
+			var buf [4]byte
+			n := utf8.EncodeRune(buf[:], r)
+			for _, c := range buf[:n] {
+				fmt.Fprintf(&b, "%%%02X", c)
+			}
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 // formatRequestLine renders a single request log line. With color it mirrors
 // the CLI's build output (dim timestamp, colored status, dim duration);
 // otherwise it emits a clean, aligned plain-text line for CI and piped output.
 func formatRequestLine(method, path string, status int, dur time.Duration, color bool) string {
+	method, path = safeLogText(method), safeLogText(path)
 	durStr := formatDuration(dur)
 	if !color {
 		return fmt.Sprintf("%s %s %s %d %s", time.Now().Format("15:04:05"), method, path, status, durStr)
@@ -76,7 +109,7 @@ func isTTY(f *os.File) bool {
 	return isatty.IsTerminal(fd) || isatty.IsCygwinTerminal(fd)
 }
 
-// ─── pretty slog handler ────────────────────────────────────────────────────
+// pretty slog handler
 
 // requestLogMsg is the record message used by the request-logging middleware.
 // The handler special-cases it to render a compact request line.
@@ -166,4 +199,42 @@ func newLogger(verbose bool) *slog.Logger {
 		level = slog.LevelDebug
 	}
 	return slog.New(newPrettyHandler(os.Stdout, level, colorEnabled()))
+}
+
+// accessRecord is one request-log entry, emitted asynchronously so the hot
+// request path never blocks on stdout.
+type accessRecord struct {
+	id       string
+	method   string
+	path     string
+	status   int
+	duration time.Duration
+}
+
+var (
+	accessOnce sync.Once
+	accessCh   chan accessRecord
+)
+
+// emitAccessLog enqueues a request record for asynchronous emission. It never
+// blocks: when logging is disabled (KRATE_NO_ACCESS_LOG) or the buffer is full,
+// the record is dropped.
+func emitAccessLog(rec accessRecord) {
+	accessOnce.Do(func() {
+		if os.Getenv("KRATE_NO_ACCESS_LOG") != "" {
+			return
+		}
+		accessCh = make(chan accessRecord, 8192)
+		go func() {
+			for r := range accessCh {
+				Logger.Info("request",
+					"id", r.id, "method", r.method, "path", r.path,
+					"status", r.status, "duration", r.duration)
+			}
+		}()
+	})
+	select {
+	case accessCh <- rec:
+	default:
+	}
 }

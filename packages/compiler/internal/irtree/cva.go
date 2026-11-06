@@ -1,10 +1,8 @@
 package irtree
 
 import (
-	"sort"
-	"strings"
-
 	"github.com/kratejs/krate/packages/compiler/ast"
+	"github.com/kratejs/krate/packages/compiler/internal/jsvalue"
 )
 
 // CVASpec is a resolved `cva(base, config)` declaration. The compiler folds a
@@ -13,7 +11,10 @@ import (
 type CVASpec struct {
 	Base     string
 	Variants map[string]map[string]string
-	Defaults map[string]string
+	// VariantOrder is the config order of Variants; the runtime applies
+	// variant classes in this order.
+	VariantOrder []string
+	Defaults     map[string]string
 	// Compound holds compoundVariant rules as parallel key lists; the class is
 	// applied when every (key, value) matches the selection.
 	Compound []cvaCompound
@@ -58,6 +59,11 @@ func CollectCVAFactories(prog *ast.Program) map[string]*CVASpec {
 			}
 			base, ok := literalString(call.Args[0])
 			if !ok {
+				continue
+			}
+			if len(call.Args) >= 2 && hasComputedKey(call.Args[1]) {
+				// A variant named by an expression cannot be folded; the
+				// factory's calls stay runtime values.
 				continue
 			}
 			spec := &CVASpec{Base: base, Variants: map[string]map[string]string{}, Defaults: map[string]string{}}
@@ -113,6 +119,9 @@ func parseCVAConfig(expr ast.Expr, spec *CVASpec) {
 							m[op.Key] = v
 						}
 					}
+					if _, seen := spec.Variants[vp.Key]; !seen {
+						spec.VariantOrder = append(spec.VariantOrder, vp.Key)
+					}
 					spec.Variants[vp.Key] = m
 				}
 			}
@@ -149,7 +158,7 @@ func parseCompoundVariant(expr ast.Expr) (cvaCompound, bool) {
 		if prop == nil || prop.Spread || prop.Key == "" {
 			continue
 		}
-		if prop.Key == "class" || prop.Key == "className" {
+		if prop.Key == "class" {
 			if v, ok := literalString(prop.Value); ok {
 				c.Class = v
 			}
@@ -172,24 +181,24 @@ func parseCompoundVariant(expr ast.Expr) (cvaCompound, bool) {
 	return c, true
 }
 
-// Fold resolves a variant selection to a class string: the base, the selected
-// variant classes, matching compound variants, and any explicit extra class
-// (the `class`/`className` entry in selection).
+// Fold mirrors the runtime cva in packages/runtime/src/class-helpers.ts: the
+// base, the selected variant classes in config order, matching compound
+// variants and the explicit extra class, merged with twMerge. A key present in
+// selection (even with an empty value) overrides the default; only variant
+// names take part in selection and compound matching.
 func (s *CVASpec) Fold(selection map[string]string, extraClass string) string {
-	parts := []string{s.Base}
-	// Deterministic variant order.
-	names := make([]string, 0, len(s.Variants))
-	for name := range s.Variants {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		chosen := selection[name]
-		if chosen == "" {
-			chosen = s.Defaults[name]
+	chosen := map[string]string{}
+	for _, name := range s.VariantOrder {
+		if v, ok := selection[name]; ok {
+			chosen[name] = v
+		} else if d, ok := s.Defaults[name]; ok {
+			chosen[name] = d
 		}
-		if chosen != "" {
-			if cls, ok := s.Variants[name][chosen]; ok {
+	}
+	parts := []string{s.Base}
+	for _, name := range s.VariantOrder {
+		if v := chosen[name]; v != "" {
+			if cls, ok := s.Variants[name][v]; ok {
 				parts = append(parts, cls)
 			}
 		}
@@ -197,11 +206,11 @@ func (s *CVASpec) Fold(selection map[string]string, extraClass string) string {
 	for _, c := range s.Compound {
 		matched := true
 		for key, accepted := range c.Conditions {
-			got := selection[key]
-			if got == "" {
-				got = s.Defaults[key]
+			got, have := chosen[key]
+			if !have {
+				got, have = s.Defaults[key]
 			}
-			if !contains(accepted, got) {
+			if !have || !contains(accepted, got) {
 				matched = false
 				break
 			}
@@ -213,7 +222,40 @@ func (s *CVASpec) Fold(selection map[string]string, extraClass string) string {
 	if extraClass != "" {
 		parts = append(parts, extraClass)
 	}
-	return strings.Join(parts, " ")
+	return mergeTailwindClasses(parts)
+}
+
+// FoldValue folds a call's props object like the runtime cva: null and
+// undefined props fall back to defaults, `class` wins over `className`, and
+// only string class overrides count. An unknown value is returned as is.
+func (s *CVASpec) FoldValue(props jsvalue.Value) jsvalue.Value {
+	selection := map[string]string{}
+	var class, className *jsvalue.Value
+	for _, k := range props.Keys() {
+		v, _ := props.Get(k)
+		if v.IsUnknown() {
+			return v
+		}
+		if v.IsNullish() {
+			continue
+		}
+		switch k {
+		case "class":
+			class = &v
+		case "className":
+			className = &v
+		default:
+			selection[k] = v.ToString()
+		}
+	}
+	extra := ""
+	if class == nil {
+		class = className
+	}
+	if class != nil && class.Kind() == jsvalue.KindString {
+		extra = class.StringValue()
+	}
+	return jsvalue.String(s.Fold(selection, extra))
 }
 
 func contains(list []string, v string) bool {
@@ -236,4 +278,17 @@ func literalString(expr ast.Expr) (string, bool) {
 		return lit.Value, true
 	}
 	return "", false
+}
+
+// hasComputedKey reports whether any object literal under expr has a
+// `[expr]: value` key.
+func hasComputedKey(expr ast.Expr) bool {
+	found := false
+	WalkAST(expr, func(n any) bool {
+		if p, ok := n.(*ast.ObjectProp); ok && p.Computed {
+			found = true
+		}
+		return !found
+	})
+	return found
 }

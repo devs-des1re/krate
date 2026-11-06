@@ -1,7 +1,7 @@
 {
   "name": "@krate/core",
   "version": "0.1.0",
-  "description": "The Krate CLI — a Go-native static site generator with signal-based reactivity.",
+  "description": "The Krate CLI - a Go-native static site generator with signal-based reactivity.",
   "license": "Apache-2.0",
   "type": "module",
   "homepage": "https://krate.js.org",
@@ -32,13 +32,15 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "files": [
-    "bin",
+    "bin/krate.js",
     "dist",
     "install.js"
   ],
   "scripts": {
     "build": "tsc",
-    "postinstall": "node ./install.js"
+    "typecheck": "tsc --noEmit",
+    "postinstall": "node ./install.js",
+    "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
     "@krate/plugin": "workspace:*"
@@ -48,12 +50,12 @@
     "typescript": "^5.5.0"
   },
   "optionalDependencies": {
-    "@krate/core-darwin-arm64": "0.0.1",
-    "@krate/core-darwin-x64": "0.0.1",
-    "@krate/core-linux-arm64": "0.0.1",
-    "@krate/core-linux-x64": "0.0.1",
-    "@krate/core-linux-x64-musl": "0.0.1",
-    "@krate/core-win32-arm64": "0.0.1",
-    "@krate/core-win32-x64": "0.0.1"
+    "@krate/core-darwin-arm64": "0.1.0",
+    "@krate/core-darwin-x64": "0.1.0",
+    "@krate/core-linux-arm64": "0.1.0",
+    "@krate/core-linux-x64": "0.1.0",
+    "@krate/core-linux-x64-musl": "0.1.0",
+    "@krate/core-win32-arm64": "0.1.0",
+    "@krate/core-win32-x64": "0.1.0"
   }
 }

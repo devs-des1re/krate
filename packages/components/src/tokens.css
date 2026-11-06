@@ -1,0 +1,156 @@
+/* Design tokens for @krate/components.
+ *
+ * Defaults mirror @krate/base-docs-theme (the docs site). Every declaration is
+ * wrapped in `:where(...)` (zero specificity) so ANY rule of yours - a plain
+ * `:root { --krate-primary: ... }` - overrides the defaults regardless of load
+ * order. Only set `--krate-primary` to retheme: hover, focus ring, active
+ * states, and the CSS-signal `--krate-active*` colours are derived from it. */
+:where(:root) {
+  color-scheme: light dark;
+
+  --krate-font: 'Inter', system-ui, -apple-system, blinkmacsystemfont, 'Segoe UI', roboto, sans-serif;
+  --krate-radius-sm: 6px;
+  --krate-radius: 8px;
+  --krate-radius-lg: 12px;
+  --krate-gap: 8px;
+
+  /* Solid fills carry --krate-primary-fg text: #c2410c with white is 5.2:1
+     (WCAG AA). --krate-primary-text is the same hue as readable text on the
+     page background (lighter in dark mode). */
+  --krate-primary: #c2410c;
+  --krate-primary-hover: color-mix(in srgb, var(--krate-primary) 85%, black);
+  --krate-primary-fg: #ffffff;
+  --krate-primary-text: var(--krate-primary);
+  --krate-focus-ring: var(--krate-primary);
+  --krate-danger: #dc2626;
+  --krate-danger-hover: color-mix(in srgb, var(--krate-danger) 85%, black);
+  --krate-success: #22c55e;
+  --krate-warning: #f59e0b;
+  /* Readable text variants of the status colors (AA on the page background and
+     on their 15% tints); the dark scopes switch to lighter hues. */
+  --krate-danger-text: #b91c1c;
+  --krate-success-text: #15803d;
+  --krate-warning-text: #854d0e;
+
+  --krate-fg: #0a0a0a;
+  --krate-muted: #636363;
+  --krate-bg: #ffffff;
+  --krate-bg-subtle: #fafafa;
+  --krate-surface: #f5f5f5;
+  --krate-surface-hover: #e5e5e5;
+  --krate-border: #e5e5e5;
+  --krate-border-strong: #d4d4d4;
+  --krate-overlay: rgba(10, 10, 10, 0.4);
+
+  --krate-text: var(--krate-fg);
+  --krate-text-muted: var(--krate-muted);
+  --krate-card-bg: var(--krate-bg);
+
+  /* Code surfaces. The base values are what a block with no theme stylesheet
+     (an unhighlighted <Code>) uses; a highlighted block takes its colours from
+     the code theme (--chroma-bg / --chroma-fg), and --krate-code-bg,
+     --krate-code-text, --krate-code-title-bg and --krate-code-title-text, when
+     set, override both. They follow the colour mode like the rest, and the dark
+     base matches --krate-card-bg so code sits on the same surface as cards. */
+  --krate-code-bg-base: #f7f7f7;
+  --krate-code-text-base: #262626;
+
+  /* Elevation - offset + soft blur, low alpha. `--krate-hairline` is a top
+     inner highlight the dark ramp turns on to separate surfaces without depth. */
+  --krate-shadow-xs: 0 1px 2px rgba(23, 23, 23, 0.06);
+  --krate-shadow-sm: 0 1px 2px rgba(23, 23, 23, 0.06), 0 2px 6px -2px rgba(23, 23, 23, 0.08);
+  --krate-shadow-md: 0 2px 4px rgba(23, 23, 23, 0.05), 0 10px 24px -8px rgba(23, 23, 23, 0.12);
+  --krate-shadow-lg: 0 4px 10px rgba(23, 23, 23, 0.06), 0 24px 48px -16px rgba(23, 23, 23, 0.16);
+  --krate-hairline: none;
+
+  --krate-ease-out: cubic-bezier(0.22, 1, 0.36, 1);
+  --krate-ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+@media (prefers-color-scheme: dark) {
+  :where(:root) {
+    --krate-fg: #fafafa;
+    --krate-muted: #a3a3a3;
+    --krate-bg: #0a0a0a;
+    --krate-bg-subtle: #0f0f0f;
+    --krate-surface: #171717;
+    --krate-surface-hover: #262626;
+    --krate-border: #262626;
+    --krate-border-strong: #404040;
+    --krate-card-bg: #171717;
+    --krate-overlay: rgba(0, 0, 0, 0.6);
+    --krate-shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --krate-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4), 0 2px 8px -2px rgba(0, 0, 0, 0.5);
+    --krate-shadow-md: 0 2px 6px rgba(0, 0, 0, 0.4), 0 14px 32px -10px rgba(0, 0, 0, 0.55);
+    --krate-shadow-lg: 0 6px 14px rgba(0, 0, 0, 0.45), 0 30px 60px -20px rgba(0, 0, 0, 0.65);
+    --krate-hairline: inset 0 1px 0 rgba(255, 255, 255, 0.045);
+    --krate-primary-text: color-mix(in srgb, var(--krate-primary) 70%, white);
+    --krate-danger-text: #f87171;
+    --krate-success-text: #4ade80;
+    --krate-warning-text: #facc15;
+    --krate-code-bg-base: #171717;
+    --krate-code-text-base: #e5e5e5;
+  }
+}
+
+:where(:root[data-theme='dark']) {
+  --krate-fg: #fafafa;
+  --krate-muted: #a3a3a3;
+  --krate-bg: #0a0a0a;
+  --krate-bg-subtle: #0f0f0f;
+  --krate-surface: #171717;
+  --krate-surface-hover: #262626;
+  --krate-border: #262626;
+  --krate-border-strong: #404040;
+  --krate-card-bg: #171717;
+  --krate-overlay: rgba(0, 0, 0, 0.6);
+  --krate-shadow-xs: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --krate-shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4), 0 2px 8px -2px rgba(0, 0, 0, 0.5);
+  --krate-shadow-md: 0 2px 6px rgba(0, 0, 0, 0.4), 0 14px 32px -10px rgba(0, 0, 0, 0.55);
+  --krate-shadow-lg: 0 6px 14px rgba(0, 0, 0, 0.45), 0 30px 60px -20px rgba(0, 0, 0, 0.65);
+  --krate-hairline: inset 0 1px 0 rgba(255, 255, 255, 0.045);
+  --krate-primary-text: color-mix(in srgb, var(--krate-primary) 70%, white);
+  --krate-danger-text: #f87171;
+  --krate-success-text: #4ade80;
+  --krate-warning-text: #facc15;
+  --krate-code-bg-base: #171717;
+  --krate-code-text-base: #e5e5e5;
+}
+
+:where(:root[data-theme='light']) {
+  --krate-fg: #0a0a0a;
+  --krate-muted: #636363;
+  --krate-bg: #ffffff;
+  --krate-bg-subtle: #fafafa;
+  --krate-surface: #f5f5f5;
+  --krate-surface-hover: #e5e5e5;
+  --krate-border: #e5e5e5;
+  --krate-border-strong: #d4d4d4;
+  --krate-card-bg: #ffffff;
+  --krate-overlay: rgba(10, 10, 10, 0.4);
+  --krate-primary-text: var(--krate-primary);
+  --krate-danger-text: #b91c1c;
+  --krate-success-text: #15803d;
+  --krate-warning-text: #854d0e;
+  --krate-code-bg-base: #f7f7f7;
+  --krate-code-text-base: #262626;
+}
+
+/* Reduced motion: every component class (and its ::before/::after parts) loses
+   its transitions and animations. Animations run once for 0.01ms so end states
+   (dialog scale-in, skeleton shimmer) resolve to the element's base style. */
+@media (prefers-reduced-motion: reduce) {
+  [class*="krate-"],
+  [class*="krate-"]::before,
+  [class*="krate-"]::after {
+    transition-duration: 0s !important;
+    transition-delay: 0s !important;
+    animation-duration: 0.01ms !important;
+    animation-delay: 0s !important;
+    animation-iteration-count: 1 !important;
+  }
+  .krate-progress::-webkit-progress-value {
+    transition-duration: 0s !important;
+    transition-delay: 0s !important;
+  }
+}

@@ -5,9 +5,11 @@ import (
 	"strings"
 
 	"github.com/kratejs/krate/packages/compiler/ast"
+	"github.com/kratejs/krate/packages/compiler/internal/diag"
+	"github.com/kratejs/krate/packages/compiler/internal/jsvalue"
 )
 
-// ─── SlotID ────────────────────────────────────────────────────────────────
+// SlotID
 // SlotID is a stable, deterministic identifier for every dynamic region
 // in the component tree. Built from tree path + optional data key.
 type SlotID string
@@ -25,7 +27,7 @@ func joinSlotIDKey(parent SlotID, key string) SlotID {
 	return SlotID(string(parent) + ":" + key)
 }
 
-// ─── ComponentTier ─────────────────────────────────────────────────────────
+// ComponentTier
 type ComponentTier int
 
 const (
@@ -52,7 +54,7 @@ func (t ComponentTier) String() string {
 	}
 }
 
-// ─── Annotations ───────────────────────────────────────────────────────────
+// Annotations
 // Annotations holds static analysis results for a program.
 // Defined here to avoid import cycles between annotator and irtree.
 type Annotations struct {
@@ -75,9 +77,52 @@ type Annotations struct {
 	// its resolved spec, across the entry and all imported modules. Used to fold
 	// shadcn/ui variant calls to static class strings.
 	CVAFactories map[string]*CVASpec
+	// ContextDefaults maps a module-level `const X = createContext(v)` binding to
+	// the literal default v, so `X.useContext()` folds during SSR.
+	ContextDefaults map[string]jsvalue.Value
+	// ClassComponents records class declarations that extend Component/
+	// PureComponent, so the builder can emit a specific diagnostic (class
+	// component lowering is not implemented yet).
+	ClassComponents map[string]bool
+	// ClassRejections holds, per class component that could not be lowered, a
+	// warning positioned at the unsupported member (shouldComponentUpdate, a
+	// static or private member, an unknown this.x read, ...). The builder
+	// reports it when the component is used.
+	ClassRejections map[string]diag.Diagnostic
+	// DecoratedClasses holds, per top-level class that carries decorators
+	// (lowered by esbuild into a reassignment of the class binding), the
+	// warning reported where the class is used as a component.
+	DecoratedClasses map[string]diag.Diagnostic
+	// UnresolvedHOCs holds, per `const Name = withX(...)` binding that looks
+	// like a higher-order component application but could not be turned into
+	// a component function, why. Rendering one fails the build: it would
+	// otherwise render nothing.
+	UnresolvedHOCs map[string]diag.Diagnostic
+	// LazyComponents maps a component binding declared with React.lazy() to
+	// its declaration. Its hydration code goes into a separate chunk.
+	LazyComponents map[string]LazyComponent
+	// ClassBoundaries names the lowered class components that are error
+	// boundaries (static getDerivedStateFromError and/or componentDidCatch).
+	ClassBoundaries map[string]bool
+	// ClassNotes holds non-blocking warnings for lowered class components
+	// (for example a boundary without getDerivedStateFromError), reported once
+	// when the component is rendered.
+	ClassNotes map[string][]diag.Diagnostic
 }
 
-// ─── SlotNode interface ────────────────────────────────────────────────────
+// IsLoweredClass reports whether name is a React class component that was
+// lowered to a function component.
+func (a *Annotations) IsLoweredClass(name string) bool {
+	if a == nil || !a.ClassComponents[name] {
+		return false
+	}
+	_, rejected := a.ClassRejections[name]
+	return !rejected
+}
+
+// (Annotations continues below.)
+
+// SlotNode interface
 // Every child of a ComponentNode implements this interface. The emitter
 // type-switches on the concrete type to produce HTML + metadata.
 type SlotNode interface {
@@ -85,7 +130,7 @@ type SlotNode interface {
 	GetID() SlotID
 }
 
-// ─── StaticHTML — pure HTML, no dynamic behavior ───────────────────────────
+// StaticHTML - pure HTML, no dynamic behavior
 type StaticHTML struct {
 	HTML string
 }
@@ -93,7 +138,29 @@ type StaticHTML struct {
 func (s *StaticHTML) slotNode()     {}
 func (s *StaticHTML) GetID() SlotID { return "" }
 
-// ─── TextSlot — simple signal read: {count()} ──────────────────────────────
+// GoComponentRef identifies an imported Go component (a `<Card>` where Card comes
+// from `./card.go`).
+type GoComponentRef struct {
+	File string        // absolute path of the component's .go file
+	Func string        // exported Go function name
+	Tier ComponentTier // TierServer (build-time) or TierRuntime (per request)
+}
+
+// GoComponentSlot renders an imported Go component. Server-tier slots are
+// rendered at build time by the Go host (batch); runtime-tier slots become
+// request-time regions.
+type GoComponentSlot struct {
+	ID       SlotID
+	Ref      GoComponentRef
+	Props    map[string]string // attr name -> JSON-encoded value ("" for children)
+	Children []SlotNode
+	Pos      ast.Pos // JSX tag-name position at the call site (for SSR baking)
+}
+
+func (s *GoComponentSlot) slotNode()     {}
+func (s *GoComponentSlot) GetID() SlotID { return s.ID }
+
+// TextSlot - simple signal read: {count()}
 type TextSlot struct {
 	ID      SlotID
 	Signal  SignalDecl
@@ -103,18 +170,28 @@ type TextSlot struct {
 func (s *TextSlot) slotNode()     {}
 func (s *TextSlot) GetID() SlotID { return s.ID }
 
-// ─── ExprSlot — complex expression: {x() > 0 ? "yes" : "no"} ──────────────
+// ExprSlot - complex expression: {x() > 0 ? "yes" : "no"}
 type ExprSlot struct {
 	ID         SlotID
 	ExprSource string
 	Initial    string
-	Signals    []string
+	// InitialHTML is the SSR markup of a value that holds JSX (a derived
+	// `const badge = on ? <b/> : <i/>`); it is trusted, already-escaped
+	// output of the build-time renderer and replaces Initial.
+	InitialHTML string
+	Signals     []string
+	// File and Pos locate the expression in its source (hydration source maps).
+	File string
+	Pos  ast.Pos
+	// Unresolved is set when the build could not compute the value, so Initial
+	// is empty only because it is unknown.
+	Unresolved bool
 }
 
 func (s *ExprSlot) slotNode()     {}
 func (s *ExprSlot) GetID() SlotID { return s.ID }
 
-// ─── ConditionalSlot — ternary with JSX in branches ────────────────────────
+// ConditionalSlot - ternary with JSX in branches
 // Both branches are statically rendered (render-both) wrapped in togglable
 // wrapper elements. Hydration toggles their visibility based on the test.
 type ConditionalSlot struct {
@@ -123,21 +200,33 @@ type ConditionalSlot struct {
 	TestJS        string // JS expression for the ternary test (used to toggle)
 	Initial       string
 	InitialActive bool // whether the consequent branch is active initially
-	Consequent    []SlotNode
-	Alternate     []SlotNode
-	Signals       []string
+	// SVG marks a conditional inside an <svg>: its hoisted template is
+	// parsed in the SVG namespace (wrapped in an <svg> element).
+	SVG        bool
+	Consequent []SlotNode
+	Alternate  []SlotNode
+	Signals    []string
+	// Activity marks a React <Activity>: the Consequent is always in the page
+	// (inside a wrapper element) and TestJS only shows or hides it, keeping
+	// state while hidden.
+	Activity bool
 }
 
 func (s *ConditionalSlot) slotNode()     {}
 func (s *ConditionalSlot) GetID() SlotID { return s.ID }
 
-// ─── ListSlot — .map() rendering ───────────────────────────────────────────
+// ListSlot - .map() rendering
 type ListSlot struct {
 	ID         SlotID
 	ExprSource string
 	Items      []*ListItem
-	Keyed      bool
-	Signals    []string
+	// Keyed reports that the map callback returns keyed JSX: rows are matched
+	// by key on update instead of by index.
+	Keyed   bool
+	Signals []string
+	// Bind is the runtime list binding (see keyed.go); nil keeps the
+	// whole-region re-render of ExprSource.
+	Bind *ListBinding
 	// Components lists the client component names referenced by the list's
 	// map body JSX (e.g. <Toast> in toasts().map(t => <Toast/>)). These must
 	// be emitted into the hydration scope so the runtime `h()` call can invoke
@@ -148,14 +237,24 @@ type ListSlot struct {
 func (s *ListSlot) slotNode()     {}
 func (s *ListSlot) GetID() SlotID { return s.ID }
 
-// ListItem represents a single item in a ListSlot.
+// ListBinding is the hydration form of a list slot: krateBindList(slot,
+// () => Source, Key, Render, accessor ? 1 : 0).
+type ListBinding struct {
+	Source   string
+	Key      string
+	Render   string
+	Accessor bool
+}
+
+// ListItem represents a single item in a ListSlot. Key is the item's marker
+// key: "$" plus the folded key prop for keyed rows, or the index.
 type ListItem struct {
 	Key      string
 	Contents []SlotNode
 	Data     map[string]string
 }
 
-// ─── ComponentSlot — embedded child component instance ─────────────────────
+// ComponentSlot - embedded child component instance
 type ComponentSlot struct {
 	ID        SlotID
 	Component *ComponentNode
@@ -164,7 +263,7 @@ type ComponentSlot struct {
 func (s *ComponentSlot) slotNode()     {}
 func (s *ComponentSlot) GetID() SlotID { return s.ID }
 
-// ─── SuspenseMode — how a Suspense boundary is emitted ─────────────────────
+// SuspenseMode - how a Suspense boundary is emitted
 type SuspenseMode int
 
 const (
@@ -190,7 +289,7 @@ func (m SuspenseMode) String() string {
 	}
 }
 
-// ─── SuspenseSlot — streaming boundary ─────────────────────────────────────
+// SuspenseSlot - streaming boundary
 type SuspenseSlot struct {
 	ID       SlotID
 	Fallback []SlotNode
@@ -203,7 +302,7 @@ type SuspenseSlot struct {
 func (s *SuspenseSlot) slotNode()     {}
 func (s *SuspenseSlot) GetID() SlotID { return s.ID }
 
-// ─── MetaSlot — Head/Script/Style content routed to page metadata ──────────
+// MetaSlot - Head/Script/Style content routed to page metadata
 type MetaSlot struct {
 	ComponentName string
 	Children      []SlotNode
@@ -212,7 +311,7 @@ type MetaSlot struct {
 func (s *MetaSlot) slotNode()     {}
 func (s *MetaSlot) GetID() SlotID { return "" }
 
-// ─── ChildrenSlot — placeholder for {children} in layouts ──────────────────
+// ChildrenSlot - placeholder for {children} in layouts
 type ChildrenSlot struct {
 	Content string // filled by injectChildrenHTML at emit time
 }
@@ -220,41 +319,79 @@ type ChildrenSlot struct {
 func (s *ChildrenSlot) slotNode()     {}
 func (s *ChildrenSlot) GetID() SlotID { return "" }
 
-// ─── AttrBinding — dynamic attribute: <div class={expr()}> ─────────────────
+// AttrBinding - dynamic attribute: <div class={expr()}>
 type AttrBinding struct {
 	ElementSlotID SlotID
-	AttrName      string
-	SignalName    string
-	ExprSource    string
-	Initial       string
-	InitialExpr   ast.Expr
-	IsString      bool
+	// InLists names the list slots whose rows contain the element (see
+	// ComponentSignature.InLists).
+	InLists     []SlotID
+	AttrName    string
+	SignalName  string
+	ExprSource  string
+	Initial     string
+	InitialExpr ast.Expr
+	IsString    bool
+	// Prop is the JSX prop name (defaultValue, defaultChecked, ...) when it
+	// differs from AttrName, so form-control defaults bind the right property.
+	Prop string
+	// HydrateOnly marks a binding whose attribute is already rendered
+	// statically (a constant controlled value); only the hydration call is
+	// emitted.
+	HydrateOnly bool
+	// Guard is a JS condition the binding's expression may run under. An
+	// element inside a conditional's branch is bound while that branch is
+	// hidden (it sits in a template), and `user.url` under `{user && <a/>}`
+	// must not be evaluated while user is null. Empty means always.
+	Guard string
 }
 
-// ─── HandlerDecl — event handler: onClick={() => fn()} ─────────────────────
+// HandlerDecl - event handler: onClick={() => fn()}
 type HandlerDecl struct {
 	ElementSlotID SlotID
-	Event         string
-	Body          string
-	Signals       []string
+	// InLists names the list slots whose rows contain the element (see
+	// ComponentSignature.InLists).
+	InLists []SlotID
+	// Prop is the React prop name (onClick, onChangeCapture); the runtime maps
+	// it to native events, phases and delegation.
+	Prop    string
+	Event   string
+	Body    string
+	Signals []string
+	// Capture attaches a capture-phase listener (onClickCapture). Direct
+	// attaches a listener on the element itself (capture handlers and
+	// non-bubbling events), bypassing the delegated bubble-phase listener.
+	Capture bool
+	Direct  bool
+	// File and Pos locate the handler expression in its original source, for
+	// hydration source maps.
+	File string
+	Pos  ast.Pos
 }
 
-// ─── RefBinding — ref={someVar} on an element ──────────────────────────────
+// RefBinding - ref={someVar} on an element
 // RefBinding captures an element's `ref` attribute so the hydration bundle can
 // assign the live DOM node to the referenced variable after the page loads.
 // Target is the JS variable expression to assign (e.g. "wrapRef").
 type RefBinding struct {
 	ElementSlotID SlotID
-	// Target is the assignment target for object refs (`ref={myRef}` →
+	// InLists names the list slots whose rows contain the element (see
+	// ComponentSignature.InLists).
+	InLists []SlotID
+	// Target is the assignment target for object refs (`ref={myRef}` ->
 	// `myRef.current = el` or `myRef = el`). Mutually exclusive with Callback.
 	Target string
 	// Callback holds the full JS for callback refs (`ref={(el) => {...}}`).
 	// When set, the callback receives the mounted element directly and no
 	// assignment wrapper is generated. Mutually exclusive with Target.
 	Callback string
+	// Adaptive marks an identifier ref whose runtime value may be either a
+	// `{current}` ref object or a callback (e.g. a ref forwarded through props
+	// or params). The emitted setter invokes it as a function or assigns
+	// `.current` accordingly.
+	Adaptive bool
 }
 
-// ─── SignalDecl — per-instance signal declaration ──────────────────────────
+// SignalDecl - per-instance signal declaration
 type SignalDecl struct {
 	Name        string
 	SetterName  string
@@ -266,24 +403,39 @@ type SignalDecl struct {
 	// When non-empty it takes precedence over Initial/IsString so the client
 	// evaluates the real expression instead of a dropped/undefined value.
 	RawInit string
-	// FactoryJS is a complete JS factory call (`createReducer(…, …)`) emitted
+	// FactoryJS is a complete JS factory call (`createReducer(..., ...)`) emitted
 	// verbatim in place of `createSignal(...)`. Used for reactive primitives
 	// whose setter is not a plain createSignal write (e.g. createReducer's
 	// reducer dispatch). Empty for ordinary signals.
 	FactoryJS string
+	// OptionsJS is the second-argument source for `createSignal(value, options)`
+	// (e.g. `{ persist: 'key' }`), emitted verbatim so runtime persistence
+	// survives hydration. Empty when the signal has no options.
+	OptionsJS string
 }
 
-// ─── ComponentNode — a single component instance in the tree ───────────────
+// ComponentNode - a single component instance in the tree
 type ComponentNode struct {
-	ID    SlotID
-	Name  string
-	Tier  ComponentTier
-	Fn    *ast.FnDecl
-	Props map[string]ast.Expr
+	ID   SlotID
+	Name string
+	Tier ComponentTier
+	Fn   *ast.FnDecl
+	// Lazy marks an instance of a React.lazy() component (see LazyComponent).
+	// LazyLoader is set when its loader is not a static import.
+	Lazy       bool
+	LazyLoader string
+	Props      map[string]ast.Expr
 	// RuntimeProps holds resolved prop values for runtime-tier components
-	// (prop name → value). These are serialized into the page's runtime props
+	// (prop name -> value). These are serialized into the page's runtime props
 	// script so the serve-time renderer can pass them to the component.
 	RuntimeProps map[string]any
+	// ServerComponent marks a runtime-tier node whose component is an async
+	// function (a server component). Its region renders from the page server
+	// bundle instead of a standalone runtime component bundle.
+	ServerComponent bool
+	// Runtime selects the region render engine for a runtime-tier node: "" (Node
+	// SSR sidecar) or "go" (Go host, rendered via /__krate/gorender).
+	Runtime string
 
 	Signals      []SignalDecl
 	AttrBindings []AttrBinding
@@ -298,7 +450,11 @@ type ComponentNode struct {
 	// child must read them from the __krate_props registry at runtime, and any
 	// `var X = props.<funcProp>` local must be emitted as a live read of
 	// props.<funcProp> instead of being const-folded to the function's name.
-	FuncProps map[string]bool
+	// IslandBoot holds page-scope registration statements for external islands
+	// whose props come from this component's signals. They run inside the
+	// component IIFE so signal getters and setters are in scope.
+	IslandBoot []string
+	FuncProps  map[string]bool
 	// FuncPropAliases holds `var <local>=props.<funcProp>` declarations for
 	// locals that alias a function prop. They must be emitted after the
 	// `var props=__krate_props[...]` binding but before any effects/handlers
@@ -320,11 +476,34 @@ type ComponentNode struct {
 	InstanceID string
 	SourceFile string
 	Line       int
+	// Class marks a lowered React class component (see Annotations.IsLoweredClass).
+	Class bool
+	// Boundary marks a lowered class that is an error boundary.
+	Boundary bool
 
 	// SSR-evaluated components: prop-driven with no signals.
 	// The emitter uses SSREval to render these at build time.
 	IsSSREval       bool
-	SSREvalBindings map[string]string
+	SSREvalBindings map[string]jsvalue.Value
+	// UseIDs are the useId() values of the component's own body, in call
+	// order, as the local fold resolved them. SSREval hands out the same
+	// values so the HTML and the hydration code agree.
+	UseIDs []string
+	// SSREvalAttrs holds the call-site attribute expressions of an SSREval
+	// component, so props the IR folder cannot represent (JSX values) are
+	// evaluated by the SSR evaluator itself.
+	SSREvalAttrs map[string]ast.Expr
+	// ContextValues holds the build-time constant provider values (and
+	// folded defaults) in scope at this instance, keyed by context binding, so
+	// SSR evaluation reads the nearest provider instead of the default.
+	ContextValues map[string]jsvalue.Value
+	// childrenContext is the provider state at this instance's
+	// {props.children} placeholder, applied to its call-site children.
+	childrenContext *contextOverlay
+	// LocalVars holds build-time folded local constants (including cva/cn class
+	// strings); they are merged into SSREvalBindings so SSR-evaluated components
+	// resolve local variables such as `const classes = cn(cva(...))`.
+	LocalVars map[string]jsvalue.Value
 	// RestProps holds the call-site attributes collected by the component's
 	// rest parameter (e.g. `{ className, ...props }`), so SSREval can expand a
 	// `{...props}` spread on an intrinsic element. RestPropsName is that
@@ -357,7 +536,7 @@ type ComponentNode struct {
 	ReturnSlots []SlotNode
 }
 
-// ─── ComponentTree ─────────────────────────────────────────────────────────
+// ComponentTree
 type ComponentTree struct {
 	Root         *ComponentNode
 	HasLinks     bool
@@ -367,22 +546,55 @@ type ComponentTree struct {
 	// CVAFactories holds module-wide `const X = cva(...)` specs so the emitter
 	// can fold variant calls in prop-driven (SSREval) components.
 	CVAFactories map[string]*CVASpec
+	// ContextDefaults holds module-wide `const X = createContext(v)` defaults so
+	// the emitter can fold `X.useContext()` during SSREval.
+	ContextDefaults map[string]jsvalue.Value
+	// ModuleConstInits holds module-level constant initializers (entry module
+	// plus imports) so SSREval resolves module constants.
+	ModuleConstInits map[string]ast.Expr
+	// ModuleRun is what module-level statements that change bindings left
+	// behind, so SSREval reads the same values the builder folded.
+	ModuleRun *ModuleRun
+	// SharedModuleVars are `var NAME=init` declarations for module-level
+	// `let`/`var` bindings used by client code. They are emitted once at the
+	// top of the page script so every component closes over the same variable.
+	SharedModuleVars []string
+
+	// ExternalComponents are unresolved JSX components imported from bare npm
+	// packages. Krate cannot statically evaluate arbitrary React libraries, so
+	// the build emits a placeholder and a runtime bundle that mounts them.
+	ExternalComponents []ExternalComponent
+
+	// Warnings holds non-fatal problems collected while building the tree (for
+	// example, an unresolved component that will not render). Each carries the
+	// file:line:col of the offending node, its source line and a hint, with
+	// Severity set to diag.SeverityWarning. The build prints them to stderr.
+	Warnings []diag.Diagnostic
 
 	// CSSSignalsCSS is the generated stylesheet for every CSS signal scope
 	// compiled into this tree (empty when none). The build appends it to the
 	// page's own CSS so it lands in the hashed external stylesheet.
 	CSSSignalsCSS string
+	// HasCSSSignals is true when the tree compiled at least one CSS signal scope
+	// or condition. Unlike scanning the emitted CSS for a class prefix, this is
+	// authoritative and drives the per-variant stylesheet split and UA siblings.
+	HasCSSSignals bool
+	// NoJSFallbackCSS is the `@supports not selector(:has(*))` reveal-all rule
+	// (empty when none). The build wraps it in <noscript> for legacy/hybrid
+	// modes so panels stay visible when scripting is disabled on engines that
+	// also lack :has().
+	NoJSFallbackCSS string
 	// NeedsCSSARIA is true when a CSS signal scope uses a role that requires the
 	// tiny ARIA micro-runtime (tabs/listbox/disclosure) to keep synthesized
 	// aria-selected/aria-expanded in sync. False means the page stays zero-JS.
 	NeedsCSSARIA bool
 	// Errors holds hard errors for CSS signals that could not be compiled
-	// (unsupported trigger element, dynamic class, state read as text, …). A
+	// (unsupported trigger element, dynamic class, state read as text, ...). A
 	// non-empty set must fail the build: there is no fallback.
 	Errors []error
 }
 
-// ─── RuntimePropStore ──────────────────────────────────────────────────────
+// RuntimePropStore
 type RuntimePropStore struct {
 	Components map[string]any
 	Counter    int
@@ -394,7 +606,7 @@ func NewRuntimePropStore() *RuntimePropStore {
 	}
 }
 
-// ─── ComponentSignature — serializable metadata for SPA reconciliation ─────
+// ComponentSignature - serializable metadata for SPA reconciliation
 type ComponentSignature struct {
 	ComponentID     SlotID
 	Tier            ComponentTier
@@ -406,13 +618,65 @@ type ComponentSignature struct {
 	ExtraVars       []string
 	PreSignalVars   []string
 	FuncPropAliases []string
+	IslandBoot      []string
 	BodyUses        []string
 	Children        []SlotID
 	SlotBindings    []SlotBinding
 	AttrBindings    []AttrBinding
+	// Boundary is the stream ID of the innermost <Suspense> boundary whose
+	// content holds this instance ("" outside any boundary).
+	Boundary string
+	// Lazy marks an instance of a lazy() component; LazyName is its name.
+	// Its hydration code (and its descendants') is loaded as a separate chunk.
+	Lazy     bool
+	LazyName string
+	// InLists names the list slots whose rows contain this component. When
+	// such a list is bound at runtime the rows (and this component) are
+	// rendered and adopted by the list, so the signature is not hydrated.
+	InLists []SlotID
+
+	// ParentID is the enclosing client component, empty at the top level
+	// (React's parent fiber). Hydration declares it so React effects run
+	// children before parents and errors reach the nearest boundary.
+	ParentID SlotID
+	// Conds lists the conditional branches the component renders inside,
+	// outermost first. Effects of a component in a hidden branch are cleaned
+	// up and re-run when the branch is shown again.
+	Conds []CondBranch
+	// ListSlot is the innermost list slot whose items contain the component;
+	// replacing that list's content on the client unmounts the component.
+	ListSlot SlotID
+
+	// Owner-tree links for class pages (see renderer/owner_emit.go). Name is
+	// the component name; CreatorID the component whose render created this
+	// element (it differs from ParentID for props.children); CondID and
+	// OwnerBranch the innermost conditional slot and branch ("c" or "a").
+	Name        string
+	CreatorID   SlotID
+	CondID      SlotID
+	OwnerBranch string
+	// Class marks a lowered React class component; pages that render one use
+	// the owner tree.
+	Class bool
+
+	// RouteScope is the layout/template boundary id the component belongs to
+	// ("" for page components). The SPA router skips the hydration of scopes
+	// whose layout stayed mounted across a soft navigation.
+	RouteScope string
 }
 
-// ─── SlotBinding — describes a content binding for hydration ────────────────
+// CondBranch names one branch ("c" consequent, "a" alternate) of a
+// conditional slot and whether it is the branch rendered on the server.
+type CondBranch struct {
+	SlotID         SlotID
+	Branch         string
+	InitiallyShown bool
+	// Boundary marks a Suspense boundary's branch: the component's effects
+	// wait for the reveal, but it is not remounted.
+	Boundary bool
+}
+
+// SlotBinding - describes a content binding for hydration
 // SlotBinding maps a slot ID to its type and expression source, so the hydrate
 // code can generate createEffect calls to bind signals to DOM text nodes.
 type SlotBinding struct {
@@ -420,9 +684,14 @@ type SlotBinding struct {
 	Type    string   // "text", "expr", "conditional", "list"
 	ExprJS  string   // JS expression to evaluate (e.g. "count()" or "(x() > 0 ? ... : ...)")
 	Signals []string // signal names this binding depends on
+	// List is set for list slots bound through the keyed list runtime.
+	List *ListBinding
+	// File and Pos locate the bound expression in its source, when known.
+	File string
+	Pos  ast.Pos
 }
 
-// ─── Helpers ───────────────────────────────────────────────────────────────
+// Helpers
 
 // itoa is a simple int-to-string conversion.
 func itoa(i int) string {
@@ -435,4 +704,58 @@ func sanitizeTagName(name string) string {
 	name = strings.ReplaceAll(name, "/", "-")
 	name = strings.ReplaceAll(name, ":", "-")
 	return name
+}
+
+// ExternalImport records a binding imported from a bare npm package.
+type ExternalImport struct {
+	Source    string
+	Local     string
+	Remote    string
+	Default   bool
+	Namespace bool
+	// ReactIsland marks a binding from a user module that needs React's render
+	// model (it calls hooks of an npm React library). Source is then the
+	// module's absolute path and the tag renders as an island bundling it.
+	ReactIsland bool
+	// ClientOnly skips the build-time server render of the island.
+	ClientOnly bool
+}
+
+// ExternalComponent is an unresolved package component that is mounted at
+// runtime instead of being statically rendered.
+type ExternalComponent struct {
+	ID      string
+	Source  string
+	Local   string
+	Members []string
+	// Namespace is set when Local is a namespace import.
+	Namespace bool
+	Props     map[string]any
+	// Subtree is the serialized JSX for the whole external subtree (captured at
+	// the topmost external component), rendered by the runtime island.
+	Subtree string
+	// PropsJS is a JS object literal of page-scope signal values the subtree
+	// reads (key -> value expression), evaluated in the page's hydration scope.
+	PropsJS string
+	// SSRPropsJS is the build-time initial-value object used for server
+	// rendering. SSRPropsKnown is false when a prop only exists at runtime
+	// (for example an unknown signal initial or a function-valued prop), in
+	// which case the island stays client-only.
+	SSRPropsJS    string
+	SSRPropsKnown bool
+	// ReactIsland is set when the island runs a user module that needs React's
+	// render model (see ExternalImport.ReactIsland).
+	ReactIsland bool
+	// ClientOnly means the island has no server render: its package creates
+	// the markup (styles) in the browser.
+	ClientOnly bool
+	// Hydrate is the client directive that defers mounting: "" (at load),
+	// "visible" or "idle".
+	Hydrate string
+	// File/Line/Col locate the usage for diagnostics; Offset is the byte offset
+	// of the island's opening `<` in File.
+	File   string
+	Line   int
+	Col    int
+	Offset int
 }

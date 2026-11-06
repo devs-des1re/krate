@@ -7,15 +7,17 @@
   "type": "module",
   "scripts": {
     "dev": "krate dev",
-    "build": "krate build",
+    "build": "krate build && node scripts/check-output.mjs",
     "serve": "krate serve",
     "preview": "krate serve",
+    "typecheck": "tsc --noEmit",
     "test:docs": "krate build"
   },
   "devDependencies": {
     "@krate/base-docs-theme": "workspace:*",
-    "@krate/components": "0.4.0-beta.2",
-    "@krate/core": "0.4.0-beta.2",
-    "@krate/runtime": "0.4.0-beta.2"
+    "@krate/components": "0.5.0-alpha.4",
+    "@krate/core": "0.5.0-alpha.4",
+    "@krate/runtime": "0.5.0-alpha.4",
+    "typescript": "^5.5.0"
   }
 }

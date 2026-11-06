@@ -1,7 +1,7 @@
 ---
 title: Welcome to Krate
 order: 1
-description: Krate is a Go-native static site generator with signal-based reactivity. Compiles TSX/JSX to static HTML in milliseconds with a tiny client hydration bundle.
+description: Krate is a Go-native static site generator with signal-based reactivity. Compiles TSX/JSX to static HTML in milliseconds with a small client hydration bundle.
 sidebar:
   label: Overview
   order: 1
@@ -22,44 +22,29 @@ categories:
   - general
 ---
 
-**Krate** is a Go-native static site generator with signal-based reactivity. It
-compiles TSX/JSX pages into static HTML at build time and generates a tiny
-hydration bundle that makes pages interactive on the client.
+:::warning Active development
+Krate is under **active development** and is not yet stable. APIs, generated
+output, and configuration may change between releases.
+:::
 
-No React. No external bundler subprocess. No Node.js required for core
-compilation. The compiler — lexer, parser, bundler, renderer, CSS pipeline and
-Tailwind generator — is 100% custom Go, and builds run in milliseconds.
+**Krate** compiles TSX/JSX pages into static HTML at build time and generates a
+small hydration bundle (about 25 KB gzipped for a counter page) that makes
+pages interactive on the client. Builds run in
+milliseconds on a single Go binary with no bundler subprocess, and a static
+site needs no Node.js to build (Node is used by the npm wrapper,
+`generateStaticParams`, and the SSR and API-route sidecars).
 
 ## Highlights
 
-- **Go-native compiler** — a custom lexer, parser, bundler, and renderer. Builds run in milliseconds.
-- **Signals, not React** — fine-grained reactivity with `createSignal` / `createEffect` / `createMemo`.
-- **SSG-first** — every page is pre-rendered to static HTML. Hydration binds signals to the DOM via `data-k`/`data-kh` markers.
-- **File-based routing** — `src/pages/` maps to URLs, with nested routes, dynamic segments (`[param]`), and `_layout.tsx` layouts.
-- **Component tiers** — static, client, server (`@server`), and runtime (`@runtime`, rendered at request time by the sidecar) components in one page.
-- **Full CSS pipeline** — CSS Modules (FNV-32a scoping), Go-native Tailwind, minification, and `@import` inlining.
-- **SSG-first shells with SSR, ISR & streaming** — every page is a static shell; ISR revalidates cached page bodies and streaming resolves dynamic regions per request.
-- **SPA router** — client-side navigation with DOM tree reconciliation; state, focus, and scroll survive transitions.
-- **Plugin system** — Go plugin hooks plus community plugins written in JavaScript or TypeScript, executed inside the embedded QuickJS runtime and typed with `@krate/plugin`.
-- **Docs search** — the docs plugin ships a search bar that uses [Pagefind](https://pagefind.app) by default for a chunked, streamed index, with the docfind WASM engine used during development builds.
-
-## How it works
-
-```
-Source (.tsx/.ts/.md/.mdx)
-        │
-        ▼
-    Lexer (tokenize) ──► Parser (AST) ──► Bundler (imports, CSS modules, React rewrite)
-        │
-        ▼
-    Renderer (SSR: AST → HTML + signal/handler detection)
-        │
-        ▼
-    Hydration Codegen (signals → JS bundle with data-k/data-kh bindings)
-        │
-        ▼
-    Build Output (HTML + hashed JS + hashed CSS + manifest.json)
-```
+- **Static by default** - every page is pre-rendered to static HTML; hydration binds signals to the DOM via `data-k`/`data-kh` markers only where needed.
+- **Fine-grained signals** - `createSignal` / `createEffect` / `createMemo`, with no virtual DOM.
+- **File-based routing** - `src/pages/` maps to URLs, with nested routes, dynamic segments (`[param]`), and `_layout.tsx` layouts.
+- **Component tiers** - static, client, server (`@server`), and runtime (`@runtime`, rendered at request time by the sidecar) components in one page.
+- **Full CSS pipeline** - CSS Modules (FNV-32a scoping), Go-native Tailwind, minification, and `@import` inlining.
+- **SSR, ISR & streaming** - every page is a static shell; ISR revalidates cached page bodies and streaming resolves dynamic regions per request.
+- **SPA router** - client-side navigation with DOM tree reconciliation; state, focus, and scroll survive transitions.
+- **Plugin system** - Go plugin hooks plus community plugins written in JavaScript or TypeScript, executed inside the embedded QuickJS runtime and typed with `@krate/plugin`.
+- **Docs search** - the docs plugin ships a search bar that uses [Pagefind](https://pagefind.app) by default for a chunked, streamed index, with the docfind WASM engine used during development builds.
 
 ## A taste
 
@@ -80,6 +65,9 @@ export default function Counter() {
 The `<span>{count()}</span>` becomes server-rendered HTML at build time, and the
 hydration bundle registers an effect that updates just that text node when
 `setCount` is called.
+
+Curious how the compiler turns that source into HTML? See
+[Contributing -> Architecture](/docs/contributing/architecture/).
 
 ## Where to go next
 

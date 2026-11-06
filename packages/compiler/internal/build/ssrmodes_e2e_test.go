@@ -32,21 +32,21 @@ func TestBuildServerModesManifestE2E(t *testing.T) {
 	}
 
 	pages := map[string]string{
-		// Plain SSG — must NOT appear in the server manifest.
+		// Plain SSG - must NOT appear in the server manifest.
 		"index.tsx": `export default function P() { return <div>home</div>; }`,
 		// Explicit ISR with revalidate.
 		"isr.tsx": "export const config = { isr: true, revalidate: 30 };\nexport default function P() { return <div>isr</div>; }",
-		// ISR without revalidate → defaults to 60s.
+		// ISR without revalidate -> defaults to 60s.
 		"isr-default.tsx": "export const config = { isr: true };\nexport default function P() { return <div>isr-default</div>; }",
 		// Explicit SSR.
 		"ssr.tsx": "export const config = { ssr: true };\nexport default function P() { return <div>ssr</div>; }",
 		// Explicit streaming config.
 		"streaming.tsx": "export const config = { streaming: true };\nexport default function P() { return <div>streaming</div>; }",
-		// <Suspense> usage without config → auto streaming.
+		// <Suspense> usage without config -> auto streaming.
 		"suspense.tsx": "export default function P() { return <Suspense fallback={<span>load</span>}><div>resolved</div></Suspense>; }",
 		// isr beats streaming in precedence.
 		"precedence.tsx": "export const config = { isr: true, streaming: true, revalidate: 5 };\nexport default function P() { return <div>precedence</div>; }",
-		// A runtime component inside a <Suspense> boundary → a streaming page
+		// A runtime component inside a <Suspense> boundary -> a streaming page
 		// that owns a suspense-primary region. The page is marked // @server so
 		// importing the *.runtime.tsx component is a legal composition.
 		"live.tsx": "// @server\nimport { Live } from '../Live.runtime'; export default function P() { return <Suspense fallback={<span>loading</span>}><Live name=\"world\" /></Suspense>; }",
@@ -57,7 +57,7 @@ func TestBuildServerModesManifestE2E(t *testing.T) {
 		}
 	}
 
-	// A *.runtime.tsx component under src/ — the file convention tiers it
+	// A *.runtime.tsx component under src/ - the file convention tiers it
 	// runtime, so it is a valid suspense-primary region target. Arrow-fn form:
 	// the annotator must collect `export const` components like FnDecls.
 	runtimeSrc := "export const Live = ({ name }: any) => <p>live {name}</p>;"
@@ -78,7 +78,7 @@ func TestBuildServerModesManifestE2E(t *testing.T) {
 	outDir := cfg.OutDir
 
 	// Full manifest: every page (including ssg) appears with its mode.
-	manData, err := os.ReadFile(filepath.Join(outDir, "manifest.json"))
+	manData, err := os.ReadFile(ManifestPath(outDir))
 	if err != nil {
 		t.Fatalf("reading manifest.json: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestBuildServerModesManifestE2E(t *testing.T) {
 	}
 
 	// Server manifest: only non-SSG pages, with string modes + revalidate.
-	srvData, err := os.ReadFile(filepath.Join(outDir, "server-manifest.json"))
+	srvData, err := os.ReadFile(ServerManifestPath(outDir))
 	if err != nil {
 		t.Fatalf("reading server-manifest.json: %v", err)
 	}
@@ -166,7 +166,31 @@ func TestBuildServerModesManifestE2E(t *testing.T) {
 	if info, err := os.Stat(filepath.Join(outDir, ".krate", "ssr-bundles")); err == nil && info.IsDir() {
 		t.Error(".krate/ssr-bundles (orphaned QuickJS SSR) still exists")
 	}
+	// Only pages that need the Node renderer (SSR/ISR, or any non-Go dynamic
+	// region) get a compiled server bundle; a streaming page with no dynamic
+	// regions is served statically and has none.
+	var bundleManifest Manifest
+	if data, err := os.ReadFile(ManifestPath(outDir)); err == nil {
+		_ = json.Unmarshal(data, &bundleManifest)
+	}
+	needsNode := func(route, mode string) bool {
+		if mode == "ssr" || mode == "isr" {
+			return true
+		}
+		for _, reg := range bundleManifest.Regions[route] {
+			if reg.Runtime != "go" {
+				return true
+			}
+		}
+		return false
+	}
 	for _, p := range srvMan.Pages {
+		if !needsNode(p.Route, p.Mode) {
+			if p.BundlePath != "" {
+				t.Errorf("route %s has a server bundle but does not need the Node renderer", p.Route)
+			}
+			continue
+		}
 		if p.BundlePath == "" {
 			t.Errorf("route %s has empty bundlePath", p.Route)
 			continue
@@ -184,7 +208,7 @@ func TestBuildServerModesManifestE2E(t *testing.T) {
 	// Region registry: the /live page owns a suspense-primary region backed by
 	// the Live runtime component.
 	var fullMan2 Manifest
-	manData2, err := os.ReadFile(filepath.Join(outDir, "manifest.json"))
+	manData2, err := os.ReadFile(ManifestPath(outDir))
 	if err != nil {
 		t.Fatalf("re-reading manifest.json: %v", err)
 	}
@@ -200,7 +224,7 @@ func TestBuildServerModesManifestE2E(t *testing.T) {
 		if r.Component == "Live" && r.Suspense && strings.HasSuffix(r.SourcePath, "Live.runtime.tsx") {
 			found = true
 			// The region is backed by the already-compiled runtime component
-			// bundle (no per-region esbuild pass) — the sidecar loads this
+			// bundle (no per-region esbuild pass) - the sidecar loads this
 			// bundle and calls __krate_render(props) to render the region.
 			if !strings.HasSuffix(r.BundlePath, "Live.runtime.js") {
 				t.Errorf("expected region BundlePath to point at the compiled runtime bundle, got %q", r.BundlePath)
@@ -220,7 +244,7 @@ func TestBuildServerModesManifestE2E(t *testing.T) {
 	var srvMan2 struct {
 		Regions map[string][]RegionMeta `json:"regions"`
 	}
-	srvData2, err := os.ReadFile(filepath.Join(outDir, "server-manifest.json"))
+	srvData2, err := os.ReadFile(ServerManifestPath(outDir))
 	if err != nil {
 		t.Fatalf("re-reading server-manifest.json: %v", err)
 	}
@@ -343,8 +367,8 @@ export default function VideoPage(props) {
 		t.Fatalf("starting renderer: %v", err)
 	}
 	defer func() {
-		cmd.Process.Kill()
-		cmd.Wait()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
 	}()
 
 	base := fmt.Sprintf("http://localhost:%d", port)
@@ -358,7 +382,7 @@ export default function VideoPage(props) {
 		t.Fatalf("first alpha render: cacheStatus=%q cached=%v, want miss", alpha1.cacheStatus, alpha1.cached)
 	}
 
-	// 2. Same variant → hit with byte-identical HTML.
+	// 2. Same variant -> hit with byte-identical HTML.
 	alpha2 := isrRender(t, base, "/video/[id]", "video/alpha", map[string]string{"id": "alpha"})
 	if alpha2.cacheStatus != "hit" || !alpha2.cached {
 		t.Fatalf("alpha re-render: cacheStatus=%q cached=%v, want hit", alpha2.cacheStatus, alpha2.cached)
@@ -367,16 +391,16 @@ export default function VideoPage(props) {
 		t.Fatalf("hit returned different HTML:\n%q\nvs\n%q", alpha2.html, alpha1.html)
 	}
 
-	// 3. A different variant is keyed separately → miss, different HTML.
+	// 3. A different variant is keyed separately -> miss, different HTML.
 	beta := isrRender(t, base, "/video/[id]", "video/beta", map[string]string{"id": "beta"})
 	if beta.cacheStatus != "miss" || beta.cached {
 		t.Fatalf("beta render: cacheStatus=%q cached=%v, want miss", beta.cacheStatus, beta.cached)
 	}
 	if beta.html == alpha1.html {
-		t.Fatalf("beta and alpha rendered identical HTML — variant key collision?")
+		t.Fatalf("beta and alpha rendered identical HTML - variant key collision?")
 	}
 
-	// 4. Alpha unaffected by beta render → still a hit.
+	// 4. Alpha unaffected by beta render -> still a hit.
 	alpha3 := isrRender(t, base, "/video/[id]", "video/alpha", map[string]string{"id": "alpha"})
 	if alpha3.cacheStatus != "hit" || alpha3.html != alpha1.html {
 		t.Fatalf("alpha after beta: cacheStatus=%q, want hit with original HTML", alpha3.cacheStatus)
@@ -404,6 +428,9 @@ export default function VideoPage(props) {
 	// called the destructive /__krate/ssr/revalidate endpoint (deleteRoute +
 	// render the paramless base), so every dynamic variant was wiped and the
 	// next request that should have been a HIT came back MISS.
+	// The refresh only re-renders variants older than the window, so let the
+	// freshly revalidated entries age past it first.
+	time.Sleep(2600 * time.Millisecond)
 	postRefresh := postJSON(t, base, "/__krate/ssr/refresh", `{"route":"/video/[id]"}`)
 	if postRefresh.status != 200 {
 		t.Fatalf("refresh endpoint status %d: %s", postRefresh.status, postRefresh.body)
@@ -430,7 +457,7 @@ export default function VideoPage(props) {
 		t.Errorf("persisted cache missing alpha variant key:\n%s", data)
 	}
 
-	// 8. /__krate/ssr/revalidate clears the whole route → next render is a miss.
+	// 8. /__krate/ssr/revalidate clears the whole route -> next render is a miss.
 	post := postJSON(t, base, "/__krate/ssr/revalidate", `{"route":"/video/[id]"}`)
 	if post.status != 200 {
 		t.Fatalf("revalidate endpoint status %d: %s", post.status, post.body)
@@ -452,10 +479,10 @@ type isrResult struct {
 
 // regionFrames holds the parsed NDJSON frames from a /__krate/regions stream.
 type regionFrames struct {
-	regions     map[string]string // region ID → HTML
-	errors      map[string]string // region ID → error text
-	cacheStatus map[string]string // region ID → hit/stale/miss (page kind)
-	titles      map[string]string // region ID → fresh <title> (page kind)
+	regions     map[string]string // region ID -> HTML
+	errors      map[string]string // region ID -> error text
+	cacheStatus map[string]string // region ID -> hit/stale/miss (page kind)
+	titles      map[string]string // region ID -> fresh <title> (page kind)
 	count       int
 }
 
@@ -475,7 +502,15 @@ func postRegionsList(t *testing.T, base, route, url string, params map[string]st
 		body["regions"] = regions
 	}
 	data, _ := json.Marshal(body)
-	resp, err := http.Post(base+"/__krate/regions", "application/json", bytes.NewReader(data))
+	req, err := http.NewRequest(http.MethodPost, base+"/__krate/regions", bytes.NewReader(data))
+	if err != nil {
+		t.Fatalf("regions request: %v", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if secret := os.Getenv("KRATE_TEST_INTERNAL_SECRET"); secret != "" {
+		req.Header.Set("X-Krate-Internal", secret)
+	}
+	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("regions request: %v", err)
 	}
@@ -527,7 +562,7 @@ func postRegionsList(t *testing.T, base, route, url string, params map[string]st
 
 // TestRegionSidecarE2E builds a streaming page that owns a suspense-primary
 // region (a runtime component inside <Suspense>), boots the staged SSR sidecar,
-// and verifies /__krate/regions renders ONLY that region — never the page — as
+// and verifies /__krate/regions renders ONLY that region - never the page - as
 // NDJSON frames carrying the runtime component's rendered HTML.
 func TestRegionSidecarE2E(t *testing.T) {
 	node, err := exec.LookPath("node")
@@ -569,7 +604,7 @@ func TestRegionSidecarE2E(t *testing.T) {
 	outDir := cfg.OutDir
 
 	// The static shell must contain the suspense splice marker with the baked
-	// fallback — the Go server splices the region HTML in there later.
+	// fallback - the Go server splices the region HTML in there later.
 	shell, err := os.ReadFile(filepath.Join(outDir, "live", "index.html"))
 	if err != nil {
 		t.Fatal(err)
@@ -587,7 +622,7 @@ func TestRegionSidecarE2E(t *testing.T) {
 	cmd := exec.Command(node, staged)
 	cmd.Env = append(os.Environ(),
 		fmt.Sprintf("KRATE_SSR_PORT=%d", port),
-		fmt.Sprintf("KRATE_MANIFEST=%s", filepath.Join(outDir, "server-manifest.json")),
+		fmt.Sprintf("KRATE_MANIFEST=%s", ServerManifestPath(outDir)),
 		fmt.Sprintf("KRATE_ROOT=%s", root),
 	)
 	cmd.Stdout = os.Stdout
@@ -596,8 +631,8 @@ func TestRegionSidecarE2E(t *testing.T) {
 		t.Fatalf("starting renderer: %v", err)
 	}
 	defer func() {
-		cmd.Process.Kill()
-		cmd.Wait()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
 	}()
 
 	base := fmt.Sprintf("http://localhost:%d", port)
@@ -619,7 +654,7 @@ func TestRegionSidecarE2E(t *testing.T) {
 			t.Errorf("region HTML %q missing rendered component output", html)
 		}
 		if strings.Contains(html, "loading") {
-			t.Errorf("region HTML %q contains the fallback — region must render the primary", html)
+			t.Errorf("region HTML %q contains the fallback - region must render the primary", html)
 		}
 	}
 	if got == "" && len(frames.errors) > 0 {
@@ -675,7 +710,7 @@ func TestNestedRuntimeSuspenseSidecarE2E(t *testing.T) {
 	outDir := cfg.OutDir
 
 	// The shell bakes the resolved wrapper and a standalone runtime region
-	// marker inside the suspense markers — never an empty/unrenderable region.
+	// marker inside the suspense markers - never an empty/unrenderable region.
 	shell, err := os.ReadFile(filepath.Join(outDir, "nested", "index.html"))
 	if err != nil {
 		t.Fatal(err)
@@ -690,7 +725,7 @@ func TestNestedRuntimeSuspenseSidecarE2E(t *testing.T) {
 
 	// The manifest region for the nested runtime component must be resolvable
 	// (component + bundle linked).
-	manData, err := os.ReadFile(filepath.Join(outDir, "manifest.json"))
+	manData, err := os.ReadFile(ManifestPath(outDir))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -711,7 +746,7 @@ func TestNestedRuntimeSuspenseSidecarE2E(t *testing.T) {
 	cmd := exec.Command(node, staged)
 	cmd.Env = append(os.Environ(),
 		fmt.Sprintf("KRATE_SSR_PORT=%d", port),
-		fmt.Sprintf("KRATE_MANIFEST=%s", filepath.Join(outDir, "server-manifest.json")),
+		fmt.Sprintf("KRATE_MANIFEST=%s", ServerManifestPath(outDir)),
 		fmt.Sprintf("KRATE_ROOT=%s", root),
 	)
 	cmd.Stdout = os.Stdout
@@ -720,8 +755,8 @@ func TestNestedRuntimeSuspenseSidecarE2E(t *testing.T) {
 		t.Fatalf("starting renderer: %v", err)
 	}
 	defer func() {
-		cmd.Process.Kill()
-		cmd.Wait()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
 	}()
 
 	base := fmt.Sprintf("http://localhost:%d", port)
@@ -773,7 +808,7 @@ func TestPageRegionSidecarE2E(t *testing.T) {
 		t.Fatal(err)
 	}
 	// ISR dynamic page: whole body + <title> depend on the route param. No
-	// <Suspense>, no runtime components → mode ISR, coarse "page" region.
+	// <Suspense>, no runtime components -> mode ISR, coarse "page" region.
 	isr := `export const config = { isr: true, revalidate: 2 };
 export default function V(props: any) {
   const id = (props.params && props.params.id) || "unknown";
@@ -796,7 +831,7 @@ export default function V(props: any) {
 	// server). Link the monorepo package into the temp project so node resolves
 	// it at import time, like a real installed dependency.
 	nodeModules := filepath.Join(root, "node_modules")
-	os.MkdirAll(nodeModules, 0755)
+	_ = os.MkdirAll(nodeModules, 0755)
 	if err := linkRuntimePackage(t, filepath.Join(nodeModules, "@krate")); err != nil {
 		t.Fatal(err)
 	}
@@ -819,7 +854,7 @@ export default function V(props: any) {
 	cmd := exec.Command(node, staged)
 	cmd.Env = append(os.Environ(),
 		fmt.Sprintf("KRATE_SSR_PORT=%d", port),
-		fmt.Sprintf("KRATE_MANIFEST=%s", filepath.Join(outDir, "server-manifest.json")),
+		fmt.Sprintf("KRATE_MANIFEST=%s", ServerManifestPath(outDir)),
 		fmt.Sprintf("KRATE_ROOT=%s", root),
 	)
 	cmd.Stdout = os.Stdout
@@ -828,8 +863,8 @@ export default function V(props: any) {
 		t.Fatalf("starting renderer: %v", err)
 	}
 	defer func() {
-		cmd.Process.Kill()
-		cmd.Wait()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
 	}()
 
 	base := fmt.Sprintf("http://localhost:%d", port)
@@ -855,7 +890,7 @@ export default function V(props: any) {
 		t.Errorf("first page-region render cacheStatus = %q, want miss", frames.cacheStatus["page"])
 	}
 
-	// Second identical request → hit with byte-identical HTML (region ISR cache
+	// Second identical request -> hit with byte-identical HTML (region ISR cache
 	// is the page ISR cache keyed by route+variant).
 	frames2 := postRegionsList(t, base, "/v", "/v/abc", map[string]string{"id": "abc"}, []map[string]string{{"id": "page", "kind": "page"}})
 	if frames2.regions["page"] != html {
@@ -871,7 +906,7 @@ export default function V(props: any) {
 // pattern route (/video/[id]) which is what the sidecar receives, with the
 // concrete param forwarded separately. Verifies the shell lives under the
 // [id] pattern dir with the coarse marker and that the page region renders the
-// param (variant-aware ISR cache miss → hit).
+// param (variant-aware ISR cache miss -> hit).
 func TestDynamicPageRegionSidecarE2E(t *testing.T) {
 	ensureRuntimeDist(t)
 	node, err := exec.LookPath("node")
@@ -909,7 +944,7 @@ export default function VideoPage(props: any) {
 	outDir := cfg.OutDir
 
 	nodeModules := filepath.Join(root, "node_modules")
-	os.MkdirAll(nodeModules, 0755)
+	_ = os.MkdirAll(nodeModules, 0755)
 	if err := linkRuntimePackage(t, filepath.Join(nodeModules, "@krate")); err != nil {
 		t.Fatal(err)
 	}
@@ -932,7 +967,7 @@ export default function VideoPage(props: any) {
 	cmd := exec.Command(node, staged)
 	cmd.Env = append(os.Environ(),
 		fmt.Sprintf("KRATE_SSR_PORT=%d", port),
-		fmt.Sprintf("KRATE_MANIFEST=%s", filepath.Join(outDir, "server-manifest.json")),
+		fmt.Sprintf("KRATE_MANIFEST=%s", ServerManifestPath(outDir)),
 		fmt.Sprintf("KRATE_ROOT=%s", root),
 	)
 	cmd.Stdout = os.Stdout
@@ -941,8 +976,8 @@ export default function VideoPage(props: any) {
 		t.Fatalf("starting renderer: %v", err)
 	}
 	defer func() {
-		cmd.Process.Kill()
-		cmd.Wait()
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
 	}()
 
 	base := fmt.Sprintf("http://localhost:%d", port)

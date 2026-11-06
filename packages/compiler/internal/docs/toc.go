@@ -2,8 +2,8 @@ package docs
 
 import (
 	"fmt"
+	"html"
 	"strings"
-	"unicode"
 
 	"github.com/kratejs/krate/packages/compiler/internal/escape"
 )
@@ -16,14 +16,14 @@ type TOCItem struct {
 }
 
 // ExtractTOC parses rendered HTML and extracts the default heading range
-// (h2–h3) for the TOC sidebar.
+// (h2-h3) for the TOC sidebar.
 func ExtractTOC(html string) []TOCItem {
 	return ExtractTOCLevels(html, 2, 3)
 }
 
 // ExtractTOCLevels parses rendered HTML and extracts headings with levels in
-// the inclusive [minLevel, maxLevel] range (2–6). Levels outside 1–6 and an
-// empty range are clamped to the defaults (2–3).
+// the inclusive [minLevel, maxLevel] range (2-6). Levels outside 1-6 and an
+// empty range are clamped to the defaults (2-3).
 func ExtractTOCLevels(html string, minLevel, maxLevel int) []TOCItem {
 	if minLevel < 2 {
 		minLevel = 2
@@ -120,7 +120,7 @@ func InjectHeadingAnchors(html string) string {
 					out.WriteString(html[start : tagEnd+1])
 					out.WriteString("<a href=\"#")
 					out.WriteString(escapedID)
-					out.WriteString("\" class=\"heading-anchor\" aria-label=\"Link to this section\">#</a>")
+					out.WriteString("\" class=\"heading-anchor\" data-pagefind-ignore aria-label=\"Link to this section\">#</a>")
 					out.WriteString(content)
 					out.WriteString(html[closeIdx : closeIdx+5])
 					pos = closeIdx + 5
@@ -165,15 +165,7 @@ func stripInlineHTML(s string) string {
 			out.WriteRune(r)
 		}
 	}
-	return strings.TrimSpace(out.String())
-}
-
-// HasLetters checks if a string contains any letter characters.
-func HasLetters(s string) bool {
-	for _, r := range s {
-		if unicode.IsLetter(r) {
-			return true
-		}
-	}
-	return false
+	// Decode entities so a heading `Components &amp; helpers` yields the plain
+	// text `Components & helpers` in the TOC/search index (not `&amp;`).
+	return strings.TrimSpace(html.UnescapeString(out.String()))
 }

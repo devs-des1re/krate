@@ -1,5 +1,6 @@
 ---
 title: Reactivity
+description: Signals, effects, memos, context, and async resources in the Krate runtime.
 order: 2
 ---
 
@@ -49,7 +50,7 @@ doubled(); // memoized until count changes
 ```
 
 A memo caches its computed value and only recomputes when its dependencies
-change. Only the final consumer re-renders — the memo itself is cached.
+change. Only the final consumer re-renders - the memo itself is cached.
 
 ## Cleanup & mount
 
@@ -73,9 +74,9 @@ import { createContext } from '@krate/runtime';
 
 const ThemeCtx = createContext('light');
 
-// ThemeCtx.Provider — wraps children with a value
-// ThemeCtx.useContext() — reads the nearest provider value
-// ThemeCtx.defaultValue — fallback when no provider is present
+// ThemeCtx.Provider - wraps children with a value
+// ThemeCtx.useContext() - reads the nearest provider value
+// ThemeCtx.defaultValue - fallback when no provider is present
 ```
 
 ## Resources
@@ -101,7 +102,7 @@ in-flight requests when the source changes mid-flight.
 
 ## Conditional rendering (`showIf`)
 
-For conditionally rendering an element, Krate supports a `showIf` prop — sugar
+For conditionally rendering an element, Krate supports a `showIf` prop - sugar
 for the `{expr && <el/>}` guard:
 
 ```tsx
@@ -121,231 +122,99 @@ const [count] = createSignal(0);
   emitted); a reactive test becomes part of the hydration bundle and toggles the
   element's visibility as the signal changes.
 
-## CSS Signals
+## Passing signals as props
 
-Krate provides three **zero-JS** state primitives compiled entirely to hidden
-`<input>` controllers, `<label>` triggers, and `:has()` CSS. They ship no
-JavaScript at all — the state lives in the DOM and the cascade:
-
-| Primitive | Shape | Underlying control |
-|-----------|-------|--------------------|
-| `createCSSChoice(initial, options?)` | one-of-N | radio group |
-| `createCSSToggle(initial)` | on/off | single checkbox |
-| `createCSSFlags([...])` | N independent booleans | checkbox per flag |
-| `createCSSGroup(initial \| null, opts?)` | optional one-of-N | radio group + closed sentinel |
-| `createCSSRange(initial, { min, max, step })` | discrete number | indexed radio chain |
-| `createCSSStack(['root'], opts?)` | navigation path | nested radio levels |
-
-### `createCSSChoice` — mutually-exclusive state
+A prop whose value reads a signal stays live in the child. The compiler passes
+it as a getter, so every `props.<name>` read (in rendered JSX, effects, memos
+and handlers) sees the current value:
 
 ```tsx
-import { createCSSChoice } from '@krate/runtime';
+function Badge(props: { label: string }) {
+  return <span>{props.label}</span>; // updates when count changes
+}
 
-function Tabs() {
-  const [tab, setTab] = createCSSChoice('overview');
-
-  return (
-    <div>
-      <button onClick={() => setTab('overview')}>Overview</button>
-      <button onClick={() => setTab('features')}>Features</button>
-
-      <div showIf={tab() === 'overview'}>Overview content</div>
-      <div showIf={tab() === 'features'}>Features content</div>
-    </div>
-  );
+export default function Page() {
+  const [count, setCount] = createSignal(0);
+  return <Badge label={`clicked ${count()} times`} />;
 }
 ```
 
-The setter may only be called with a **literal** from an `onClick` handler;
-those literals (plus the initial value) define the option universe. Pass an
-explicit array to override: `createCSSChoice('a', ['a', 'b', 'c'])`. Panels use
-the same `showIf` prop with a `tab() === 'x'` test.
+Destructured parameters stay live too: `function Badge({ label, tone = "x",
+...rest })` is compiled as if it read `props.label`, `props.tone` (with the
+default applied when the prop is `undefined`) and `props` minus the listed
+keys on every use, so `<Badge label={...} />` follows a signal-derived value.
+The same holds for `const { label, ...rest } = props` at the top of the body.
+A destructuring the compiler cannot lower this way (a destructured name that
+is reassigned, used as a JSX tag, or a rest object used for anything but
+`{...rest}` and `rest.x`) still reads the value once; the build warns when a
+signal-derived prop reaches such a parameter, and the fix is to read
+`props.label` or pass an accessor (`label={() => ...}`).
 
-### `createCSSToggle` — a single boolean
+Custom hooks are plain functions: a call such as `useTitle("Home")` runs once
+per component instance during hydration, in source order with the rest of the
+component body. In a React source module, a project custom hook called with an
+argument that reads state (`useDebounce(value, 300)`, `useDocumentTitle("n" +
+n)`) receives the argument as a live getter that the hook's parameters read
+through, so its effects, memos and state initializers follow the argument.
 
-```tsx
-const [dark, setDark] = createCSSToggle(false);
-<button onClick={() => setDark(!dark())}>Theme</button>
-<div showIf={dark()}>Dark</div>
-<div showIf={!dark()}>Light</div>
-```
+## Render values in React source components
 
-### `createCSSFlags` — independent booleans
-
-```tsx
-const [flags, setFlag] = createCSSFlags(['bold', 'italic']);
-<button onClick={() => setFlag('bold', !flags.bold())}>Bold</button>
-<div showIf={flags.bold()}>Bold is on</div>
-<div showIf={!flags.italic()}>Italic is off</div>
-```
-
-Each flag is an independent checkbox, so any combination can be active at once.
-
-### Compound conditions
-
-`showIf` accepts arbitrary boolean logic over CSS signal state — `&&`, `||`,
-`!`, `===` / `==`, and `!==` / `!=` — across any combination of scopes:
+Krate components run once. A component written in React style (a module that
+imports from `react`) relies on its body running on every render instead, so
+the compiler turns the body's render-dependent values into **derived values**:
 
 ```tsx
-const [plat, setPlat] = createCSSChoice('mac', ['mac', 'win']);
-const [licensed, setLicensed] = createCSSToggle(false);
-
-// AND across scopes
-<div showIf={plat() === 'mac' && licensed()}>Approve for macOS</div>
-
-// OR
-<div showIf={plat() === 'win' || !licensed()}>Upgrade</div>
-
-// negation
-<div showIf={plat() !== 'mac'}>Non-Mac build</div>
+const [raw, setRaw] = useState("12");
+const value = Number(raw);                    // krateDerived(() => Number(raw()))
+const label = value > 1 ? "items" : "item";   // derived from a derived value
+let cls = "tab";
+if (active) cls += " on";                     // folded into cls's computation
 ```
 
-The compiler normalizes the expression to DNF (OR of AND-terms) and compiles
-each atom to a `:has()` / `:not(:has())` fragment on the shared scope anchor,
-so every combination stays zero-JS. Equivalent conditions (e.g. `a && b` and
-`b && a`, or `!(a || b)` and `!a && !b`) are deduplicated to a single wrapper
-class. An expression the compiler cannot classify is still a hard error.
+- A top-level body binding becomes derived when its initializer reads state,
+  a memo, `props.x`, a context value, a custom hook result or another derived
+  value. Everything else (constants, closures, refs) is left as written, so it
+  costs nothing at runtime.
+- Every read of the binding (text, attributes, lists, conditions, handlers,
+  effects and dependency arrays) sees the current value. A derived value is
+  computed lazily on read and recomputed only after one of its inputs changed,
+  so every reader in an update sees the same value.
+- An object or array literal built in the body (`const options = { page }`)
+  also gets a new identity whenever the component's own state or props change,
+  as it would on a React re-render, so effects that list it as a dependency
+  re-run the same way.
+- A `let` assigned by later body statements is computed together with those
+  statements. When that is not possible (the statements also write another
+  variable, or a handler reassigns the binding) the value keeps its first
+  value and the build warns with `KR8301`.
+- Custom hooks that return render-dependent values return a derived getter;
+  `const [on, toggle] = useToggle()` and `const counter = useCounter()` read
+  the current result.
 
-### `createCSSGroup` — optional one-of-N
+Krate-native modules (no React import) keep run-once semantics: write
+`createMemo` or call the getters yourself.
 
-An optional radio group: like a choice, but with an explicit **closed** state
-(`null`). This is the shape behind single-open accordions, disclosures, dialogs,
-popovers, and dropdown menus.
+## CSS Signals
 
-```tsx
-const [open, setOpen] = createCSSGroup(null, { as: 'accordion' });
+Interactive state can be expressed with **zero client JavaScript** using CSS
+Signals (`createCSSChoice`, `createCSSToggle`, `createCSSFlags`,
+`createCSSGroup`, `createCSSRange`, `createCSSStack`) - compiled to hidden
+inputs plus `:has()` CSS. They are described in full in their own guide.
 
-<button onClick={() => setOpen('faq')}>FAQ</button>
-<div showIf={open() === 'faq'}>Answer</div>
-<button onClick={() => setOpen(null)}>Close</button>
-```
-
-### `createCSSRange` — a discrete stepper / slider / progress
-
-A stepped integer range compiled to an indexed radio chain. Set it with a
-literal index or a relative step (`r() + 1` / `r() - 1`), which the compiler
-turns into bounded stepper labels. A `.krcN-fill` element gets a proportional
-width for progress indicators; a track of tick labels gives a stepped slider.
-
-```tsx
-const [step, setStep] = createCSSRange(0, { min: 0, max: 4, step: 1 });
-
-<button onClick={() => setStep(step() - 1)}>Back</button>
-<button onClick={() => setStep(step() + 1)}>Next</button>
-<div class="fill"></div>
-```
-
-Continuous drag is not expressible in pure CSS; use `createSignal` for that.
-
-### `createCSSStack` — drill-down navigation
-
-A navigation stack over a **declared** tree of nodes. The compiler infers the
-tree from where each literal `push('node')` appears, so `top()` reads the
-deepest open node and `pop()` returns to its parent.
-
-```tsx
-const [stack, { push, pop, clear }] = createCSSStack(['root']);
-
-<button onClick={() => push('settings')}>Settings</button>
-<div showIf={stack.top() === 'settings'}>
-  <button onClick={() => pop()}>Back</button>
-  <button onClick={() => push('notifications')}>Notifications</button>
-</div>
-```
-
-Push targets must be literals so the tree is known at build time; a stack
-expresses a reachable path, not arbitrary push/pop history.
-
-### Live text & custom properties
-
-Reading a getter as JSX text (`{tab()}`) compiles to a **live value with zero
-JS**: the compiler emits a `.krc-live` element whose `::after` content is the
-inherited `--krate-current` custom property, updated by the same `:has()` rules
-that toggle panels.
-
-```tsx
-const [plan, setPlan] = createCSSChoice('solo', ['solo', 'pro']);
-<p>Selected plan: {plan()}</p>   // → <span class="krc-live"></span>
-```
-
-Every choice-like scope publishes `--krate-current` (the quoted option token);
-toggles publish `"on"`/`"off"`. Pass `vars` to publish more inheritable
-properties — handy for computed prices or themed variants:
-
-```tsx
-const [tier, setTier] = createCSSChoice('solo', {
-  options: ['solo', 'pro'],
-  vars: { '--price': { solo: '"$9"', pro: '"$29"' } },
-});
-```
-
-```css
-.price::after { content: var(--price); }
-```
-
-Values are emitted verbatim, so quote strings you intend for `content:`. Values
-must be string literals; a non-literal `vars` value is a build error.
-
-### ARIA roles (`as`)
-
-Every primitive accepts an options object with an `as` role preset. Native
-defaults (radio groups, checkboxes) ship **no JavaScript**. Presets that need
-synthesized state — `tabs`, `listbox`, `accordion`, `disclosure`, `dialog`,
-`menu`, `popover` — inject a tiny ARIA synchroniser automatically (still no page
-hydration bundle).
-
-| `as` | Widget | Emits |
-|------|--------|-------|
-| *(default)* | radio group / checkboxes | native semantics, zero JS |
-| `switch` | on/off | `role="switch"` on the checkbox |
-| `tabs` | tabbed panels | `tablist` / `tab` / `tabpanel`, `aria-selected` |
-| `listbox` | options list | `listbox` / `option`, `aria-selected` |
-| `accordion` | single-open disclosure | `button` / `region`, `aria-expanded` |
-| `dialog` / `modal` | modal | `aria-haspopup`, `aria-modal` |
-| `menu` / `popover` | dropdown | `menu` / `menuitemradio` |
-
-```tsx
-const [tab, setTab] = createCSSChoice('a', { as: 'tabs' });
-```
-
-Pass `aria: false` to opt out entirely, or `aria: { role: '…', panelRole: '…' }`
-for raw overrides (`role`, `panelRole`, `container-role` are recognised).
-
-### How it compiles
-
-The scope class (e.g. `.krc0`) is merged onto the component's root element;
-when the component returns a fragment or a component root it is wrapped in a
-layout-transparent `<div style="display:contents">` instead, so any valid return
-shape works. Panels are wrapped in a `display:contents` element that the CSS
-toggles, so a panel's own `display` (e.g. `.panel { display:flex }`) is
-preserved when visible.
-
-- Panel bodies are compiled like ordinary JSX — nested components, lists, and
-  nested conditionals all work, and interactive children still hydrate normally.
-- Triggers must be a labelable element (`<button>`, `<a>`, `<label>`, `<span>`,
-  `<li>`, `<div>`) with a static class.
-- These primitives are **not** a fallback for arbitrary reactive state: if a
-  component can't be compiled (the state read as text, used in a dynamic
-  attribute, captured by another function, set to a non-literal, a dynamic
-  trigger class, a non-labelable trigger, …) the build **fails** with an error
-  telling you to use `createSignal` instead. There is no silent fallback.
-- `:has()` requires a 2023+ browser. Controllers are visually hidden but remain
-  focusable, so keyboard navigation and screen readers keep working.
-
-The generated class names are deliberately compact (`krc0`, `krc0-r-overview`)
-and the scope index is base62-encoded. A selected trigger gets a default
-underline via the `--krate-css-active` and `--krate-css-active-fg` custom
-properties; override them to theme the selection.
+- [CSS Signals guide](/docs/core-concepts/css-signals/) - concepts, both authoring
+  styles, composition, roles, browser support, and limits.
+- [CSS Signals API reference](/docs/reference/css-signals/).
+- [Cookbook](/docs/guides/css-signals-cookbook/) and [errors](/docs/guides/css-signals-errors/).
 
 ## Compile-time validation
 
-The reactive dependency graph is validated at build time and surfaced as `⚠`
+The reactive dependency graph is validated at build time and surfaced as `!`
 warnings. The compiler detects:
 
-- **Unused signals** — declared but never read or written.
-- **Write-only effects** — effects that call setters but read no signals.
-- **No-read effects** — effects that read and write nothing (run exactly once).
-- **Circular dependencies** — including self-referential feedback loops like
+- **Unused signals** - declared but never read or written.
+- **Write-only effects** - effects that call setters but read no signals.
+- **No-read effects** - effects that read and write nothing (run exactly once).
+- **Circular dependencies** - including self-referential feedback loops like
   `setCount(count() + 1)`.
 
 These warnings help you catch bugs before they reach the browser.

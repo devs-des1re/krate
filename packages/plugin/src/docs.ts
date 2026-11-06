@@ -1,11 +1,11 @@
 /**
  * Types + helpers for authoring Krate docs themes.
  *
- * A docs theme is a layout component that owns the whole docs shell — navbar,
+ * A docs theme is a layout component that owns the whole docs shell - navbar,
  * sidebar, TOC, breadcrumbs, prev/next, social links (the "chrome"). The docs
  * plugin resolves it via the `theme` option in krate.config.ts and renders
  * every generated docs page through it, passing a single typed
- * {@link DocsLayoutProps} object. Helper functions are compile-time no-ops —
+ * {@link DocsLayoutProps} object. Helper functions are compile-time no-ops -
  * they are erased when the theme is bundled into Krate's embedded runtime.
  */
 
@@ -80,6 +80,10 @@ export interface DocsSearchOptions {
   engine?: "pagefind" | "docfind" | "json";
   /** Max number of results shown (default: 8). */
   maxResults?: number;
+  /** Search input placeholder (theme-rendered). */
+  placeholder?: string;
+  /** Keyboard shortcut hint shown by the theme (e.g. "/" or "mod+k"). */
+  hotkey?: string;
   /** Pagefind options (only used when `engine` is `"pagefind"`). */
   pagefind?: PagefindOptions;
 }
@@ -104,10 +108,20 @@ export interface DocsLayoutProps<Options = DocsThemeOptions> {
   nextLink?: string;
   /** `docs({ links })` social links. */
   socialLinks: { icon?: string; url?: string }[];
+  /** Search UI hints from `docs({ search })`. */
+  search?: { placeholder?: string; hotkey?: string };
   /** Current page path (e.g. "getting-started"). */
   currentPath: string;
+  /** URL prefix the docs are mounted under (default "/docs"). */
+  routeBase?: string;
   /** Page description (from frontmatter) for subtitle/meta rendering. */
   description?: string;
+  /**
+   * The page's leading `<h1>` as rendered HTML. Passed (and removed from
+   * `children`) only to themes whose descriptor sets `titleSlot`, so the layout
+   * can render the title, then the description, then the content.
+   */
+  titleHTML?: string;
   /** Page layout template: "doc" (default) or "hero". */
   template?: "doc" | "hero";
   /** Hero block for `template: hero` pages. */
@@ -120,6 +134,26 @@ export interface DocsLayoutProps<Options = DocsThemeOptions> {
   editUrl?: string;
   /** Page tags (rendered as chips + included in search). */
   tags?: string[];
+  /** Page categories (rendered as chips linking to category indexes). */
+  categories?: string[];
+  /** Precomputed tag links (name + URL under `routeBase`). */
+  tagLinks?: { name: string; url: string }[];
+  /** Precomputed category links (name + URL under `routeBase`). */
+  categoryLinks?: { name: string; url: string }[];
+  /** Published date (frontmatter `date`, ISO string). */
+  date?: string;
+  /** Last-updated date (frontmatter `lastUpdated` or git commit date). */
+  lastUpdated?: string;
+  /** i18n / versioning context (switchers + old-version banner). */
+  i18n?: {
+    locale?: string;
+    defaultLocale?: string;
+    version?: string;
+    currentVersion?: string;
+    locales?: { code?: string; label: string; url: string }[];
+    versions?: { code?: string; label: string; url: string }[];
+    versionBanner?: boolean;
+  };
   /** Rendered markdown content. */
   children?: unknown;
   /** Theme options forwarded when the descriptor declares them. */
@@ -150,6 +184,21 @@ export interface DocsOptions {
    * `editUrl` key overrides it per page.
    */
   editLinkBase?: string;
+  /**
+   * "Edit this page" link config. `pattern` supports `:path` (the page's source
+   * path relative to the project root).
+   */
+  editLink?: { base?: string; pattern?: string };
+  /** Custom sidebar override ("auto", "none", an explicit tree, or a JSON file). */
+  sidebar?: DocsSidebarItem[] | "auto" | "none" | { from: "file"; file?: string };
+  /** Show the table of contents (default true). */
+  toc?: boolean;
+  /** Show breadcrumbs (default true). */
+  breadcrumbs?: boolean;
+  /** Show prev/next links (default true). */
+  pagination?: boolean;
+  /** Fill "last updated" from git history (default true). */
+  lastUpdated?: boolean;
 }
 
 /**
@@ -166,10 +215,17 @@ export interface DocsThemeDescriptor<Options = DocsThemeOptions> {
    * and renders every docs page through it. Filled by the factory.
    */
   module?: string;
-  /** Alias of `module` — a root-relative component path, like `layout`. */
+  /** Alias of `module` - a root-relative component path, like `layout`. */
   layout?: string;
   /** Options forwarded to the layout component as `props.options`. */
   options?: Options;
+  /**
+   * Set when the layout renders `props.titleHTML` itself. The docs plugin then
+   * takes the page's leading `<h1>` out of the content and passes it as
+   * `titleHTML`, so the layout can show the description below the title.
+   * Themes without it keep the heading in the content.
+   */
+  titleSlot?: boolean;
 }
 
 /**

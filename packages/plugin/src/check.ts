@@ -3,7 +3,7 @@
  *
  * A custom rule module (referenced from `checks.custom` in krate.config.ts)
  * exports a `check(page, krate)` function returning findings. Modules run in
- * Krate's embedded QuickJS runtime at check time — no Node, no subprocess.
+ * Krate's embedded QuickJS runtime at check time - no Node, no subprocess.
  *
  * ```ts
  * import { defineCheckRule } from "@krate/plugin";
@@ -49,6 +49,12 @@ export interface CheckRulePage {
   html: string;
   /** Client JS weight for this route, in bytes. */
   jsBytes: number;
+  /** Route hydration bundle weight, in bytes (excludes shared runtime/islands). */
+  hydrationBytes: number;
+  /** Asynchronous island chunk weight for this route, in bytes. */
+  islandBytes: number;
+  /** Linked same-origin CSS weight for this route, in bytes. */
+  cssBytes: number;
   /** Parsed program as an astjson document, when available. */
   ast?: CheckAstNode;
 }

@@ -56,8 +56,29 @@ jobs:
         run: go vet ./...
         working-directory: packages/compiler
 
+      # Build the linter with the project's Go toolchain (from go.mod) so its
+      # analysis Go version matches the targeted version. A prebuilt binary is
+      # built with an older Go and refuses to load the config.
+      - name: golangci-lint
+        run: |
+          go install github.com/golangci/golangci-lint/cmd/golangci-lint@v1.64.8
+          "$(go env GOPATH)/bin/golangci-lint" run --timeout=5m
+        working-directory: packages/compiler
+
       - name: Check embedded docs are in sync
         run: node scripts/sync-krate-docs.mjs --check
+
+      - name: Check compatibility matrix
+        run: pnpm run check:matrix
+
+      - name: Check roadmap and v1 gates
+        run: pnpm run check:roadmap
+
+      - name: Check package versions
+        run: pnpm run check:version
+
+      - name: Check release readiness
+        run: pnpm run check:release
 
       - name: gofmt
         run: |
@@ -69,11 +90,156 @@ jobs:
           fi
         working-directory: packages/compiler
 
+      - name: TypeScript type-check
+        run: pnpm run typecheck
+
+      - name: JS unit tests (Vitest)
+        run: pnpm run test:js
+
+      # checkptr is disabled: modernc.org/quickjs (translated C) trips the
+      # checkptr instrumentation under -race. Data-race detection is unaffected.
+      # -p 2 keeps packages from saturating the runner (eval timeouts), and the
+      # raised timeout accommodates the instrumented example builds.
+      - name: Go test (race)
+        run: go test -race -gcflags=all=-d=checkptr=0 -p 2 -timeout 20m -covermode=atomic -coverprofile=coverage.out ./...
+        working-directory: packages/compiler
+        env:
+          KRATE_REQUIRE_E2E: "1"
+
+      - name: Coverage summary
+        run: go tool cover -func=coverage.out | tail -1
+        working-directory: packages/compiler
+
+      # Already part of go test above; re-run for the pass-rate table.
+      - name: Parser conformance summary
+        run: |
+          status=0
+          go test -count=1 -run TestConformance ./internal/conformance || status=$?
+          if [ -f "$KRATE_CONFORMANCE_MARKDOWN" ]; then
+            cat "$KRATE_CONFORMANCE_MARKDOWN" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit $status
+        working-directory: packages/compiler
+        env:
+          KRATE_CONFORMANCE_MARKDOWN: ${{ runner.temp }}/conformance.md
+          KRATE_CONFORMANCE_SUMMARY: ${{ runner.temp }}/conformance.json
+
+  go-matrix:
+    name: Go (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: packages/compiler/go.mod
+          cache: true
+
+      # The integration tests load examples/krate.config.ts, which imports the
+      # workspace @krate/core package, so the JS workspace must be linked.
+      - name: Enable pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+          run_install: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install JS dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      # The examples config imports the workspace @krate/core package, whose
+      # entry point is the built dist/, so build the JS packages first.
+      - name: Build JS packages
+        run: pnpm -r --filter '!@krate/web' --filter '!@krate/benchmark' build
+
+      - name: Go build
+        run: go build ./...
+        working-directory: packages/compiler
+
       - name: Go test
         run: go test ./...
         working-directory: packages/compiler
         env:
+          # The JS workspace and runtime dist are built above, so a missing E2E
+          # prerequisite here indicates a real problem, not a bare environment.
           KRATE_REQUIRE_E2E: "1"
+
+  node-versions:
+    name: Node ${{ matrix.node }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: ["20", "22"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: packages/compiler/go.mod
+          cache: true
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+
+      - name: Runtime sidecars and generateStaticParams
+        run: go test ./internal/build -run 'TestActionSidecarTransport|TestExecuteGenerateStaticParamsRuntime' -count=1 -v
+        working-directory: packages/compiler
+
+  bun-deno:
+    name: Bun and Deno runtimes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: packages/compiler/go.mod
+          cache: true
+
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Set up Deno
+        uses: denoland/setup-deno@v1
+        with:
+          deno-version: v2.x
+
+      - name: Bun action sidecar and Deno static params
+        run: go test ./internal/build -run 'TestActionSidecarTransport/bun|TestExecuteGenerateStaticParamsRuntime' -count=1 -v
+        working-directory: packages/compiler
+
+  bench:
+    name: Benchmarks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: packages/compiler/go.mod
+          cache: true
+
+      - name: Run benchmarks (informational)
+        run: go test -run=^$ -bench=. -benchtime=200ms ./internal/lexer ./internal/parser ./internal/bundler ./internal/css ./internal/markdown ./internal/build
+        working-directory: packages/compiler
 
   fuzz:
     name: Fuzz
@@ -95,3 +261,143 @@ jobs:
       - name: Fuzz parser
         run: go test -fuzz=FuzzParse -fuzztime=30s -run=^$ ./internal/parser
         working-directory: packages/compiler
+
+      - name: Fuzz HTML minifier
+        run: go test -fuzz=FuzzMinifyHTML -fuzztime=30s -run=^$ ./internal/build
+        working-directory: packages/compiler
+
+  browser-conformance:
+    name: Browser conformance (${{ matrix.browser }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        browser: [chromium, firefox, webkit]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: packages/compiler/go.mod
+          cache: true
+
+      - name: Enable pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+          run_install: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install JS dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Build JS packages
+        run: pnpm -r --filter '!@krate/web' --filter '!@krate/benchmark' build
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ matrix.browser }}-${{ hashFiles('pnpm-lock.yaml') }}
+
+      - name: Install ${{ matrix.browser }}
+        run: pnpm exec playwright install --with-deps ${{ matrix.browser }}
+
+      - name: Browser conformance
+        run: go test -run "TestBrowserConformance|TestTrimmedRuntimeBrowser" -count=1 -v ./internal/build
+        working-directory: packages/compiler
+        env:
+          KRATE_BROWSER: ${{ matrix.browser }}
+          KRATE_REQUIRE_E2E: "1"
+          KRATE_HYDRATION_BUDGET_MS: "2500"
+
+      # React 19 vs Krate differential over the R2/R3 corpus. Fails on any
+      # divergence not listed in testdata/reactbrowser/divergences.json.
+      - name: React browser differential
+        run: go test -run 'TestReactBrowser' -count=1 -v ./internal/build
+        working-directory: packages/compiler
+        env:
+          KRATE_BROWSER: ${{ matrix.browser }}
+          KRATE_REQUIRE_E2E: "1"
+          KRATE_REACT_EXIT: "1"
+          KRATE_REACTBROWSER_REPORT: ${{ runner.temp }}/react-browser-${{ matrix.browser }}.txt
+
+      # App-level browser tests: SPA router (layouts, templates, parallel and
+      # intercepting routes), per-segment not-found and error pages, client
+      # components inside server components, a migrated Next.js app (async
+      # server components, revalidation), and code highlighting (light/dark
+      # switching, code highlighted in the browser as it changes).
+      - name: App browser tests
+        run: go test -run 'TestRouterBrowserE2E|TestSegmentPagesBrowser|TestServerlessNodeBrowser|TestUseClientIslandBrowser|TestMigratedNextAppBrowser|TestTailwindLayeringInBrowser|TestComponentsA11yBrowser|TestServerActionRedirectInBrowser|TestNoJSActionStateFeedbackInBrowser|TestCSPSpeculationRulesInBrowser|TestCodeThemeBrowser|TestDynamicCodeBrowser' -count=1 -v ./internal/build
+        working-directory: packages/compiler
+        env:
+          KRATE_BROWSER: ${{ matrix.browser }}
+          KRATE_REQUIRE_E2E: "1"
+
+      - name: Upload React differential report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: react-browser-diff-${{ matrix.browser }}
+          path: ${{ runner.temp }}/react-browser-${{ matrix.browser }}.txt
+          if-no-files-found: ignore
+
+  preact-conformance:
+    name: Preact ${{ matrix.preact }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        preact: ["10.20.0", "10.24.0", "10.29.8"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: packages/compiler/go.mod
+          cache: true
+
+      - name: Enable pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+          run_install: false
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+
+      - name: Install JS dependencies
+        run: pnpm install --no-frozen-lockfile
+
+      - name: Build JS packages
+        run: pnpm -r --filter '!@krate/web' --filter '!@krate/benchmark' build
+
+      - name: Pin Preact
+        run: pnpm --filter krate-examples add -D preact@${{ matrix.preact }}
+
+      - name: Cache Playwright Chromium
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-chromium-${{ hashFiles('pnpm-lock.yaml') }}
+
+      - name: Install Chromium
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Browser conformance
+        run: go test -run "TestBrowserConformance|TestTrimmedRuntimeBrowser" -count=1 -v ./internal/build
+        working-directory: packages/compiler
+        env:
+          KRATE_BROWSER: chromium
+          KRATE_REQUIRE_E2E: "1"
+          KRATE_HYDRATION_BUDGET_MS: "2500"

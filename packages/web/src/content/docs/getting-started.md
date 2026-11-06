@@ -4,7 +4,7 @@ order: 2
 description: Install the Krate CLI, scaffold a project, and build your first interactive page.
 head:
   - - meta
-    - name: og:type
+    - property: og:type
       content: article
 tags:
   - install
@@ -15,13 +15,20 @@ categories:
 
 # Getting Started
 
+:::warning Active development
+Krate is under **active development** and is not yet stable. APIs, generated
+output, and configuration may change between releases.
+:::
+
 This guide walks you through installing the Krate CLI, scaffolding a project,
 and building your first page.
 
 ## Prerequisites
 
-- **Node.js 20+** — for the npm CLI wrapper and running `krate.config.ts`
-- **Go 1.26+** — only needed when building the compiler from source
+- **Node.js 20+** - for the npm CLI wrapper, `generateStaticParams`, and the SSR /
+  API-route sidecars. A static site with a plain config builds without running
+  any Node code: the `krate` binary evaluates `krate.config.ts` itself
+- **Go 1.26+** - only needed when building the compiler from source
 
 The published CLI ships pre-built binaries for macOS, Linux and Windows, so you
 do not need Go to build a site.
@@ -40,7 +47,7 @@ pnpm add -g @krate/core
 npx create-krate-app@latest my-app
 ```
 
-`create-krate-app` scaffolds a complete project — including `krate.config.ts`,
+`create-krate-app` scaffolds a complete project - including `krate.config.ts`,
 `tsconfig.json`, `package.json`, a landing page, a layout, and a 404 page. With
 no directory it prompts for a name.
 
@@ -57,7 +64,7 @@ export default function Home() {
 
 ```sh
 krate dev       # dev server with hot reload on http://localhost:3000
-krate build     # production build → dist/
+krate build     # production build -> dist/
 krate serve     # preview the production build
 ```
 
@@ -91,14 +98,14 @@ Krate provides data through component tiers rather than page-level data
 functions:
 
 ```tsx
-// @server — evaluated at build time, HTML baked in
+// @server - evaluated at build time, HTML baked in
 export default function ServerTime() {
   return <time>{new Date().toUTCString()}</time>;
 }
 ```
 
 ```tsx
-// @runtime — evaluated per request, streamed via Suspense
+// @runtime - evaluated per request, streamed via Suspense
 export default function PriceTag({ price }) {
   return <span>{price}</span>;
 }
@@ -128,16 +135,29 @@ export default function Layout({ children }) {
 Files named `[param].tsx` become dynamic segments:
 
 ```tsx
-// src/pages/video/[id].tsx → /video/abc123
+// src/pages/video/[id].tsx -> /video/abc123
+export function generateStaticParams() {
+  return [{ id: "abc123" }];
+}
+
 export default function VideoPage({ params }) {
   return <h1>Video {params.id}</h1>;
 }
 ```
 
+Each object returned by `generateStaticParams` becomes one page, so it needs a
+value for every dynamic segment of the route. Numbers are written as text, and a
+catch-all route (`[...path].tsx`) takes an array (`{ path: ["a", "b"] }`) or a
+`"a/b"` string. An entry that misses a param, has an empty value or a value that
+is not a plain path segment (`..`, a backslash, or `/` outside a catch-all), or
+that produces the same page as a different entry, fails the build with
+[KR7142](/docs/reference/diagnostics/) and names the entry. An exact duplicate
+is built once, and the build log counts the pages it writes.
+
 ## Built-in components
 
 Built-in components (`Head`, `Link`, `Icon`, `Image`, `Script`, `Style`) are
-recognized by the compiler by name — no import needed:
+recognized by the compiler by name - no import needed:
 
 ```tsx
 export default function Page() {
@@ -160,6 +180,40 @@ build time with original-format fallback, responsive `srcset`/`sizes`,
 lazy/eager loading, blur placeholders, and `aspect-ratio`-based CLS mitigation.
 `<Link>` renders an SPA-enabled `<a>` with prefetching, `replace`, `scroll`,
 hash scrolling, and `aria-current` for the active route.
+
+## Using Go
+
+Server and runtime components, and API routes, can also be written in **Go**.
+Install the Go toolchain, run `krate go:init` once for editor intellisense, then
+drop a `.server.go` / `.runtime.go` component under `src/components` or a route
+under `src/api`:
+
+```go
+// src/components/badge.server.go
+package components
+
+import kr "github.com/kratejs/krate/packages/compiler/goext/krate"
+
+type BadgeProps struct {
+    Label string `json:"label"`
+}
+
+// krate:component server
+func Badge(p BadgeProps) kr.Node {
+    return kr.Span(kr.Class("badge"), kr.Text(p.Label))
+}
+```
+
+```tsx
+import { Badge } from "@/components/badge.server.go";
+
+export default function Page() {
+  return <Badge label="Go!" />;
+}
+```
+
+See [Go Components](/docs/features/go-components/) and
+[API Routes](/docs/features/api-routes/) for the full guide.
 
 ## Next steps
 

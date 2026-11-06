@@ -1,9 +1,10 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
-	"sort"
 	"strconv"
+	"strings"
 
 	"github.com/kratejs/krate/packages/compiler/internal/lexer"
 )
@@ -57,6 +58,9 @@ func (p *configParser) parseRoot(cfg *Config) error {
 	if err != nil {
 		return err
 	}
+	if err := checkStaticTypes(obj); err != nil {
+		return err
+	}
 	recordUnknownKeys(obj)
 	for _, prop := range obj {
 		if err := applyConfigProp(cfg, prop.key, prop.val); err != nil {
@@ -66,22 +70,45 @@ func (p *configParser) parseRoot(cfg *Config) error {
 	return nil
 }
 
-// recordUnknownKeys appends a warning for each top-level key not present in
-// knownTopLevelKeys. Called after a successful static parse so typos surface.
-func recordUnknownKeys(obj []configProp) {
-	var unknown []string
+// staticTypeError marks a statically parsed value whose type does not match the
+// config schema. Load reports it like the JS-evaluated path does.
+type staticTypeError struct{ err error }
+
+func (e *staticTypeError) Error() string { return e.err.Error() }
+func (e *staticTypeError) Unwrap() error { return e.err }
+
+// checkStaticTypes decodes the parsed object through the same JSON schema the
+// evaluated path uses, so a mistyped nested value (a string where a number or
+// boolean is expected) is an error instead of being skipped by the per-key
+// appliers below.
+func checkStaticTypes(obj []configProp) error {
+	m := make(map[string]interface{}, len(obj))
 	for _, prop := range obj {
-		if prop.key == "validate" {
-			continue
-		}
-		if !knownTopLevelKeys[prop.key] {
-			unknown = append(unknown, prop.key)
-		}
+		m[prop.key] = prop.val
 	}
-	sort.Strings(unknown)
-	for _, k := range unknown {
-		Warnings = append(Warnings, fmt.Sprintf("unknown config key %q (ignored)", k))
+	data, err := json.Marshal(m)
+	if err != nil {
+		return nil
 	}
+	if err := json.Unmarshal(data, &Config{}); err != nil {
+		return &staticTypeError{err: err}
+	}
+	return nil
+}
+
+// recordUnknownKeys appends a warning for each unrecognized top-level or nested
+// key. Called after a successful static parse so typos surface, mirroring the
+// JS-executed path (UnknownKeyWarnings).
+func recordUnknownKeys(obj []configProp) {
+	m := make(map[string]interface{}, len(obj))
+	for _, prop := range obj {
+		m[prop.key] = prop.val
+	}
+	data, err := json.Marshal(m)
+	if err != nil {
+		return
+	}
+	Warnings = append(Warnings, UnknownKeyWarnings(data)...)
 }
 
 type configProp struct {
@@ -123,7 +150,11 @@ func (p *configParser) parseObject() ([]configProp, error) {
 func (p *configParser) parseKey() (string, error) {
 	t := p.advance()
 	if t.Kind == lexer.String {
-		return t.Value, nil
+		v := t.Value
+		if len(v) >= 2 {
+			v = v[1 : len(v)-1]
+		}
+		return v, nil
 	}
 	// Accept identifiers AND reserved words used as property names (e.g.
 	// `type`, `default`, `class`). Any token whose value is a valid identifier
@@ -231,6 +262,112 @@ func parseNumber(s string) (interface{}, error) {
 	return nil, fmt.Errorf("invalid number %q", s)
 }
 
+// configInt coerces a parsed numeric config value to int.
+func configInt(v interface{}) (int, bool) {
+	switch n := v.(type) {
+	case int64:
+		return int(n), true
+	case float64:
+		return int(n), true
+	case int:
+		return n, true
+	}
+	return 0, false
+}
+
+// configInt64 coerces a parsed numeric config value to int64.
+func configInt64(v interface{}) (int64, bool) {
+	switch n := v.(type) {
+	case int64:
+		return n, true
+	case float64:
+		return int64(n), true
+	case int:
+		return int64(n), true
+	}
+	return 0, false
+}
+
+// configStrings appends the string items of a parsed array to dst.
+func configStrings(dst []string, v interface{}) []string {
+	arr, ok := v.([]interface{})
+	if !ok {
+		return dst
+	}
+	for _, item := range arr {
+		if s, ok := item.(string); ok {
+			dst = append(dst, s)
+		}
+	}
+	return dst
+}
+
+// parseSidecar builds a SidecarConfig from a statically parsed object.
+func parseSidecar(v interface{}) (*SidecarConfig, error) {
+	m, ok := v.(map[string]interface{})
+	if !ok {
+		return nil, fmt.Errorf("expected object, got %T", v)
+	}
+	sc := &SidecarConfig{}
+	for k, raw := range m {
+		switch k {
+		case "command":
+			if s, ok := raw.(string); ok {
+				sc.Command = s
+			}
+		case "args":
+			sc.Args = configStrings(sc.Args, raw)
+		case "cwd":
+			if s, ok := raw.(string); ok {
+				sc.Cwd = s
+			}
+		case "env":
+			if em, ok := raw.(map[string]interface{}); ok {
+				sc.Env = make(map[string]string, len(em))
+				for ek, ev := range em {
+					if es, ok := ev.(string); ok {
+						sc.Env[ek] = es
+					}
+				}
+			}
+		case "port":
+			if n, ok := configInt(raw); ok {
+				sc.Port = n
+			}
+		case "target":
+			if s, ok := raw.(string); ok {
+				sc.Target = s
+			}
+		case "prefix":
+			if s, ok := raw.(string); ok {
+				sc.Prefix = s
+			}
+		}
+	}
+	return sc, nil
+}
+
+// interfaceStrings converts a parsed JSON array of values to []string.
+func interfaceStrings(arr []interface{}) []string {
+	out := make([]string, 0, len(arr))
+	for _, v := range arr {
+		if s, ok := v.(string); ok {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func interfaceStringMap(m map[string]interface{}) map[string]string {
+	out := make(map[string]string, len(m))
+	for k, v := range m {
+		if s, ok := v.(string); ok {
+			out[k] = s
+		}
+	}
+	return out
+}
+
 func applyConfigProp(cfg *Config, key string, val interface{}) error {
 	switch key {
 	case "entry":
@@ -287,6 +424,302 @@ func applyConfigProp(cfg *Config, key string, val interface{}) error {
 			return fmt.Errorf("expected boolean, got %T", val)
 		}
 		cfg.Sourcemap = b
+	case "basePath":
+		s, ok := val.(string)
+		if !ok {
+			return fmt.Errorf("expected string, got %T", val)
+		}
+		cfg.BasePath = s
+	case "compat":
+		m, ok := val.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("expected object, got %T", val)
+		}
+		for k, v := range m {
+			switch k {
+			case "mode":
+				if s, ok := v.(string); ok {
+					cfg.Compat.Mode = s
+				}
+			case "userAgent":
+				if b, ok := v.(bool); ok {
+					cfg.Compat.UserAgent = b
+				}
+			}
+		}
+	case "compress":
+		m, ok := val.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("expected object, got %T", val)
+		}
+		for k, v := range m {
+			switch k {
+			case "brotli":
+				if b, ok := v.(bool); ok {
+					cfg.Compress.Brotli = b
+				}
+			case "gzip":
+				if b, ok := v.(bool); ok {
+					cfg.Compress.Gzip = b
+				}
+			}
+		}
+	case "head":
+		data, err := json.Marshal(val)
+		if err != nil {
+			return err
+		}
+		var hc HeadConfig
+		if err := json.Unmarshal(data, &hc); err != nil {
+			return err
+		}
+		cfg.Head = hc
+	case "security":
+		data, err := json.Marshal(val)
+		if err != nil {
+			return err
+		}
+		var sc SecurityConfig
+		if err := json.Unmarshal(data, &sc); err != nil {
+			return err
+		}
+		cfg.Security = sc
+	case "headers":
+		data, err := json.Marshal(val)
+		if err != nil {
+			return err
+		}
+		var hr []HeaderRule
+		if err := json.Unmarshal(data, &hr); err != nil {
+			return err
+		}
+		cfg.Headers = hr
+	case "images":
+		data, err := json.Marshal(val)
+		if err != nil {
+			return err
+		}
+		var ic ImagesConfig
+		if err := json.Unmarshal(data, &ic); err != nil {
+			return err
+		}
+		cfg.Images = ic
+	case "deploy":
+		data, err := json.Marshal(val)
+		if err != nil {
+			return err
+		}
+		var dc DeployConfig
+		if err := json.Unmarshal(data, &dc); err != nil {
+			return err
+		}
+		cfg.Deploy = dc
+	case "spa":
+		if b, ok := val.(bool); ok {
+			cfg.SPA = &b
+		} else {
+			return fmt.Errorf("spa: expected boolean, got %T", val)
+		}
+	case "viewTransitions":
+		switch v := val.(type) {
+		case bool:
+			if v {
+				cfg.ViewTransitions = "auto"
+			} else {
+				cfg.ViewTransitions = "off"
+			}
+		case string:
+			switch strings.ToLower(strings.TrimSpace(v)) {
+			case "", "auto", "on", "true":
+				cfg.ViewTransitions = "auto"
+			case "off", "false", "none":
+				cfg.ViewTransitions = "off"
+			default:
+				return fmt.Errorf("viewTransitions: expected \"auto\" or \"off\", got %q", v)
+			}
+		default:
+			return fmt.Errorf("viewTransitions: expected boolean or string, got %T", val)
+		}
+	case "ppr":
+		switch v := val.(type) {
+		case bool:
+			cfg.PPR = v
+		case map[string]interface{}:
+			cfg.PPR = true
+			if n, ok := v["revalidate"]; ok {
+				switch rv := n.(type) {
+				case int64:
+					cfg.PPRRevalidate = int(rv)
+				case float64:
+					cfg.PPRRevalidate = int(rv)
+				default:
+					return fmt.Errorf("ppr.revalidate: expected number, got %T", n)
+				}
+			}
+		default:
+			return fmt.Errorf("ppr: expected boolean or object, got %T", val)
+		}
+	case "server":
+		m, ok := val.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("expected object, got %T", val)
+		}
+		for k, v := range m {
+			switch k {
+			case "host":
+				if s, ok := v.(string); ok {
+					cfg.Server.Host = s
+				}
+			case "port":
+				if n, ok := configInt(v); ok {
+					cfg.Server.Port = n
+				}
+			case "maxBodySize":
+				if n, ok := configInt64(v); ok {
+					cfg.Server.MaxBodySize = n
+				}
+			case "trustProxy":
+				if b, ok := v.(bool); ok {
+					cfg.Server.TrustProxy = b
+					cfg.Server.TrustProxySet = true
+				}
+			case "trustedProxies":
+				if n, ok := configInt(v); ok {
+					cfg.Server.TrustedProxies = n
+				}
+			case "shutdownTimeout":
+				if n, ok := configInt(v); ok {
+					cfg.Server.ShutdownTimeout = n
+				}
+			}
+		}
+	case "cors":
+		m, ok := val.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("expected object, got %T", val)
+		}
+		for k, v := range m {
+			switch k {
+			case "enabled":
+				if b, ok := v.(bool); ok {
+					cfg.CORS.Enabled = b
+				}
+			case "origins":
+				cfg.CORS.Origins = configStrings(cfg.CORS.Origins, v)
+			case "methods":
+				cfg.CORS.Methods = configStrings(cfg.CORS.Methods, v)
+			case "headers":
+				cfg.CORS.Headers = configStrings(cfg.CORS.Headers, v)
+			case "credentials":
+				if b, ok := v.(bool); ok {
+					cfg.CORS.Credentials = b
+				}
+			case "maxAge":
+				if n, ok := configInt(v); ok {
+					cfg.CORS.MaxAge = n
+				}
+			}
+		}
+	case "api":
+		m, ok := val.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("expected object, got %T", val)
+		}
+		if sc, ok := m["sidecar"]; ok && sc != nil {
+			parsed, err := parseSidecar(sc)
+			if err != nil {
+				return fmt.Errorf("api.sidecar: %w", err)
+			}
+			cfg.API.Sidecar = parsed
+		}
+	case "seo":
+		m, ok := val.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("expected object, got %T", val)
+		}
+		for k, v := range m {
+			s, _ := v.(string)
+			switch k {
+			case "baseUrl":
+				cfg.SEO.BaseURL = s
+			case "siteName":
+				cfg.SEO.SiteName = s
+			case "description":
+				cfg.SEO.Description = s
+			case "image":
+				cfg.SEO.Image = s
+			case "titleTemplate":
+				cfg.SEO.TitleTemplate = s
+			case "twitter":
+				cfg.SEO.Twitter = s
+			case "themeColor":
+				cfg.SEO.ThemeColor = s
+			case "locale":
+				cfg.SEO.Locale = s
+			}
+		}
+	case "site":
+		m, ok := val.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("expected object, got %T", val)
+		}
+		for k, v := range m {
+			s, _ := v.(string)
+			switch k {
+			case "url":
+				cfg.Site.URL = s
+			case "name":
+				cfg.Site.Name = s
+			case "description":
+				cfg.Site.Description = s
+			case "image":
+				cfg.Site.Image = s
+			case "titleTemplate":
+				cfg.Site.TitleTemplate = s
+			case "twitter":
+				cfg.Site.Twitter = s
+			case "themeColor":
+				cfg.Site.ThemeColor = s
+			case "locale":
+				cfg.Site.Locale = s
+			}
+		}
+	case "robots":
+		m, ok := val.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("expected object, got %T", val)
+		}
+		for k, v := range m {
+			s, _ := v.(string)
+			switch k {
+			case "allow":
+				cfg.Robots.Allow = s
+			case "disallow":
+				cfg.Robots.Disallow = s
+			case "sitemap":
+				cfg.Robots.Sitemap = s
+			}
+		}
+	case "runtime":
+		if s, ok := val.(string); ok {
+			cfg.Runtime = s
+		}
+	case "tsBaseDir":
+		if s, ok := val.(string); ok {
+			cfg.TSBaseDir = s
+		}
+	case "pathAliases":
+		if data, err := json.Marshal(val); err == nil {
+			_ = cfg.PathAliases.UnmarshalJSON(data)
+		}
+	case "serverComponents":
+		cfg.ServerComponents = configStrings(cfg.ServerComponents, val)
+	case "runtimeComponents":
+		cfg.RuntimeComponents = configStrings(cfg.RuntimeComponents, val)
+	case "serverDirs":
+		cfg.ServerDirs = configStrings(cfg.ServerDirs, val)
+	case "runtimeDirs":
+		cfg.RuntimeDirs = configStrings(cfg.RuntimeDirs, val)
 	case "devServer":
 		m, ok := val.(map[string]interface{})
 		if !ok {
@@ -309,6 +742,46 @@ func applyConfigProp(cfg *Config, key string, val interface{}) error {
 					return fmt.Errorf("devServer.open: expected boolean, got %T", v)
 				}
 				cfg.DevServer.Open = b
+			case "overlay":
+				b, ok := v.(bool)
+				if !ok {
+					return fmt.Errorf("devServer.overlay: expected boolean, got %T", v)
+				}
+				cfg.DevServer.Overlay = &b
+			case "toolbar":
+				b, ok := v.(bool)
+				if !ok {
+					return fmt.Errorf("devServer.toolbar: expected boolean, got %T", v)
+				}
+				cfg.DevServer.Toolbar = &b
+			case "host":
+				s, ok := v.(string)
+				if !ok {
+					return fmt.Errorf("devServer.host: expected string, got %T", v)
+				}
+				cfg.DevServer.Host = s
+			case "editor":
+				s, ok := v.(string)
+				if !ok {
+					return fmt.Errorf("devServer.editor: expected string, got %T", v)
+				}
+				cfg.DevServer.Editor = s
+			case "proxy":
+				m2, ok := v.(map[string]interface{})
+				if !ok {
+					return fmt.Errorf("devServer.proxy: expected object, got %T", v)
+				}
+				cfg.DevServer.Proxy = nil
+				for pfx, tv := range m2 {
+					s, ok := tv.(string)
+					if !ok {
+						return fmt.Errorf("devServer.proxy[%q]: expected string, got %T", pfx, tv)
+					}
+					if cfg.DevServer.Proxy == nil {
+						cfg.DevServer.Proxy = map[string]string{}
+					}
+					cfg.DevServer.Proxy[pfx] = s
+				}
 			}
 		}
 	case "emitReact":
@@ -338,12 +811,217 @@ func applyConfigProp(cfg *Config, key string, val interface{}) error {
 					cfg.Markdown.CodeHighlight = b
 				}
 			case "codeTheme":
-				if s, ok := v.(string); ok {
-					cfg.Markdown.CodeTheme = s
-				}
+				cfg.Markdown.SetCodeTheme(v)
 			case "math":
 				if b, ok := v.(bool); ok {
 					cfg.Markdown.Math = b
+				}
+			case "mermaid":
+				if b, ok := v.(bool); ok {
+					cfg.Markdown.Mermaid = b
+				}
+			case "plugins":
+				if arr, ok := v.([]interface{}); ok {
+					cfg.Markdown.Plugins = interfaceStrings(arr)
+				}
+			}
+		}
+	case "goApi":
+		m, ok := val.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("expected object, got %T", val)
+		}
+		for k, v := range m {
+			switch k {
+			case "enabled":
+				if b, ok := v.(bool); ok {
+					cfg.GoAPI.Enabled = &b
+				}
+			case "module":
+				if s, ok := v.(string); ok {
+					cfg.GoAPI.Module = s
+				}
+			case "tidy":
+				if b, ok := v.(bool); ok {
+					cfg.GoAPI.Tidy = &b
+				}
+			case "deps":
+				arr, ok := v.([]interface{})
+				if !ok {
+					return fmt.Errorf("goApi.deps: expected array, got %T", v)
+				}
+				for _, item := range arr {
+					om, ok := item.(map[string]interface{})
+					if !ok {
+						continue
+					}
+					var dep GoAPIDep
+					if s, ok := om["path"].(string); ok {
+						dep.Path = s
+					}
+					if s, ok := om["version"].(string); ok {
+						dep.Version = s
+					}
+					cfg.GoAPI.Deps = append(cfg.GoAPI.Deps, dep)
+				}
+			case "replaces":
+				arr, ok := v.([]interface{})
+				if !ok {
+					return fmt.Errorf("goApi.replaces: expected array, got %T", v)
+				}
+				for _, item := range arr {
+					om, ok := item.(map[string]interface{})
+					if !ok {
+						continue
+					}
+					var rp GoAPIReplace
+					if s, ok := om["from"].(string); ok {
+						rp.From = s
+					}
+					if s, ok := om["to"].(string); ok {
+						rp.To = s
+					}
+					cfg.GoAPI.Replaces = append(cfg.GoAPI.Replaces, rp)
+				}
+			}
+		}
+	case "go":
+		m, ok := val.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("expected object, got %T", val)
+		}
+		for k, v := range m {
+			switch k {
+			case "enabled":
+				if b, ok := v.(bool); ok {
+					cfg.Go.Enabled = &b
+				}
+			case "module":
+				if s, ok := v.(string); ok {
+					cfg.Go.Module = s
+				}
+			case "tidy":
+				if b, ok := v.(bool); ok {
+					cfg.Go.Tidy = &b
+				}
+			case "apiEnabled":
+				if b, ok := v.(bool); ok {
+					cfg.Go.APIEnabled = &b
+				}
+			case "componentDirs", "apiDirs":
+				arr, ok := v.([]interface{})
+				if !ok {
+					return fmt.Errorf("go.%s: expected array, got %T", k, v)
+				}
+				var dirs []string
+				for _, item := range arr {
+					if s, ok := item.(string); ok {
+						dirs = append(dirs, s)
+					}
+				}
+				if k == "componentDirs" {
+					cfg.Go.ComponentDirs = dirs
+				} else {
+					cfg.Go.APIDirs = dirs
+				}
+			case "deps":
+				arr, ok := v.([]interface{})
+				if !ok {
+					return fmt.Errorf("go.deps: expected array, got %T", v)
+				}
+				for _, item := range arr {
+					om, ok := item.(map[string]interface{})
+					if !ok {
+						continue
+					}
+					var dep GoDep
+					if s, ok := om["path"].(string); ok {
+						dep.Path = s
+					}
+					if s, ok := om["version"].(string); ok {
+						dep.Version = s
+					}
+					cfg.Go.Deps = append(cfg.Go.Deps, dep)
+				}
+			case "replaces":
+				arr, ok := v.([]interface{})
+				if !ok {
+					return fmt.Errorf("go.replaces: expected array, got %T", v)
+				}
+				for _, item := range arr {
+					om, ok := item.(map[string]interface{})
+					if !ok {
+						continue
+					}
+					var rp GoReplace
+					if s, ok := om["from"].(string); ok {
+						rp.From = s
+					}
+					if s, ok := om["to"].(string); ok {
+						rp.To = s
+					}
+					cfg.Go.Replaces = append(cfg.Go.Replaces, rp)
+				}
+			case "exclude":
+				arr, ok := v.([]interface{})
+				if !ok {
+					return fmt.Errorf("go.exclude: expected array, got %T", v)
+				}
+				for _, item := range arr {
+					om, ok := item.(map[string]interface{})
+					if !ok {
+						continue
+					}
+					var ex GoExclude
+					if s, ok := om["path"].(string); ok {
+						ex.Path = s
+					}
+					if s, ok := om["version"].(string); ok {
+						ex.Version = s
+					}
+					cfg.Go.Exclude = append(cfg.Go.Exclude, ex)
+				}
+			}
+		}
+	case "dce":
+		m, ok := val.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("expected object, got %T", val)
+		}
+		for k, v := range m {
+			switch k {
+			case "css":
+				if b, ok := v.(bool); ok {
+					cfg.Dce.CSS = &b
+				}
+			case "js":
+				if b, ok := v.(bool); ok {
+					cfg.Dce.JS = &b
+				}
+			case "aggressive":
+				if b, ok := v.(bool); ok {
+					cfg.Dce.Aggressive = &b
+				}
+			}
+		}
+	case "fonts":
+		m, ok := val.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("expected object, got %T", val)
+		}
+		for k, v := range m {
+			switch k {
+			case "preload":
+				if b, ok := v.(bool); ok {
+					cfg.Fonts.Preload = &b
+				}
+			case "display":
+				if s, ok := v.(string); ok {
+					cfg.Fonts.Display = s
+				}
+			case "preloadLimit":
+				if n, ok := v.(float64); ok && n >= 0 {
+					cfg.Fonts.PreloadLimit = int(n)
 				}
 			}
 		}
@@ -403,6 +1081,21 @@ func applyConfigProp(cfg *Config, key string, val interface{}) error {
 				}
 			}
 		}
+	case "highlight":
+		m, ok := val.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("expected object, got %T", val)
+		}
+		for k, v := range m {
+			if k == "languages" {
+				switch l := v.(type) {
+				case string:
+					cfg.Highlight.Languages = StringList{l}
+				case []interface{}:
+					cfg.Highlight.Languages = StringList(interfaceStrings(l))
+				}
+			}
+		}
 	case "csp":
 		m, ok := val.(map[string]interface{})
 		if !ok {
@@ -417,6 +1110,49 @@ func applyConfigProp(cfg *Config, key string, val interface{}) error {
 			case "directive":
 				if s, ok := v.(string); ok {
 					cfg.CSP.Directive = s
+				}
+			}
+		}
+	case "cache":
+		m, ok := val.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("expected object, got %T", val)
+		}
+		for k, v := range m {
+			switch k {
+			case "adapter":
+				if s, ok := v.(string); ok {
+					cfg.Cache.Adapter = s
+				}
+			case "url":
+				if s, ok := v.(string); ok {
+					cfg.Cache.URL = s
+				}
+			case "urlEnv":
+				if s, ok := v.(string); ok {
+					cfg.Cache.URLEnv = s
+				}
+			case "prefix":
+				if s, ok := v.(string); ok {
+					cfg.Cache.Prefix = s
+				}
+			case "timeoutMs":
+				switch n := v.(type) {
+				case int64:
+					cfg.Cache.TimeoutMs = int(n)
+				case float64:
+					cfg.Cache.TimeoutMs = int(n)
+				}
+			case "ttlSeconds":
+				switch n := v.(type) {
+				case int64:
+					cfg.Cache.TTLSeconds = int(n)
+				case float64:
+					cfg.Cache.TTLSeconds = int(n)
+				}
+			case "options":
+				if o, ok := v.(map[string]interface{}); ok {
+					cfg.Cache.Options = o
 				}
 			}
 		}
@@ -456,9 +1192,34 @@ func applyConfigProp(cfg *Config, key string, val interface{}) error {
 				if s, ok := v.(string); ok {
 					cfg.SSR.APIRuntime = s
 				}
+			case "apiWorkers":
+				switch n := v.(type) {
+				case int64:
+					cfg.SSR.APIWorkers = int(n)
+				case float64:
+					cfg.SSR.APIWorkers = int(n)
+				}
+			case "apiIsolation":
+				if b, ok := v.(bool); ok {
+					cfg.SSR.APIIsolation = b
+				}
+			case "nodeWorkers":
+				switch n := v.(type) {
+				case int64:
+					cfg.SSR.NodeWorkers = int(n)
+				case float64:
+					cfg.SSR.NodeWorkers = int(n)
+				}
 			case "ssrRuntime":
 				if s, ok := v.(string); ok {
 					cfg.SSR.SSRRuntime = s
+				}
+			case "rendererWorkers":
+				switch n := v.(type) {
+				case int64:
+					cfg.SSR.RendererWorkers = int(n)
+				case float64:
+					cfg.SSR.RendererWorkers = int(n)
 				}
 			case "streaming":
 				if b, ok := v.(bool); ok {
@@ -560,6 +1321,40 @@ func applyConfigProp(cfg *Config, key string, val interface{}) error {
 			return fmt.Errorf("expected object, got %T", val)
 		}
 		cfg.Checks = m
+	case "i18n":
+		m, ok := val.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("expected object, got %T", val)
+		}
+		if s, ok := m["defaultLocale"].(string); ok {
+			cfg.I18n.DefaultLocale = s
+		}
+		if arr, ok := m["locales"].([]interface{}); ok {
+			cfg.I18n.Locales = interfaceStrings(arr)
+		}
+		if mm, ok := m["localeLabels"].(map[string]interface{}); ok {
+			cfg.I18n.LocaleLabels = interfaceStringMap(mm)
+		}
+		if s, ok := m["routing"].(string); ok {
+			cfg.I18n.Routing = s
+		}
+	case "versions":
+		m, ok := val.(map[string]interface{})
+		if !ok {
+			return fmt.Errorf("expected object, got %T", val)
+		}
+		if s, ok := m["current"].(string); ok {
+			cfg.Versions.Current = s
+		}
+		if arr, ok := m["versions"].([]interface{}); ok {
+			cfg.Versions.Versions = interfaceStrings(arr)
+		}
+		if mm, ok := m["labels"].(map[string]interface{}); ok {
+			cfg.Versions.Labels = interfaceStringMap(mm)
+		}
+		if b, ok := m["banner"].(bool); ok {
+			cfg.Versions.Banner = &b
+		}
 	case "output":
 		s, ok := val.(string)
 		if !ok {
@@ -567,7 +1362,16 @@ func applyConfigProp(cfg *Config, key string, val interface{}) error {
 		}
 		cfg.Output = s
 	default:
-		// Unknown config keys are silently ignored for forward compatibility
+		// Keys without a dedicated case are applied by JSON round-trip, so a new
+		// Config field needs no per-key switch entry here. Unknown keys are
+		// ignored (and reported by UnknownKeyWarnings) for forward compatibility.
+		data, err := json.Marshal(map[string]interface{}{key: val})
+		if err != nil {
+			return err
+		}
+		if err := json.Unmarshal(data, cfg); err != nil {
+			return fmt.Errorf("%s: %w", key, err)
+		}
 	}
 	return nil
 }

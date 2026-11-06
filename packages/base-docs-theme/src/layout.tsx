@@ -1,4 +1,5 @@
 import { SidebarNav, TOCNav, Breadcrumbs, PrevNext, SocialLinks } from "./chrome";
+import { DocsSearch } from "./search";
 import { createSignal, createEffect, onMount, onCleanup } from "@krate/runtime";
 import "./theme.css";
 
@@ -32,6 +33,11 @@ interface SocialLinkItem {
   name: string;
 }
 
+interface TaxonomyLink {
+  name: string;
+  url: string;
+}
+
 interface HeroAction {
   text: string;
   link: string;
@@ -43,6 +49,24 @@ interface HeroData {
   tagline?: string;
   image?: string;
   actions?: HeroAction[];
+}
+
+interface AltLink {
+  code?: string;
+  label: string;
+  url: string;
+  /** No translation of this page: the link goes to that locale's home. */
+  fallback?: boolean;
+}
+
+interface I18nProps {
+  locale?: string;
+  defaultLocale?: string;
+  version?: string;
+  currentVersion?: string;
+  locales?: AltLink[];
+  versions?: AltLink[];
+  versionBanner?: boolean;
 }
 
 interface BaseDocsLayoutProps {
@@ -58,25 +82,75 @@ interface BaseDocsLayoutProps {
   nextLink?: string;
   socialLinks: SocialLinkItem[];
   currentPath: string;
+  /** URL prefix the docs are mounted under (default "/docs"). */
+  routeBase?: string;
   description?: string;
+  /** The page's leading <h1>, when the docs plugin passes it separately. */
+  titleHTML?: string;
   template?: "doc" | "hero";
   hero?: HeroData;
   tocHidden?: boolean;
   tocLabel?: string;
   editUrl?: string;
   tags?: string[];
+  categories?: string[];
+  tagLinks?: TaxonomyLink[];
+  categoryLinks?: TaxonomyLink[];
+  date?: string;
+  lastUpdated?: string;
+  authors?: string[];
+  i18n?: I18nProps;
+  search?: { placeholder?: string; hotkey?: string };
+  options?: {
+    themeStorageKey?: string;
+    feedback?: { repo: string; discussions?: boolean; label?: string };
+  };
+}
+
+function feedbackURL(fb: { repo: string; discussions?: boolean }, title: string, positive: boolean): string {
+  const kind = fb.discussions ? "discussions/new" : "issues/new";
+  const heading = (positive ? "Docs feedback (helpful): " : "Docs feedback (not helpful): ") + title;
+  const body = "Page: " + title;
+  return (
+    "https://github.com/" +
+    fb.repo +
+    "/" +
+    kind +
+    "?title=" +
+    encodeURIComponent(heading) +
+    "&body=" +
+    encodeURIComponent(body)
+  );
 }
 
 export default function BaseDocsLayout(props: BaseDocsLayoutProps) {
   const pageTitle = props.pageTitle;
   const siteTitle = props.siteTitle;
+  const themeOptions = props.options || {};
+  const themeKey = themeOptions.themeStorageKey || "theme";
+  const routeBase = props.routeBase || "/docs";
   const tocItems = props.tocItems || [];
   const showToc = !props.tocHidden && tocItems.length > 0;
   const tocHeading = props.tocLabel || "On this page";
   const description = props.description;
   const editUrl = props.editUrl;
-  const hasTags = props.tags && props.tags.length > 0;
-  const tags = props.tags;
+  const tags = props.tags || [];
+  const hasTags = tags.length > 0;
+  const categories = props.categories || [];
+  const hasCategories = categories.length > 0;
+  const tagLinks = props.tagLinks || [];
+  const categoryLinks = props.categoryLinks || [];
+  const lastUpdated = props.lastUpdated || "";
+  const i18n = props.i18n || {};
+  const localeLinks = i18n.locales || [];
+  const versionLinks = i18n.versions || [];
+  const activeVersion = i18n.version || i18n.currentVersion;
+  let currentVersionURL = "";
+  if (i18n.versions) {
+    for (const v of i18n.versions) {
+      if (v.code === i18n.currentVersion) currentVersionURL = v.url;
+    }
+  }
   const isHero = props.template === "hero";
   const heroTitle = props.hero && props.hero.title ? props.hero.title : pageTitle;
   const heroTagline = props.hero && props.hero.tagline;
@@ -86,6 +160,7 @@ export default function BaseDocsLayout(props: BaseDocsLayoutProps) {
   const [tocOpen, setTocOpen] = createSignal(false);
 
   var themeBtnRef: HTMLElement | null = null;
+  var themeSideBtnRef: HTMLElement | null = null;
   var sideBtnRef: HTMLElement | null = null;
   var overlayRef: HTMLElement | null = null;
   var sidebarRef: HTMLElement | null = null;
@@ -96,7 +171,7 @@ export default function BaseDocsLayout(props: BaseDocsLayoutProps) {
   onMount(function () {
     var saved = "";
     try {
-      saved = localStorage.getItem("theme") || "";
+      saved = localStorage.getItem(themeKey) || "";
     } catch (e) {}
     var dark = saved === "dark";
     if (!dark && saved !== "light") {
@@ -128,9 +203,14 @@ export default function BaseDocsLayout(props: BaseDocsLayoutProps) {
     if (typeof document !== "undefined" && document.documentElement) {
       document.documentElement.setAttribute("data-theme", isDark ? "dark" : "light");
     }
+    var label = isDark ? "Switch to light mode" : "Switch to dark mode";
     if (themeBtnRef) {
-      themeBtnRef.setAttribute("aria-label", isDark ? "Switch to light mode" : "Switch to dark mode");
+      themeBtnRef.setAttribute("aria-label", label);
       themeBtnRef.setAttribute("data-theme-state", isDark ? "dark" : "light");
+    }
+    if (themeSideBtnRef) {
+      themeSideBtnRef.setAttribute("aria-label", label);
+      themeSideBtnRef.setAttribute("data-theme-state", isDark ? "dark" : "light");
     }
   });
 
@@ -174,7 +254,7 @@ export default function BaseDocsLayout(props: BaseDocsLayoutProps) {
     var next = theme() === "dark" ? "light" : "dark";
     setTheme(next);
     try {
-      localStorage.setItem("theme", next);
+      localStorage.setItem(themeKey, next);
     } catch (e) {}
   }
 
@@ -182,11 +262,58 @@ export default function BaseDocsLayout(props: BaseDocsLayoutProps) {
     <div class={`docs-page${showToc ? "" : " docs-page-no-toc"}`}>
       <Head>
         <title>{pageTitle} - {siteTitle}</title>
+        <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+        <meta name="theme-color" content="#0a0a0a" media="(prefers-color-scheme: dark)" />
       </Head>
 
+      <a class="skip-link" href="#main">Skip to content</a>
+
+      {i18n.versionBanner && (
+        <div class="docs-version-banner">
+          <span>You're viewing an older version ({i18n.version}).</span>
+          {currentVersionURL && (
+            <Link class="docs-version-banner-link" href={currentVersionURL}>
+              Go to the latest
+            </Link>
+          )}
+        </div>
+      )}
+
       <header class="docs-navbar">
-        <a class="navbar-title" href="/docs/">{siteTitle}</a>
+            <Link className="navbar-title" href={routeBase + "/"}>{siteTitle}</Link>
         <div class="navbar-actions">
+          <div class="navbar-switchers">
+            {versionLinks.length > 1 && (
+              <details class="krate-switcher krate-version-switcher">
+                <summary aria-label="Change version">
+                  <Icon name="tabler:versions" width="16" height="16" />
+                  <span class="krate-switcher-current">{activeVersion}</span>
+                </summary>
+                <div class="krate-switcher-menu">
+                  {versionLinks.map((v) => (
+                    <Link class={v.code === activeVersion ? "active" : ""} href={v.url}>
+                      {v.label}
+                    </Link>
+                  ))}
+                </div>
+              </details>
+            )}
+            {localeLinks.length > 1 && (
+              <details class="krate-switcher">
+                <summary aria-label="Change language">
+                  <Icon name="tabler:world" width="16" height="16" />
+                </summary>
+                <div class="krate-switcher-menu">
+                  {localeLinks.map((l) => (
+                    <Link class={(l.code === i18n.locale ? "active" : "") + (l.fallback ? " fallback" : "")} href={l.url} title={l.fallback ? "Not translated - opens the home page" : undefined}>
+                      {l.label}
+                    </Link>
+                  ))}
+                </div>
+              </details>
+            )}
+          </div>
+          <DocsSearch placeholder={props.search?.placeholder} hotkey={props.search?.hotkey} />
           <div class="navbar-social-links">
             <SocialLinks links={props.socialLinks} />
           </div>
@@ -218,7 +345,7 @@ export default function BaseDocsLayout(props: BaseDocsLayoutProps) {
         <div class="toc-overlay" id="toc-overlay" ref={tocOverlayRef} onClick={closeNav}></div>
       )}
 
-      <nav class="sidebar" id="sidebar" ref={sidebarRef}>
+      <nav class="sidebar" id="sidebar" aria-label="Documentation" ref={sidebarRef}>
         <div class="sidebar-header">
           <div class="sidebar-header-row">
             <div class="sidebar-social-links">
@@ -228,13 +355,51 @@ export default function BaseDocsLayout(props: BaseDocsLayoutProps) {
               <Icon name="tabler:x" width="18" height="18" />
             </button>
           </div>
+          <div class="sidebar-switchers">
+            {versionLinks.length > 1 && (
+              <details class="krate-switcher krate-version-switcher">
+                <summary aria-label="Change version">
+                  <Icon name="tabler:versions" width="16" height="16" />
+                  <span class="krate-switcher-current">{activeVersion}</span>
+                </summary>
+                <div class="krate-switcher-menu">
+                  {versionLinks.map((v) => (
+                    <Link class={v.code === activeVersion ? "active" : ""} href={v.url}>
+                      {v.label}
+                    </Link>
+                  ))}
+                </div>
+              </details>
+            )}
+            {localeLinks.length > 1 && (
+              <details class="krate-switcher">
+                <summary aria-label="Change language">
+                  <Icon name="tabler:world" width="16" height="16" />
+                </summary>
+                <div class="krate-switcher-menu">
+                  {localeLinks.map((l) => (
+                    <Link class={(l.code === i18n.locale ? "active" : "") + (l.fallback ? " fallback" : "")} href={l.url} title={l.fallback ? "Not translated - opens the home page" : undefined}>
+                      {l.label}
+                    </Link>
+                  ))}
+                </div>
+              </details>
+            )}
+            <button class="theme-toggle" ref={themeSideBtnRef} aria-label="Toggle color theme" type="button" onClick={toggleTheme}>
+              <Icon name="tabler:sun" width="16" height="16" />
+              <Icon name="tabler:moon" width="16" height="16" />
+            </button>
+          </div>
         </div>
         <SidebarNav items={props.sidebarItems} currentPath={props.currentPath} onNavigate={closeNav} />
       </nav>
 
       <div class="docs-body">
-        <main class="docs-main">
+        <main class="docs-main" id="main">
           <Breadcrumbs items={props.breadcrumbs} />
+          {props.titleHTML && (
+            <div class="docs-content docs-title" data-pagefind-body dangerouslySetInnerHTML={{ __html: props.titleHTML }} />
+          )}
           {description && <p class="docs-description">{description}</p>}
           {isHero && (
             <section class="docs-hero">
@@ -243,22 +408,39 @@ export default function BaseDocsLayout(props: BaseDocsLayoutProps) {
               {heroActions && (
                 <div class="docs-hero-actions">
                   {heroActions.map((action) => (
-                    <a
-                      class={`docs-hero-action${action.variant ? " docs-hero-action-" + action.variant : ""}`}
+                    <Link
+                      className={`docs-hero-action${action.variant ? " docs-hero-action-" + action.variant : ""}`}
                       href={action.link}
                     >
                       {action.text}
-                    </a>
+                    </Link>
                   ))}
                 </div>
               )}
             </section>
           )}
           <div class="docs-content">{props.children}</div>
-          {hasTags && (
+          {(hasTags || hasCategories) && (
             <div class="docs-tags">
-              {tags.map((tag) => (<span class="docs-tag">{tag}</span>))}
+              {tagLinks.length > 0
+                ? tagLinks.map((tag) => (
+                    <Link className="docs-tag" href={tag.url}>{tag.name}</Link>
+                  ))
+                : tags.map((tag) => <span class="docs-tag">{tag}</span>)}
+              {categoryLinks.length > 0
+                ? categoryLinks.map((cat) => (
+                    <Link className="docs-tag docs-category" href={cat.url}>{cat.name}</Link>
+                  ))
+                : categories.map((cat) => <span class="docs-tag docs-category">{cat}</span>)}
             </div>
+          )}
+          {lastUpdated !== "" && (
+            <p class="docs-last-updated">Last updated: {lastUpdated.slice(0, 10)}</p>
+          )}
+          {props.authors && props.authors.length > 0 && (
+            <p class="docs-contributors">
+              <span>Contributors:</span> {props.authors.join(", ")}
+            </p>
           )}
           <PrevNext
             prevTitle={props.prevTitle}
@@ -266,12 +448,39 @@ export default function BaseDocsLayout(props: BaseDocsLayoutProps) {
             nextTitle={props.nextTitle}
             nextLink={props.nextLink}
           />
-          {editUrl && (
-            <a class="docs-edit-link" href={editUrl}>
-              <Icon name="tabler:pencil" width="14" height="14" />
-              <span>Edit this page</span>
-            </a>
-          )}
+          <div class="docs-page-footer">
+            {editUrl && (
+              <a class="docs-edit-link" href={editUrl}>
+                <Icon name="tabler:pencil" width="14" height="14" />
+                <span>Edit this page</span>
+              </a>
+            )}
+            {themeOptions.feedback && (
+              <div class="docs-feedback">
+                <span class="docs-feedback-label">
+                  {themeOptions.feedback.label || "Was this helpful?"}
+                </span>
+                <a
+                  class="docs-feedback-btn"
+                  href={feedbackURL(themeOptions.feedback, pageTitle, true)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  aria-label="Yes, this page was helpful"
+                >
+                  <Icon name="lucide:thumbs-up" width="16" height="16" />
+                </a>
+                <a
+                  class="docs-feedback-btn"
+                  href={feedbackURL(themeOptions.feedback, pageTitle, false)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  aria-label="No, this page was not helpful"
+                >
+                  <Icon name="lucide:thumbs-down" width="16" height="16" />
+                </a>
+              </div>
+            )}
+          </div>
         </main>
 
         {showToc && (

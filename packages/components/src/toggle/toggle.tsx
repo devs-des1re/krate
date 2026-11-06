@@ -1,55 +1,33 @@
 import './toggle.css';
-import { createSignal, createEffect } from '@krate/runtime';
+import { createCSSToggle } from '@krate/runtime';
 
 export interface ToggleProps {
-  pressed?: boolean;
-  defaultPressed?: boolean;
-  onPressedChange?: (pressed: boolean) => void;
-  disabled?: boolean;
   variant?: 'default' | 'outline';
   size?: 'sm' | 'md' | 'lg';
   children?: any;
+  /** Accessible name when the children are only an icon. */
+  label?: string;
+  id?: string;
+  class?: string;
+  /** Alias of `class`. */
+  className?: string;
 }
 
+/**
+ * Toggle button. Zero JS: compiles to a hidden checkbox plus `:has()` CSS. The
+ * visual pressed state is driven by the inherited `--krate-active` property.
+ */
 export function Toggle(props: ToggleProps) {
-  var [pressed, setPressed] = createSignal(props.defaultPressed || false);
-
-  createEffect(function () {
-    if (props.pressed !== undefined) {
-      setPressed(props.pressed);
-    }
-  });
-
-  function toggle() {
-    if (props.disabled) return;
-    var next = !pressed();
-    setPressed(next);
-    if (props.onPressedChange) {
-      props.onPressedChange(next);
-    }
-  }
-
-  function handleKeyDown(e: KeyboardEvent) {
-    if (e.key === " " || e.key === "Enter") {
-      e.preventDefault();
-      toggle();
-    }
-  }
-
-  var className = "krate-toggle";
-  if (props.variant === "outline") className += " krate-toggle-outline";
-  if (props.size === "sm") className += " krate-toggle-sm";
-  else if (props.size === "lg") className += " krate-toggle-lg";
-
+  const [pressed, setPressed] = createCSSToggle(false);
   return (
     <button
-      class={className}
+      class={"krate-toggle" + (props.class ? " " + props.class : "") + (props.className ? " " + props.className : "")}
+      id={props.id}
+      aria-label={props.label}
+      data-variant={props.variant || 'default'}
+      data-size={props.size || 'md'}
       type="button"
-      aria-pressed={pressed() ? "true" : "false"}
-      data-state={pressed() ? "on" : "off"}
-      disabled={props.disabled}
-      onClick={toggle}
-      onKeyDown={handleKeyDown}
+      onClick={() => setPressed(!pressed())}
     >
       {props.children}
     </button>

@@ -15,7 +15,7 @@ import (
 	"github.com/kratejs/krate/packages/compiler/internal/parser"
 )
 
-// ─── Test helpers ────────────────────────────────────────────────────────────
+// Test helpers
 
 func parseProg(t *testing.T, src string) *ast.Program {
 	t.Helper()
@@ -56,7 +56,7 @@ func fullPipelineWithReact(t *testing.T, src string) (*EmitResult, string) {
 	return result, hydrationJS
 }
 
-// ─── Shared utility tests ────────────────────────────────────────────────────
+// Shared utility tests
 
 func TestEscapeHTML(t *testing.T) {
 	tests := []struct {
@@ -139,6 +139,8 @@ func TestItoa(t *testing.T) {
 		{42, "42"},
 		{123, "123"},
 		{999, "999"},
+		{-1, "-1"},
+		{-42, "-42"},
 	}
 	for _, tt := range tests {
 		got := itoa(tt.input)
@@ -166,16 +168,7 @@ func TestEscapeJSString(t *testing.T) {
 	}
 }
 
-func TestToFloat(t *testing.T) {
-	if f := toFloat("3.14"); f < 3.13 || f > 3.15 {
-		t.Errorf("expected ~3.14, got %f", f)
-	}
-	if f := toFloat(""); f != 0 {
-		t.Errorf("expected 0 for empty string, got %f", f)
-	}
-}
-
-// ─── New pipeline: HTML output tests ─────────────────────────────────────────
+// New pipeline: HTML output tests
 
 func TestRenderSimpleHTML(t *testing.T) {
 	result, _ := fullPipeline(t, `export default function Page() { return <div>hello</div>; }`)
@@ -240,7 +233,7 @@ func TestRenderNestedElements(t *testing.T) {
 	}
 }
 
-// ─── New pipeline: Signal detection ──────────────────────────────────────────
+// New pipeline: Signal detection
 
 func TestSignalDetection(t *testing.T) {
 	result, _ := fullPipeline(t, `export default function Page() { const [count, setCount] = createSignal(0); return <div>{count()}</div>; }`)
@@ -367,14 +360,14 @@ export default function Page() {
 	if strings.Contains(js, "setRef=el;") || strings.Contains(js, "setRef = el;") {
 		t.Errorf("named callback ref must not compile to an assignment that overwrites the function:\n%s", js)
 	}
-	if !strings.Contains(js, "kbindRef(") || !strings.Contains(js, ",setRef)") {
-		t.Errorf("expected kbindRef(id, setRef) invoking the named function, got:\n%s", js)
+	if !strings.Contains(js, "kbindRef(") || !strings.Contains(js, ",()=>(setRef))") {
+		t.Errorf("expected kbindRef(id, ()=>(setRef)) invoking the named function, got:\n%s", js)
 	}
 }
 
 func TestHydrationJSCallbackRef(t *testing.T) {
 	// Callback refs (ref={(el) => { rootRef = el; }}) must be emitted as the
-	// callback itself — kbindRef(id, (el)=>{...}) — NOT wrapped as an assignment
+	// callback itself - kbindRef(id, (el)=>{...}) - NOT wrapped as an assignment
 	// target (kbindRef(id, el=>{(el)=>{...}=el;})) which is a syntax error.
 	src := `function Widget() {
   var [count, setCount] = createSignal(0);
@@ -391,7 +384,8 @@ export default function Page() {
 	if strings.Contains(js, "=el;}))") || strings.Contains(js, "}=el;") {
 		t.Errorf("callback ref must not be wrapped as an assignment target:\n%s", js)
 	}
-	if !strings.Contains(js, "(el)=>{rootRef = el;}") && !strings.Contains(js, "(el)=>{(rootRef = el);}") {
+	flat := strings.Join(strings.Fields(js), "")
+	if !strings.Contains(flat, "(el)=>{rootRef=el;}") && !strings.Contains(flat, "(el)=>{(rootRef=el);}") {
 		t.Errorf("expected the arrow callback passed to kbindRef, got:\n%s", js)
 	}
 }
@@ -404,7 +398,7 @@ func TestHydrationJSPropsDeclPrecedesSignalInits(t *testing.T) {
 	// vars, so the `var props=__krate_props[...]` decl must be hoisted above
 	// them.
 	src := `function RadioGroup(props) {
-  var [selected, setSelected] = createSignal((props.defaultValue || "").trim());
+  var [selected, setSelected] = createSignal((props.defaultValue || "").normalize());
   function handleChange(v) {
     setSelected(v);
     if (props.onValueChange) props.onValueChange(v);
@@ -420,6 +414,9 @@ export default function Page() {
 }`
 	_, js := fullPipeline(t, src)
 	propsDecl := "var props=__krate_props["
+	// String.prototype.normalize has no build-time implementation, so the
+	// initializer stays a runtime expression (a foldable one such as .trim()
+	// is folded to its value instead).
 	sigIdx := strings.Index(js, "props.defaultValue")
 	declIdx := strings.Index(js, propsDecl)
 	if sigIdx == -1 {
@@ -526,7 +523,7 @@ export default function Page() {
 	}
 }
 
-// ─── New pipeline: Component tiers ───────────────────────────────────────────
+// New pipeline: Component tiers
 
 func TestServerComponentRendering(t *testing.T) {
 	src := `// @server
@@ -586,7 +583,7 @@ export default Page;`
 	}
 }
 
-// ─── New pipeline: React interop (always on, via bundler.RewriteReact) ───────
+// New pipeline: React interop (always on, via bundler.RewriteReact)
 
 func TestReactInteropSignalDetection(t *testing.T) {
 	src := `import { useState } from 'react';
@@ -695,7 +692,7 @@ func TestReactInteropHandlerWithCreateSignal(t *testing.T) {
 	}
 }
 
-// ─── New pipeline: Hydration correctness ─────────────────────────────────────
+// New pipeline: Hydration correctness
 
 func TestHandlerIndicesUnique(t *testing.T) {
 	src := `
@@ -800,7 +797,7 @@ func TestStringSignalInitialValue(t *testing.T) {
 	}
 }
 
-// ─── New pipeline: Complex scenarios ─────────────────────────────────────────
+// New pipeline: Complex scenarios
 
 func TestMultiComponentHandlerMangling(t *testing.T) {
 	src := `function CompA(props) {
@@ -1026,7 +1023,7 @@ export default function Page() {
 	}
 }
 
-// ─── <SyntaxHighlight> compile-time chroma ───────────────────────────────────
+// <SyntaxHighlight> compile-time chroma
 
 func TestSSREvalSyntaxHighlightHighlightsStaticCallSiteChildren(t *testing.T) {
 	// A signal-less (SSR-evaluated) wrapper passing {children} through to
@@ -1041,5 +1038,18 @@ export default function Page() {
 	result, _ := fullPipeline(t, src)
 	if !strings.Contains(result.HTML, "language-js") || !strings.Contains(result.HTML, "<span") {
 		t.Errorf("expected chroma-highlighted output for static children, got:\n%s", result.HTML)
+	}
+}
+
+func TestSSREvalSyntaxHighlightMarksHighlightedLines(t *testing.T) {
+	src := `function Shell(props) {
+	return <div><SyntaxHighlight lang={props.lang} highlight={props.hl}>{props.children}</SyntaxHighlight></div>;
+}
+export default function Page() {
+	return <Shell lang="js" hl="2">{` + "`const a = 1;\nconst b = 2;\nconst c = 3;`" + `}</Shell>;
+}`
+	result, _ := fullPipeline(t, src)
+	if strings.Count(result.HTML, `class="line hl"`) != 1 || !strings.Contains(result.HTML, `data-highlight-lines`) {
+		t.Errorf("expected exactly the second line marked, got:\n%s", result.HTML)
 	}
 }

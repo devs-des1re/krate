@@ -1,6 +1,7 @@
 package jsruntime
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -9,35 +10,76 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 )
 
-// APIRouteRuntime executes compiled API routes via embedded quickjs
+// APIRouteRuntime executes compiled API routes via embedded quickjs.
+//
+// In the default (shared) mode it keeps a pool of long-lived VMs, each of which
+// loads a route module once and reuses it, so a request costs one handler call
+// rather than a fresh VM + full module re-evaluation. Module state persists per
+// worker across requests, matching Node/Next semantics.
+//
+// In isolation mode it creates a fresh VM per request (slower, but each request
+// gets clean module state); this is also used in dev so file edits are picked up.
 type APIRouteRuntime struct {
-	apiDir string
-	env    map[string]string
-	mu     sync.Mutex
+	apiDir    string
+	env       map[string]string
+	hooks     *CacheHooks
+	workers   int
+	isolation bool
+
+	mu      sync.Mutex
+	created int
+	idle    chan *apiWorker
+
+	prepMu sync.Mutex
+	prep   map[string]*preparedRoute
 }
 
-// SetEnv injects environment variables into every VM created by Execute.
-func (a *APIRouteRuntime) SetEnv(env map[string]string) {
-	a.env = env
-}
-
-// APIRequest is the input to an API route handler
+// APIRequest is the input to an API route handler.
 type APIRequest struct {
-	URL     string            `json:"url"`
-	Method  string            `json:"method"`
-	Path    string            `json:"path"`
-	Headers map[string]string `json:"headers"`
-	Body    string            `json:"body"`
+	URL    string
+	Method string
+	Path   string
+	// Headers are the request headers as received (multi-valued).
+	Headers map[string][]string
+	// Body is the raw request body; it crosses into the VM as base64.
+	Body []byte
+	// Params are the dynamic route segments ([id], [...slug]), matching the
+	// second argument Next.js route handlers receive.
+	Params map[string]string
+	// RemoteAddr is the client address (host:port) for legacy handlers.
+	RemoteAddr string
 }
 
-// APIResult is the output of an API route handler
+// APIResult is a fully buffered API response (used by tests and callers that
+// do not stream).
 type APIResult struct {
-	Status  int               `json:"status"`
-	Headers map[string]string `json:"headers"`
-	Body    string            `json:"body"`
-	Error   string            `json:"error"`
+	Status  int
+	Headers map[string][]string
+	Body    []byte
+	Error   string
+	Stack   string
+	Allow   []string
+}
+
+// APISink receives a response as the handler produces it.
+type APISink interface {
+	// Start is called once, before any Write, with the response head.
+	Start(status int, headers [][2]string) error
+	// Write delivers one body chunk; an error means the client is gone.
+	Write(p []byte) error
+}
+
+// APIFailure describes a request that did not produce a response head (or a
+// stream that broke afterwards, with Started set).
+type APIFailure struct {
+	Status  int
+	Message string
+	Stack   string
+	Allow   []string
+	Started bool
 }
 
 // stripExports removes ESM export statements and converts named exports to globals.
@@ -46,11 +88,11 @@ type APIResult struct {
 func stripExports(code string) string {
 	// Phase 1: Whole-text regex replacements for multi-line patterns
 
-	// export { X as default }; â†’ var __default = X;
+	// export { X as default }; -> var __default = X;
 	reMultiLineAsDefault := regexp.MustCompile(`export\s*\{\s*(\w+)\s+as\s+(\w+)\s*\}\s*;?`)
 	code = reMultiLineAsDefault.ReplaceAllString(code, "var __default = $1;")
 
-	// export { a as X, b as Y }; â†’ var X = a; var Y = b;
+	// export { a as X, b as Y }; -> var X = a; var Y = b;
 	// Handle multi-name export blocks with as-clauses
 	reExportAsBlock := regexp.MustCompile(`export\s*\{([^}]*)\}`)
 	if m := reExportAsBlock.FindStringSubmatch(code); m != nil {
@@ -62,18 +104,18 @@ func stripExports(code string) string {
 			if part == "" {
 				continue
 			}
-			// Check for "local as exported"
+			// Check for "local as exported". A plain name (no "as") is already
+			// a global from its function/const declaration, so skip it.
 			asParts := strings.SplitN(part, " as ", 2)
-			if len(asParts) == 2 {
-				local := strings.TrimSpace(asParts[0])
-				exported := strings.TrimSpace(asParts[1])
-				if exported == "default" {
-					bindings = append(bindings, fmt.Sprintf("var __default = %s;", local))
-				} else {
-					bindings = append(bindings, fmt.Sprintf("var %s = %s;", exported, local))
-				}
+			if len(asParts) != 2 {
+				continue
+			}
+			local := strings.TrimSpace(asParts[0])
+			exported := strings.TrimSpace(asParts[1])
+			if exported == "default" {
+				bindings = append(bindings, fmt.Sprintf("var __default = %s;", local))
 			} else {
-				// Plain name â€” already a global from function/const declaration
+				bindings = append(bindings, fmt.Sprintf("var %s = %s;", exported, local))
 			}
 		}
 		// Replace the entire export block with the bindings
@@ -86,15 +128,15 @@ func stripExports(code string) string {
 	var result []string
 
 	reExportDefaultDecl := regexp.MustCompile(`^export\s+default\s+`)
-	reExportDecl := regexp.MustCompile(`^export\s+(const|let|var|function|class)\s+`)
+	reExportDecl := regexp.MustCompile(`^export\s+(async\s+function|const|let|var|function|class)\s+`)
 
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 
-		// export default ... â†’ need special handling
+		// export default ... -> need special handling
 		if reExportDefaultDecl.MatchString(trimmed) {
 			stripped := reExportDefaultDecl.ReplaceAllString(trimmed, "")
-			// "export default function(...)" â†’ "function _default(...)"
+			// "export default function(...)" -> "function _default(...)"
 			reAnonFunc := regexp.MustCompile(`^function\s*\(`)
 			if reAnonFunc.MatchString(stripped) {
 				stripped = "function _default(" + strings.TrimPrefix(stripped, "function(")
@@ -104,7 +146,7 @@ func stripExports(code string) string {
 			continue
 		}
 
-		// export const/let/var/function/class â†’ const/let/var/function/class
+		// export const/let/var/function/class -> const/let/var/function/class
 		if reExportDecl.MatchString(trimmed) {
 			result = append(result, reExportDecl.ReplaceAllString(trimmed, "$1 "))
 			continue
@@ -123,15 +165,105 @@ func stripExports(code string) string {
 
 // NewAPIRouteRuntime creates a new API route runtime
 func NewAPIRouteRuntime(apiDir string) *APIRouteRuntime {
-	return &APIRouteRuntime{apiDir: apiDir}
+	return &APIRouteRuntime{
+		apiDir:  apiDir,
+		workers: DefaultAPIWorkers(),
+		idle:    make(chan *apiWorker, DefaultAPIWorkers()),
+		prep:    make(map[string]*preparedRoute),
+	}
 }
 
-// Execute runs the API route handler for the given path
-func (a *APIRouteRuntime) Execute(req APIRequest) APIResult {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+// SetEnv injects environment variables into every worker created by the pool.
+// Call before serving.
+func (a *APIRouteRuntime) SetEnv(env map[string]string) {
+	a.env = env
+	// Propagate to already-created idle workers (best effort).
+	for {
+		select {
+		case w := <-a.idle:
+			_ = w.rt.SetEnv(env)
+			a.idle <- w
+		default:
+			return
+		}
+	}
+}
 
-	// Resolve the API file
+// SetCacheHooks connects routes to the host's revalidation endpoint and data
+// cache (revalidatePath/revalidateTag, unstable_cache, fetch caching). Call
+// before serving.
+func (a *APIRouteRuntime) SetCacheHooks(h *CacheHooks) {
+	a.hooks = h
+}
+
+// SetPool configures the pool size and whether each request runs in a fresh VM
+// (isolation) instead of a shared, stateful worker. Call before serving.
+func (a *APIRouteRuntime) SetPool(workers int, isolation bool) {
+	if workers > 0 {
+		a.workers = workers
+		a.idle = make(chan *apiWorker, workers)
+	}
+	a.isolation = isolation
+}
+
+// Close releases all idle workers.
+func (a *APIRouteRuntime) Close() {
+	for {
+		select {
+		case w := <-a.idle:
+			if w != nil && w.rt != nil {
+				_ = w.rt.Close()
+			}
+		default:
+			return
+		}
+	}
+}
+
+// bufferSink collects a response into memory.
+type bufferSink struct {
+	status  int
+	headers [][2]string
+	body    []byte
+}
+
+func (b *bufferSink) Start(status int, headers [][2]string) error {
+	b.status, b.headers = status, headers
+	return nil
+}
+
+func (b *bufferSink) Write(p []byte) error {
+	b.body = append(b.body, p...)
+	return nil
+}
+
+// Execute runs the API route handler for the given path and buffers the
+// whole response.
+func (a *APIRouteRuntime) Execute(req APIRequest) APIResult {
+	sink := &bufferSink{}
+	fail := a.Serve(context.Background(), req, sink)
+	if fail != nil && !fail.Started {
+		res := APIResult{Status: fail.Status, Error: fail.Message, Stack: fail.Stack, Allow: fail.Allow, Body: []byte(jsonError(fail.Message))}
+		res.Headers = map[string][]string{"content-type": {"application/json"}}
+		return res
+	}
+	res := APIResult{Status: sink.status, Body: sink.body, Headers: map[string][]string{}}
+	for _, h := range sink.headers {
+		res.Headers[h[0]] = append(res.Headers[h[0]], h[1])
+	}
+	if fail != nil {
+		res.Error = fail.Message
+	}
+	return res
+}
+
+// apiTimeout bounds how long a handler may stay pending (per phase: waiting
+// for the response head, and waiting for each streamed chunk).
+func apiTimeout() time.Duration { return envDuration("KRATE_API_TIMEOUT", 30*time.Second) }
+
+// Serve runs the route and streams the response into sink. It returns nil on
+// success, or a failure describing what went wrong.
+func (a *APIRouteRuntime) Serve(ctx context.Context, req APIRequest, sink APISink) *APIFailure {
 	relPath := strings.TrimPrefix(req.Path, "/api")
 	if relPath == "" {
 		relPath = "/index"
@@ -139,189 +271,131 @@ func (a *APIRouteRuntime) Execute(req APIRequest) APIResult {
 
 	targetFile := a.resolveAPIFile(relPath)
 	if targetFile == "" {
-		return APIResult{Status: 404, Body: `{"error":"API Route Not Found"}`}
+		return &APIFailure{Status: 404, Message: "API Route Not Found"}
 	}
 
-	// Create a new VM for this request (API routes should not share state)
-	rt, err := New()
+	version := fileVersion(targetFile)
+	prep, err := a.prepared(targetFile, version)
 	if err != nil {
-		return APIResult{Status: 500, Body: `{"error":"Failed to create JS runtime"}`}
+		return &APIFailure{Status: 500, Message: "Failed to read API route: " + err.Error()}
 	}
-	defer rt.Close()
 
-	rt.SetEnv(a.env)
-
-	code, err := os.ReadFile(targetFile)
+	worker, err := a.acquireWorker()
 	if err != nil {
-		return APIResult{Status: 500, Body: `{"error":"Failed to read API route"}`}
+		return &APIFailure{Status: 500, Message: "Failed to create JS runtime: " + err.Error()}
+	}
+	defer a.releaseWorker(worker)
+
+	if err := worker.ensure(targetFile, prep.code, version); err != nil {
+		return &APIFailure{Status: 500, Message: err.Error()}
 	}
 
-	// Strip ESM export statements for global scope execution
-	cleanCode := stripExports(string(code))
+	req.Params = apiRouteParams(a.apiDir, targetFile, req.Path)
+	return worker.run(ctx, targetFile, req, sink)
+}
 
-	_, err = rt.Execute(cleanCode + "\n")
+// prepared returns the (export-stripped) source for a route, cached by content
+// version so a stable build reads/strips each route exactly once.
+func (a *APIRouteRuntime) prepared(path string, version int64) (*preparedRoute, error) {
+	a.prepMu.Lock()
+	defer a.prepMu.Unlock()
+
+	if p, ok := a.prep[path]; ok && p.version == version {
+		return p, nil
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
-		return APIResult{Status: 500, Body: jsonError(err.Error())}
+		return nil, err
 	}
+	p := &preparedRoute{code: stripExports(string(data)), version: version}
+	a.prep[path] = p
+	return p, nil
+}
 
-	// Find the handler: try GET, POST, PUT, DELETE, PATCH, OPTIONS, HEAD, then default
-	method := strings.ToUpper(req.Method)
-	handlerName := a.findHandler(rt, method)
-
-	if handlerName == "" {
-		return APIResult{Status: 500, Body: `{"error":"API route must export a handler function"}`}
+// fileVersion is a cheap change token: modification time (ns) plus size. It
+// lets a long-lived worker detect an edited route and reload it (dev).
+func fileVersion(path string) int64 {
+	fi, err := os.Stat(path)
+	if err != nil {
+		return 0
 	}
+	return fi.ModTime().UnixNano() ^ (fi.Size() << 1)
+}
 
-	// Check if this is a legacy handler(req, res) vs modern handler(request)
-	// Function.length gives the number of formal parameters
-	isLegacy, _ := rt.Execute(fmt.Sprintf(`typeof %s === 'function' && %s.length >= 2`, handlerName, handlerName))
+// ResolveFile returns the out-dir-relative file name (slash-separated, e.g.
+// "users/index.js") that would serve the given request path, or "" when none
+// exists. The server uses it to decide whether a Node-only route must be
+// forwarded to the sidecar.
+func (a *APIRouteRuntime) ResolveFile(reqPath string) string {
+	relPath := strings.TrimPrefix(reqPath, "/api")
+	if relPath == "" {
+		relPath = "/index"
+	}
+	p := a.resolveAPIFile(relPath)
+	if p == "" {
+		return ""
+	}
+	rel, err := filepath.Rel(a.apiDir, p)
+	if err != nil {
+		return ""
+	}
+	return filepath.ToSlash(rel)
+}
 
-	reqJSON, _ := json.Marshal(req)
-
-	var result any
-	if isTrue(isLegacy) {
-		// Legacy pattern: handler(req, res) with Node.js-style shims
-		jsCode := fmt.Sprintf(`
-			(function() {
-				try {
-					var raw = %s;
-					var req = {
-						url: raw.url,
-						method: raw.method,
-						headers: raw.headers || {},
-						body: raw.body || '',
-						socket: { remoteAddress: '127.0.0.1' }
-					};
-					var _status = 200;
-					var _headers = {};
-					var _body = '';
-					var _finished = false;
-					var res = {
-						statusCode: 200,
-						setHeader: function(k, v) { _headers[k.toLowerCase()] = String(v); },
-						getHeader: function(k) { return _headers[k.toLowerCase()]; },
-						removeHeader: function(k) { delete _headers[k.toLowerCase()]; },
-						write: function(chunk) { _body += chunk; },
-						end: function(chunk) {
-							if (chunk) _body += chunk;
-							_finished = true;
-							_status = this.statusCode || 200;
-						},
-						on: function() {}
-					};
-					var result = %s(req, res);
-					if (_finished) {
-						return JSON.stringify({ status: _status, headers: _headers, body: _body });
-					}
-					if (result && typeof result.status === 'number') {
-						return JSON.stringify({ status: result.status, headers: {}, body: '' });
-					}
-					return JSON.stringify({ status: 200, body: _body || '' });
-				} catch (e) {
-					return JSON.stringify({ status: 500, body: '', error: e.message });
-				}
-			})()
-		`, string(reqJSON), handlerName)
-
-		var err error
-		result, err = rt.Execute(jsCode)
-		if err != nil {
-			return APIResult{Status: 500, Body: jsonError(err.Error())}
-		}
-	} else {
-		// Modern pattern: handler(request) with web standard APIs
-		// Phase 1: Call handler, set up promise resolution via globals
-		jsSetup := fmt.Sprintf(`
-			var __apiResult = undefined;
-			var __apiError = '';
-			var __apiIsPromise = false;
-			try {
-				var raw = %s;
-				var request = {
-					url: raw.url,
-					method: raw.method,
-					path: raw.path,
-					headers: raw.headers || {},
-					body: raw.body || '',
-					json: function() {
-						try { return JSON.parse(raw.body || '{}'); } catch(e) { return {}; }
-					},
-					text: function() { return raw.body || ''; }
-				};
-
-				var result = %s(request);
-
-				if (result && typeof result.then === 'function') {
-					__apiIsPromise = true;
-					result.then(function(v) { __apiResult = v; }, function(e) { __apiError = e && e.message ? e.message : 'Promise rejected'; });
-				} else {
-					__apiResult = result;
-				}
-			} catch (e) {
-				__apiError = e.message;
+// apiRouteParams extracts dynamic segments from a request path using the
+// matched route file ([id], [...slug], [[...slug]]).
+func apiRouteParams(apiDir, file, reqPath string) map[string]string {
+	rel, err := filepath.Rel(apiDir, file)
+	if err != nil || rel == "" {
+		return nil
+	}
+	rel = filepath.ToSlash(rel)
+	rel = strings.TrimSuffix(rel, filepath.Ext(rel))
+	if rel == "index" {
+		rel = ""
+	} else if strings.HasSuffix(rel, "/index") {
+		rel = strings.TrimSuffix(rel, "/index")
+	}
+	fileSegs := strings.Split(strings.Trim(rel, "/"), "/")
+	if rel == "" {
+		fileSegs = nil
+	}
+	rawPath := strings.TrimPrefix(reqPath, "/api")
+	pathSegs := strings.Split(strings.Trim(rawPath, "/"), "/")
+	if rawPath == "" || rawPath == "/" {
+		pathSegs = nil
+	}
+	params := map[string]string{}
+	for i, seg := range fileSegs {
+		switch {
+		case strings.HasPrefix(seg, "[[...") && strings.HasSuffix(seg, "]]"):
+			name := strings.TrimSuffix(strings.TrimPrefix(seg, "[[..."), "]]")
+			if i < len(pathSegs) && len(pathSegs) > i {
+				params[name] = strings.Join(pathSegs[i:], "/")
 			}
-		`, string(reqJSON), handlerName)
-
-		if _, err := rt.Execute(jsSetup); err != nil {
-			return APIResult{Status: 500, Body: jsonError(err.Error())}
-		}
-
-		// Phase 2: Drain microtask queue so promise callbacks fire
-		if _, err := rt.Execute("(function(){})();"); err == nil {
-			rt.DrainJobs()
-		}
-
-		// Phase 3: Read resolved value and format response
-		jsFormat := `
-			(function() {
-				if (__apiError) {
-					return JSON.stringify({ status: 500, body: '', error: __apiError });
-				}
-				var result = __apiResult;
-				if (__apiIsPromise && result === undefined) {
-					return JSON.stringify({ status: 500, body: '', error: 'Async handler returned unresolved promise' });
-				}
-				if (result && typeof result.status === 'number') {
-					var headers = {};
-					if (result.headers) {
-						if (typeof result.headers.entries === 'function') {
-							var entries = result.headers.entries();
-							for (var i = 0; i < entries.length; i++) {
-								headers[entries[i][0]] = entries[i][1];
-							}
-						} else {
-							for (var k in result.headers) {
-								if (k.charAt(0) !== '_' && typeof result.headers[k] === 'string') {
-									headers[k] = result.headers[k];
-								}
-							}
-						}
-					}
-					var body = '';
-					if (result.status !== 204 && typeof result.text === 'function') {
-						body = result.text();
-					}
-					return JSON.stringify({ status: result.status, headers: headers, body: body });
-				}
-				if (result !== undefined && result !== null) {
-					return JSON.stringify({ status: 200, headers: { 'content-type': 'application/json' }, body: JSON.stringify(result) });
-				}
-				return JSON.stringify({ status: 204, body: '' });
-			})()
-		`
-		var err error
-		result, err = rt.Execute(jsFormat)
-		if err != nil {
-			return APIResult{Status: 500, Body: jsonError(err.Error())}
+			return params
+		case strings.HasPrefix(seg, "[...") && strings.HasSuffix(seg, "]"):
+			name := strings.TrimSuffix(strings.TrimPrefix(seg, "[..."), "]")
+			params[name] = strings.Join(pathSegs[minInt(i, len(pathSegs)):], "/")
+			return params
+		case strings.HasPrefix(seg, "[") && strings.HasSuffix(seg, "]"):
+			name := strings.TrimSuffix(strings.TrimPrefix(seg, "["), "]")
+			if i < len(pathSegs) {
+				params[name] = pathSegs[i]
+			}
 		}
 	}
-
-	var apiResult APIResult
-	if err := json.Unmarshal([]byte(result.(string)), &apiResult); err != nil {
-		return APIResult{Status: 500, Body: `{"error":"Invalid handler response"}`}
+	if len(params) == 0 {
+		return nil
 	}
+	return params
+}
 
-	return apiResult
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // resolveAPIFile finds the compiled JS file for a given API path. The path is
@@ -363,7 +437,72 @@ func (a *APIRouteRuntime) resolveAPIFile(relPath string) string {
 		}
 	}
 
+	return a.resolveDynamicAPIFile(strings.Split(relPath, "/"), extensions)
+}
+
+// resolveDynamicAPIFile matches [id], [...slug] and [[...slug]] route files
+// when the literal path does not exist.
+func (a *APIRouteRuntime) resolveDynamicAPIFile(segs, exts []string) string {
+	return a.resolveDynamicAPIDir(a.apiDir, segs, exts)
+}
+
+func (a *APIRouteRuntime) resolveDynamicAPIDir(dir string, segs, exts []string) string {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return ""
+	}
+	if len(segs) == 0 {
+		for _, ext := range exts {
+			if fi, err := os.Stat(filepath.Join(dir, "index"+ext)); err == nil && !fi.IsDir() {
+				return filepath.Join(dir, "index"+ext)
+			}
+		}
+		return ""
+	}
+	if len(segs) > 0 {
+		next := filepath.Join(dir, segs[0])
+		if fi, err := os.Stat(next); err == nil && fi.IsDir() {
+			if p := a.resolveDynamicAPIDir(next, segs[1:], exts); p != "" {
+				return p
+			}
+		}
+	}
+	for _, entry := range entries {
+		name := entry.Name()
+		full := filepath.Join(dir, name)
+		if entry.IsDir() {
+			if isCatchAllSegment(name) && len(segs) > 0 {
+				rel, _ := filepath.Rel(a.apiDir, full)
+				for _, ext := range exts {
+					if p := a.containedPath(filepath.Join(rel, "index"), ext); p != "" {
+						return p
+					}
+				}
+			}
+			if isDynamicSegment(name) && len(segs) > 0 {
+				if p := a.resolveDynamicAPIDir(full, segs[1:], exts); p != "" {
+					return p
+				}
+			}
+			continue
+		}
+		base := strings.TrimSuffix(name, filepath.Ext(name))
+		if isCatchAllSegment(base) && (len(segs) > 0 || strings.HasPrefix(base, "[[...")) {
+			return full
+		}
+		if len(segs) == 1 && isDynamicSegment(base) {
+			return full
+		}
+	}
 	return ""
+}
+
+func isDynamicSegment(name string) bool {
+	return strings.HasPrefix(name, "[") && strings.HasSuffix(name, "]") && !strings.HasPrefix(name, "[...") && !strings.HasPrefix(name, "[[...")
+}
+
+func isCatchAllSegment(name string) bool {
+	return strings.HasPrefix(name, "[...") || strings.HasPrefix(name, "[[...")
 }
 
 // containedPath joins apiDir with the given relative path and extension, then
@@ -392,36 +531,10 @@ func jsonError(msg string) string {
 	return string(b)
 }
 
-// findHandler checks which named export matches the HTTP method
-func (a *APIRouteRuntime) findHandler(rt *Runtime, method string) string {
-	methods := []string{method, "__default", "default"}
-	for _, m := range methods {
-		result, err := rt.Execute(fmt.Sprintf("typeof %s === 'function'", m))
-		if err == nil {
-			if isTrue(result) {
-				return m
-			}
-		}
+// Header returns the first value of a (lowercase) response header.
+func (r APIResult) Header(name string) string {
+	if v := r.Headers[strings.ToLower(name)]; len(v) > 0 {
+		return v[0]
 	}
 	return ""
-}
-
-// isTrue checks if a JS result is truthy
-func isTrue(v any) bool {
-	switch val := v.(type) {
-	case bool:
-		return val
-	case int:
-		return val != 0
-	case int64:
-		return val != 0
-	case float64:
-		return val != 0
-	case string:
-		return val != ""
-	case map[string]any:
-		return len(val) > 0
-	default:
-		return v != nil
-	}
 }

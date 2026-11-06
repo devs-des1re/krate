@@ -1,8 +1,14 @@
 package ast
 
+import "github.com/kratejs/krate/packages/compiler/internal/htmlspec"
+
+// Pos is the start of a node: a 1-based Line, a 1-based Col counted in UTF-16
+// code units (the unit LSP clients and editors use), and the byte Offset into
+// the source.
 type Pos struct {
-	Line int
-	Col  int
+	Line   int
+	Col    int
+	Offset int
 }
 
 type Node interface {
@@ -122,6 +128,13 @@ type ArrowFn struct {
 	Body       []Stmt
 	Expression bool
 	Async      bool
+	// Function marks a `function` expression (or an object/class method)
+	// rather than an arrow: it has its own `this` and `arguments`.
+	Function bool
+	// Generator marks `function*` and `*method()` forms.
+	Generator bool
+	// Name is the optional binding name of a named function expression.
+	Name string
 }
 
 func (a *ArrowFn) node()    {}
@@ -143,6 +156,18 @@ type ObjectProp struct {
 	Shorthand bool
 	Spread    bool
 	Method    bool
+	// Computed marks a `[expr]: value` key; KeyExpr holds the expression and
+	// Key holds its source-like spelling when it is a simple name or literal.
+	Computed bool
+	KeyExpr  Expr
+	// Getter and Setter mark `get key() {}` / `set key(v) {}` accessors (Method
+	// is also set; Value is the accessor function).
+	Getter bool
+	Setter bool
+	// KeyQuoted records a string-literal key (`{ "a-b": 1 }`) and KeyNumeric
+	// a numeric one (`{ 0x10: 1 }`, Key holds the source spelling).
+	KeyQuoted  bool
+	KeyNumeric bool
 }
 
 type ArrayExpr struct {
@@ -178,6 +203,9 @@ func (j *JSXElement) Pos() Pos { return j.Position }
 type JSXFragment struct {
 	Position Pos
 	Children []JSXChild
+	// Key is the React key of a lowered `<Fragment key={...}>`; nil for the
+	// `<>...</>` shorthand, which cannot carry a key.
+	Key Expr
 }
 
 func (j *JSXFragment) node()    {}
@@ -231,96 +259,12 @@ type JSXAttr struct {
 
 func (j *JSXAttr) Pos() Pos { return j.Position }
 
-// htmlAttrAliases maps React/JSX camelCase attribute names to their HTML
-// equivalents. Includes the React DOM property renames plus SVG presentation
-// attributes, so transpiled React source (and shadcn/radix components) emit
-// valid HTML/SVG attributes.
-var htmlAttrAliases = map[string]string{
-	// React DOM property aliases.
-	"className":       "class",
-	"htmlFor":         "for",
-	"tabIndex":        "tabindex",
-	"readOnly":        "readonly",
-	"autoComplete":    "autocomplete",
-	"autoFocus":       "autofocus",
-	"autoPlay":        "autoplay",
-	"colSpan":         "colspan",
-	"rowSpan":         "rowspan",
-	"srcSet":          "srcset",
-	"maxLength":       "maxlength",
-	"minLength":       "minlength",
-	"contentEditable": "contenteditable",
-	"spellCheck":      "spellcheck",
-	"formAction":      "formaction",
-	"formEncType":     "formenctype",
-	"formMethod":      "formmethod",
-	"formNoValidate":  "formnovalidate",
-	"formTarget":      "formtarget",
-	"acceptCharset":   "accept-charset",
-	"noValidate":      "novalidate",
-	"crossOrigin":     "crossorigin",
-	"defaultValue":    "value",
-	"defaultChecked":  "checked",
-	"dateTime":        "datetime",
-	"accessKey":       "accesskey",
-	"inputMode":       "inputmode",
-	"enterKeyHint":    "enterkeyhint",
-	"autoCapitalize":  "autocapitalize",
-	"autoCorrect":     "autocorrect",
-	"referrerPolicy":  "referrerpolicy",
-	"srcLang":         "srclang",
-	"itemScope":       "itemscope",
-	"itemType":        "itemtype",
-	"itemID":          "itemid",
-	"allowFullScreen": "allowfullscreen",
-	"playsInline":     "playsinline",
-	"frameBorder":     "frameborder",
-	"marginWidth":     "marginwidth",
-	"marginHeight":    "marginheight",
-	"charSet":         "charset",
-	"httpEquiv":       "http-equiv",
-	"cellPadding":     "cellpadding",
-	"cellSpacing":     "cellspacing",
-	"useMap":          "usemap",
-	"captureAudio":    "capture",
-	// SVG presentation attributes (camelCase in React, kebab/verbatim in SVG).
-	"strokeWidth":         "stroke-width",
-	"strokeLinecap":       "stroke-linecap",
-	"strokeLinejoin":      "stroke-linejoin",
-	"strokeDasharray":     "stroke-dasharray",
-	"strokeDashoffset":    "stroke-dashoffset",
-	"strokeMiterlimit":    "stroke-miterlimit",
-	"strokeOpacity":       "stroke-opacity",
-	"fillRule":            "fill-rule",
-	"fillOpacity":         "fill-opacity",
-	"clipRule":            "clip-rule",
-	"clipPath":            "clip-path",
-	"stopColor":           "stop-color",
-	"stopOpacity":         "stop-opacity",
-	"gradientUnits":       "gradientUnits",
-	"patternUnits":        "patternUnits",
-	"textAnchor":          "text-anchor",
-	"dominantBaseline":    "dominant-baseline",
-	"vectorEffect":        "vector-effect",
-	"shapeRendering":      "shape-rendering",
-	"floodColor":          "flood-color",
-	"floodOpacity":        "flood-opacity",
-	"markerEnd":           "marker-end",
-	"markerMid":           "marker-mid",
-	"markerStart":         "marker-start",
-	"stdDeviation":        "stdDeviation",
-	"viewBox":             "viewBox",
-	"preserveAspectRatio": "preserveAspectRatio",
-}
-
 // HTMLAttrName maps a JSX attribute name to its HTML attribute name, translating
-// React-style camelCase aliases (className, htmlFor, tabIndex, SVG props, ...) to
-// their DOM equivalents. Unknown names pass through unchanged.
+// React-style aliases (className, htmlFor, tabIndex, SVG and xlink props, ...)
+// to their DOM equivalents. The table lives in internal/htmlspec so every
+// emitter shares it. Unknown names pass through unchanged.
 func HTMLAttrName(name string) string {
-	if mapped, ok := htmlAttrAliases[name]; ok {
-		return mapped
-	}
-	return name
+	return htmlspec.AttrName(name)
 }
 
 type Param struct {
@@ -328,6 +272,10 @@ type Param struct {
 	Name     string
 	Default  Expr // Store the expression here
 	IsRest   bool // Added this
+	// Target is the structured binding pattern for a destructuring parameter:
+	// an ObjectExpr/ArrayExpr in cover-grammar form (defaults are BinaryExpr
+	// with Op "=", rest elements are UnaryExpr with Op "...", holes are nil).
+	Target Expr
 	// Pattern holds the source text of a destructuring parameter pattern
 	// (e.g. `{items, label}` or `[a, b]`). When set, Name is the "{...}" sentinel
 	// and codegen emits this pattern so the destructured locals are bound.
@@ -343,11 +291,17 @@ const (
 	VarConst VarKind = iota
 	VarLet
 	VarVar
+	// VarUsing and VarAwaitUsing are explicit resource management
+	// declarations (`using x = ...`, `await using x = ...`).
+	VarUsing
+	VarAwaitUsing
 )
 
 type Program struct {
 	Position Pos
 	Body     []Stmt
+	// Tier is the tier a decorator gives the whole file ("" for none).
+	Tier string `json:"tier,omitempty"`
 }
 
 func (p *Program) node()    {}
@@ -359,6 +313,15 @@ type ImportStmt struct {
 	Named     []NamedImport
 	Namespace string
 	Source    string
+	// Attributes holds import attributes (`with { type: "json" }`).
+	Attributes []ImportAttribute
+}
+
+// ImportAttribute is one `key: "value"` entry of an import/export `with {}`
+// clause. Key is the attribute name (unquoted); Value is the decoded string.
+type ImportAttribute struct {
+	Key   string
+	Value string
 }
 
 func (i *ImportStmt) node()    {}
@@ -375,9 +338,22 @@ type ExportStmt struct {
 	Declaration    Stmt
 	Default        bool
 	Local          string
-	StarReexport   bool   // export * from 'source'
-	Namespace      string // export * as Namespace from 'source'
-	ReexportSource string // source path for re-exports (export * from '...' or export { X } from '...')
+	Named          []NamedExport // `export { A, B as C }` pairs (local -> exported)
+	StarReexport   bool          // export * from 'source'
+	Namespace      string        // export * as Namespace from 'source'
+	ReexportSource string        // source path for re-exports (export * from '...' or export { X } from '...')
+	// ReexportNamed holds the specifiers of `export { a as b } from '...'`
+	// (Local is the name in the source module). Named stays reserved for
+	// exports of local bindings.
+	ReexportNamed []NamedExport
+	// Attributes holds import attributes on a re-export (`with { type: "json" }`).
+	Attributes []ImportAttribute
+}
+
+// NamedExport is one specifier in `export { Local, Local as Remote }`.
+type NamedExport struct {
+	Local  string
+	Remote string
 }
 
 func (e *ExportStmt) node()    {}
@@ -395,27 +371,88 @@ func (v *VarStmt) stmt()    {}
 func (v *VarStmt) Pos() Pos { return v.Position }
 
 type VarDecl struct {
+	// Target is the structured binding pattern of a destructuring declaration
+	// (cover-grammar ObjectExpr/ArrayExpr, see Param.Target). Pattern keeps
+	// the pattern's source text for consumers that only need names.
+	Target          Expr
 	Name            string
 	Names           []string
 	IsDestructuring bool
 	Pattern         string
 	RestName        string
 	Init            Expr
+	// Tier comes from a tier decorator such as `@server` ("" for none).
+	Tier string `json:"tier,omitempty"`
 }
 
 type FnDecl struct {
-	Position Pos
-	Name     string
-	Params   []*Param
-	Body     []Stmt
-	Async    bool
-	Export   bool
-	Default  bool
+	Position  Pos
+	Name      string
+	Params    []*Param
+	Body      []Stmt
+	Async     bool
+	Generator bool
+	Export    bool
+	Default   bool
+	// Tier comes from a tier decorator such as `@server` ("" for none).
+	Tier string `json:"tier,omitempty"`
 }
 
 func (f *FnDecl) node()    {}
 func (f *FnDecl) stmt()    {}
 func (f *FnDecl) Pos() Pos { return f.Position }
+
+// ClassMemberKind distinguishes methods, fields, and constructors.
+type ClassMemberKind int
+
+const (
+	ClassMethod ClassMemberKind = iota
+	ClassField
+	ClassConstructor
+	// ClassGetter and ClassSetter are `get x() {}` / `set x(v) {}` accessors.
+	ClassGetter
+	ClassSetter
+	// ClassStaticBlock is a `static { ... }` initialization block (Body).
+	ClassStaticBlock
+	// ClassAccessor is an auto-accessor field (`accessor x = 1`).
+	ClassAccessor
+)
+
+// ClassMember is one member of a class body.
+type ClassMember struct {
+	Position Pos
+	Kind     ClassMemberKind
+	Name     string
+	Private  bool
+	Static   bool
+	Async    bool
+	// Generator marks a `*method()` generator method.
+	Generator bool
+	// Computed marks a `[expr]` member name held in KeyExpr.
+	Computed bool
+	KeyExpr  Expr
+	// KeyQuoted/KeyNumeric record a string or numeric literal member name.
+	KeyQuoted  bool
+	KeyNumeric bool
+	Params     []*Param
+	Body       []Stmt
+	Init       Expr
+}
+
+// ClassDecl is a class declaration. Krate lowers React class components from
+// it; other classes are retained so compiled code is not silently dropped.
+type ClassDecl struct {
+	Position   Pos
+	Name       string
+	SuperClass Expr
+	Members    []*ClassMember
+	// Tier comes from a tier decorator such as `@server` ("" for none).
+	Tier string `json:"tier,omitempty"`
+}
+
+func (c *ClassDecl) node()    {}
+func (c *ClassDecl) stmt()    {}
+func (c *ClassDecl) Pos() Pos { return c.Position }
 
 type ReturnStmt struct {
 	Position Pos
@@ -469,10 +506,16 @@ func (f *ForStmt) Pos() Pos { return f.Position }
 
 type ForInStmt struct {
 	Position Pos
-	Left     Expr
-	Right    Expr
-	Body     []Stmt
-	IsForOf  bool
+	// Await marks `for await (... of ...)`.
+	Await   bool
+	Left    Expr
+	Right   Expr
+	Body    []Stmt
+	IsForOf bool
+	// Keyword is the declaration keyword of the loop binding ("const", "let",
+	// "var"), or "" for a bare assignment target such as `for (x in obj)`. The
+	// parser records it so codegen can reproduce the original binding form.
+	Keyword string
 }
 
 func (f *ForInStmt) node()    {}
@@ -529,7 +572,10 @@ func (t *TryStmt) Pos() Pos { return t.Position }
 type CatchClause struct {
 	Position Pos
 	Param    string
-	Body     []Stmt
+	// ParamTarget is the binding pattern of `catch ({ message })`; Param
+	// then holds the pattern's source text.
+	ParamTarget Expr
+	Body        []Stmt
 }
 
 type ThrowStmt struct {
@@ -589,6 +635,8 @@ func (a *AwaitExpr) Pos() Pos { return a.Position }
 type DynamicImport struct {
 	Position Pos
 	Arg      Expr
+	// Options is the optional second argument (`import(x, { with: {...} })`).
+	Options Expr
 }
 
 func (d *DynamicImport) node()    {}
@@ -602,3 +650,88 @@ type ImportMetaExpr struct {
 func (im *ImportMetaExpr) node()    {}
 func (im *ImportMetaExpr) expr()    {}
 func (im *ImportMetaExpr) Pos() Pos { return im.Position }
+
+// ClassExpr is a class expression (`const A = class extends B {}`).
+type ClassExpr struct {
+	Position Pos
+	Class    *ClassDecl
+}
+
+func (c *ClassExpr) node()    {}
+func (c *ClassExpr) expr()    {}
+func (c *ClassExpr) Pos() Pos { return c.Position }
+
+// TaggedTemplateExpr is a tagged template (`css` + "`a ${b}`").
+type TaggedTemplateExpr struct {
+	Position Pos
+	Tag      Expr
+	Quasi    *TemplateExpr
+}
+
+func (t *TaggedTemplateExpr) node()    {}
+func (t *TaggedTemplateExpr) expr()    {}
+func (t *TaggedTemplateExpr) Pos() Pos { return t.Position }
+
+// MetaProperty is `new.target` (Meta "new", Property "target"). `import.meta`
+// keeps its dedicated ImportMetaExpr node.
+type MetaProperty struct {
+	Position Pos
+	Meta     string
+	Property string
+}
+
+func (m *MetaProperty) node()    {}
+func (m *MetaProperty) expr()    {}
+func (m *MetaProperty) Pos() Pos { return m.Position }
+
+// ParenExpr records grouping parentheses where they change meaning: around
+// an optional chain that is then accessed or called (`(a?.b).c`), so the
+// chain is not extended through the parentheses.
+type ParenExpr struct {
+	Position Pos
+	Expr     Expr
+}
+
+func (p *ParenExpr) node()    {}
+func (p *ParenExpr) expr()    {}
+func (p *ParenExpr) Pos() Pos { return p.Position }
+
+// LabeledStmt is `label: body`.
+type LabeledStmt struct {
+	Position Pos
+	Label    string
+	Body     Stmt
+}
+
+func (l *LabeledStmt) node()    {}
+func (l *LabeledStmt) stmt()    {}
+func (l *LabeledStmt) Pos() Pos { return l.Position }
+
+// EmptyStmt is a lone `;` used as a statement body (`if (x) ;`).
+type EmptyStmt struct {
+	Position Pos
+}
+
+func (e *EmptyStmt) node()    {}
+func (e *EmptyStmt) stmt()    {}
+func (e *EmptyStmt) Pos() Pos { return e.Position }
+
+// WithStmt is the sloppy-mode `with (object) body` statement.
+type WithStmt struct {
+	Position Pos
+	Object   Expr
+	Body     []Stmt
+}
+
+func (w *WithStmt) node()    {}
+func (w *WithStmt) stmt()    {}
+func (w *WithStmt) Pos() Pos { return w.Position }
+
+// DebuggerStmt is the `debugger;` statement.
+type DebuggerStmt struct {
+	Position Pos
+}
+
+func (d *DebuggerStmt) node()    {}
+func (d *DebuggerStmt) stmt()    {}
+func (d *DebuggerStmt) Pos() Pos { return d.Position }

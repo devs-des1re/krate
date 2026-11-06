@@ -1,7 +1,7 @@
 ---
 title: Core Concepts
 order: 1
-description: How Krate thinks about building sites: signals not hooks, SSG-first output, and a real Go-native compiler.
+description: How Krate builds sites: signals, static-first rendering, and a single Go compiler.
 sidebar:
   label: Concepts
   order: 1
@@ -11,43 +11,24 @@ sidebar:
 
 # Core Concepts
 
-This section explains how Krate thinks about building sites. The mental model
-is different from React, Next.js, or Astro in three important ways:
+Three ideas shape everything else in Krate:
 
 1. **Signals, not hooks.** State is a getter/setter pair; effects subscribe to
    the exact signals they read. There is no virtual DOM diffing on the client.
-2. **SSG-first.** Every page is evaluated at build time to static HTML. The
+2. **Static-first.** Every page is evaluated at build time to static HTML. The
    runtime hydration bundle only binds the dynamic parts.
-3. **A real compiler.** Lexer, parser, bundler, renderer, CSS pipeline and
-   Tailwind are all custom Go. Pages are not bundled by a JS bundler at runtime.
+3. **One Go binary.** The lexer, parser, bundler, renderer, CSS pipeline, and
+   Tailwind are all built into the compiler.
 
-## The pipeline
-
-```sh
-Source (.tsx/.ts/.md/.mdx)
-        │
-        ▼
-    Lexer (tokenize)
-        │
-        ▼
-    Parser (AST)
-        │
-        ▼
-    Bundler (resolve imports, CSS modules, React rewrite)
-        │
-        ▼
-    Renderer (SSR: AST → HTML + signal/handler detection)
-        │
-        ▼
-    Hydration Codegen (signals → JS bundle with data-k/data-kh bindings)
-        │
-        ▼
-    Build Output (HTML + hashed JS + hashed CSS + manifest.json)
-```
+:::tip
+Coming from React? Krate transpiles React hooks and JSX automatically and
+auto-calls bare reads like `{count}`. See
+[React Compatibility](/docs/guides/react-compatibility/).
+:::
 
 ## Reactivity model
 
-Krate is **not React**. `createSignal` returns a `[getter, setter]` pair:
+Signals are the unit of state. `createSignal` returns a `[getter, setter]` pair:
 
 ```tsx
 const [count, setCount] = createSignal(0);
@@ -57,24 +38,19 @@ setCount(c => c + 1) // functional update
 ```
 
 Effects re-run when the signals they read change. Memos cache derived values.
-Context provides dependency injection. Resources handle async data.
-
-React compatibility is always on: React imports and primitives (`useState`,
-`useEffect`, `useRef`, `useMemo`, `useReducer`, `useId`, `forwardRef`,
-`React.*`) are automatically rewritten to their Krate equivalents, and bare
-reads like `{count}` are auto-called, so React source runs unmodified. No config
-is required — see [React Compatibility](/docs/guides/react-compatibility/).
+Context provides dependency injection. Resources handle async data. See
+[Reactivity](/docs/core-concepts/reactivity/) for the full API.
 
 ## Rendering modes
 
 Every page is pre-rendered at build time into a static shell. Depending on the
 page's exports and config, the final HTML can be:
 
-- **SSG** (default) — fully static HTML, no runtime data.
-- **ISR** — static shell; the page body is cached per URL variant and
+- **SSG** (default) - fully static HTML, no runtime data.
+- **ISR** - static shell; the page body is cached per URL variant and
   revalidated in the background.
-- **SSR** — static shell; the page body is rendered fresh per request.
-- **Streaming** — static shell with dynamic regions (runtime components /
+- **SSR** - static shell; the page body is rendered fresh per request.
+- **Streaming** - static shell with dynamic regions (runtime components /
   Suspense) that the sidecar renders and splices in, streaming as they resolve.
 
 All four modes are static-first: only the page's dynamic regions (or its whole
@@ -83,9 +59,11 @@ body, for ISR/SSR) are rendered at request time. See
 
 ## Component tiers
 
-Components are classified into four tiers — static, client, server, and
-runtime — that determine how and where they render. See
+Components are classified into four tiers - static, client, server, and
+runtime - that determine how and where they render. See
 [Component Tiers](/docs/core-concepts/component-tiers/).
+
+## Guides
 
 | Guide | What it covers |
 |-------|----------------|
@@ -94,4 +72,9 @@ runtime — that determine how and where they render. See
 | [Component Tiers](/docs/core-concepts/component-tiers/) | Static / client / server / runtime |
 | [Rendering](/docs/core-concepts/rendering/) | SSG, ISR, SSR & streaming |
 | [Styling](/docs/core-concepts/styling/) | CSS Modules, Tailwind, the CSS pipeline |
-| [Markdown & MDX](/docs/core-concepts/markdown/) | Content authoring |
+| [CSS Signals](/docs/core-concepts/css-signals/) | Container-aware, state-driven CSS |
+| [Markdown & MDX](/docs/core-concepts/markdown/) | Markdown, MDX, directives, and diagrams |
+| [Browser Support](/docs/core-concepts/browser-support/) | Supported browsers and feature requirements |
+
+Want the internals (lexer -> parser -> bundler -> renderer)? See
+[Contributing -> Architecture](/docs/contributing/architecture/).

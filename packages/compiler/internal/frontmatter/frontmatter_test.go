@@ -258,7 +258,7 @@ keywords: alpha,beta
 	if fm["title"] != "Demo" {
 		t.Errorf("title = %#v", fm["title"])
 	}
-	// order was a string in the old parser; now a number — docs decodes both.
+	// order was a string in the old parser; now a number - docs decodes both.
 	if fm["order"] != int64(999) {
 		t.Errorf("order = %#v", fm["order"])
 	}
@@ -345,5 +345,72 @@ sidebar: [{"title":"A","url":"/docs/a/"},{"title":"Group","children":[{"title":"
 	child, ok := children[0].(map[string]any)
 	if !ok || child["title"] != "B" {
 		t.Fatalf("child = %#v", children[0])
+	}
+}
+
+func TestBlockScalars(t *testing.T) {
+	src := "title: T\ndesc: |\n  line one\n  line two\n\n  para\nfolded: >\n  folded one\n  folded two\n\n  next para\nstrip: |-\n  keep\nkeepnl: |+\n  x\n\nafter: yes\nlist:\n  - a\n"
+	m := ParseBlock(src)
+	if got, want := m["desc"], "line one\nline two\n\npara\n"; got != want {
+		t.Errorf("literal = %q, want %q", got, want)
+	}
+	if got, want := m["folded"], "folded one folded two\nnext para\n"; got != want {
+		t.Errorf("folded = %q, want %q", got, want)
+	}
+	if got := m["strip"]; got != "keep" {
+		t.Errorf("strip = %q", got)
+	}
+	if got := m["keepnl"]; got != "x\n\n" {
+		t.Errorf("keep = %q", got)
+	}
+	if m["after"] != "yes" || m["title"] != "T" {
+		t.Errorf("keys after block scalars lost: %#v", m)
+	}
+	if l, _ := m["list"].([]any); len(l) != 1 {
+		t.Errorf("list lost: %#v", m["list"])
+	}
+}
+
+func TestDoubleQuotedEscapes(t *testing.T) {
+	m := ParseBlock("a: \"caf\\u00e9 \\x41 tab\\there \\\"q\\\" \\\\ \\U0001F600\"\n")
+	want := "caf\u00e9 A tab\there \"q\" \\ \U0001F600"
+	if m["a"] != want {
+		t.Errorf("escapes = %q, want %q", m["a"], want)
+	}
+}
+
+func TestMultiLineQuotedScalars(t *testing.T) {
+	fm, _ := Parse("---\nmulti: \"a\n  b\"\nnext: ok\nsingle: 'x\n  y'\nblank: \"p\n\n  q\"\nesc: \"tab\\there\n  end\"\nlast: 1\n---\nbody")
+	want := map[string]any{"multi": "a b", "next": "ok", "single": "x y", "blank": "p\nq", "esc": "tab\there end", "last": int64(1)}
+	for k, v := range want {
+		if fm[k] != v {
+			t.Errorf("%s = %#v, want %#v", k, fm[k], v)
+		}
+	}
+}
+
+func TestUnterminatedQuoteStaysLiteral(t *testing.T) {
+	fm, _ := Parse("---\nbad: \"never closed\nnext: 1\n---\n")
+	if fm["bad"] == nil {
+		t.Errorf("an unclosed quote must still yield a value: %#v", fm)
+	}
+}
+
+func TestDetectUnparsedFrontmatter(t *testing.T) {
+	cases := []struct {
+		src  string
+		kind string
+	}{
+		{"+++\ntitle = \"x\"\n+++\nbody", "toml"},
+		{"---\ntitle: x\nbody that never closes", "unterminated"},
+		{"---\ntitle: x\n---\nbody", ""},
+		{"no frontmatter", ""},
+		{"---\n\nA thematic break only", ""},
+	}
+	for _, c := range cases {
+		p, ok := Detect(c.src)
+		if ok != (c.kind != "") || p.Kind != c.kind {
+			t.Errorf("Detect(%q) = %+v, %v; want kind %q", c.src, p, ok, c.kind)
+		}
 	}
 }

@@ -1,4 +1,21 @@
-import { createEffect } from './signal.js';
+import { createEffect, onCleanup } from './signal.js';
+import { krateWithOwner, krateUnmount } from './effects.js';
+import { krateSanitizeAttr } from './slots.js';
+import { krateOn, krateControl, krateSetControl } from './events.js';
+import { krateAttachRef, type KrateRef } from './refs.js';
+
+export {
+  krateOn,
+  krateControl,
+  krateSetControl,
+  krateSynthetic,
+  krateEventRoot,
+  krateEventName,
+  krateMountFields,
+} from './events.js';
+export type { KrateSyntheticEvent } from './events.js';
+export { krateAttachRef, krateSetRef, krateRefsEnter, krateRefsLeave, krateRefsFlush, krateRefsHold } from './refs.js';
+export type { KrateRef } from './refs.js';
 
 export type Component<P = {}> = (props: P) => Node | null | undefined;
 
@@ -8,20 +25,57 @@ export type RefCallback = (el: Element) => void;
 /** Extracts the Props type from a Component. */
 export type ComponentProps<C> = C extends Component<infer P> ? P : never;
 
-// ─── per-node effect tracking ────────────────────────────────────────────────
+// per-node effect tracking
 // Reactive props/children create effects that must be disposed when the node is
 // removed from the DOM (list items, conditional branches, SPA reconciliation).
 // Without this, effects and their closures accumulate for the page's lifetime.
 
 const effectsByNode = new WeakMap<Node, Array<() => void>>();
 
-function trackEffect(node: Node, dispose: () => void): void {
+/** Register a disposer that runs when `node` (or an ancestor) is disposed. */
+export function trackEffect(node: Node, dispose: () => void): void {
+  krateTrackNode(node, dispose);
+}
+
+/** Registers `dispose` to run when `node` is disposed (removed by a binding). */
+export function krateTrackNode(node: Node, dispose: () => void): void {
   let arr = effectsByNode.get(node);
   if (!arr) {
     arr = [];
     effectsByNode.set(node, arr);
   }
   arr.push(dispose);
+}
+
+function trackOwner(value: unknown, owner: unknown): void {
+  const unmount = (): void => krateUnmount(owner);
+  if (typeof DocumentFragment !== 'undefined' && value instanceof DocumentFragment) {
+    // Fragment children are moved out on insertion; track each of them.
+    for (let i = 0; i < value.childNodes.length; i++) trackEffect(value.childNodes[i], unmount);
+  } else if (typeof Node !== 'undefined' && value instanceof Node) {
+    trackEffect(value, unmount);
+  } else if (Array.isArray(value)) {
+    for (const v of value) trackOwner(v, owner);
+  }
+}
+
+/**
+ * Binds the ref returned by `get` to `el` (hydration `ref={...}`). The ref is
+ * re-bound (old detached, new attached) when the value read by `get` changes
+ * identity, and released when the owning scope or the node is disposed.
+ * `assign` handles plain-variable targets.
+ */
+export function krateBindRef(el: Element, get: (() => KrateRef) | null, assign?: (v: unknown) => void): () => void {
+  let first = true;
+  const dispose = createEffect(() => {
+    // The first binding happens during hydration and is queued until every
+    // component has bound its DOM; a later re-bind attaches at once.
+    const release = krateAttachRef(el, get ? get() : undefined, assign, first ? 'defer' : undefined);
+    first = false;
+    onCleanup(release);
+  });
+  trackEffect(el, dispose);
+  return dispose;
 }
 
 /** Dispose all effects registered for a node and its subtree. */
@@ -36,7 +90,7 @@ export function disposeNode(node: Node): void {
   }
 }
 
-// ─── comment-marker DOM traversal ───────────────────────────────────────────
+// comment-marker DOM traversal
 
 /**
  * Find the matching end comment marker for a start marker.
@@ -86,7 +140,7 @@ export function insert(parent: Node, value: unknown, startMarker: Node): void {
     clearNodes(startMarker, endMarker);
     insertBefore(parent, value, endMarker);
   } else {
-    // No end marker found — append at end
+    // No end marker found - append at end
     insertBefore(parent, value, null);
   }
 }
@@ -103,41 +157,300 @@ function insertBefore(parent: Node, value: unknown, before: Node | null): void {
   }
 }
 
+// Prop names whose DOM attribute differs from the JSX spelling.
+const ATTR_ALIASES: Record<string, string> = { htmlFor: 'for' };
+
+// CSS properties (hyphenated, vendor prefix removed) whose numeric values
+// take no px unit; mirrors the compiler's htmlspec table (React's
+// isUnitlessNumber).
+const UNITLESS = new Set([
+  'animation-iteration-count', 'aspect-ratio', 'border-image-outset', 'border-image-slice',
+  'border-image-width', 'box-flex', 'box-flex-group', 'box-ordinal-group', 'column-count',
+  'columns', 'flex', 'flex-grow', 'flex-positive', 'flex-shrink', 'flex-negative', 'flex-order',
+  'grid-area', 'grid-row', 'grid-row-end', 'grid-row-span', 'grid-row-start', 'grid-column',
+  'grid-column-end', 'grid-column-span', 'grid-column-start', 'font-weight', 'line-clamp',
+  'line-height', 'opacity', 'order', 'orphans', 'scale', 'tab-size', 'widows', 'z-index', 'zoom',
+  'fill-opacity', 'flood-opacity', 'stop-opacity', 'stroke-dasharray', 'stroke-dashoffset',
+  'stroke-miterlimit', 'stroke-opacity', 'stroke-width',
+]);
+
+function cssName(key: string): string {
+  if (key.startsWith('--')) return key;
+  const name = key.replace(/[A-Z]/g, (c) => '-' + c.toLowerCase());
+  return name.startsWith('ms-') ? '-' + name : name;
+}
+
+const appliedStyles = new WeakMap<Element, Set<string>>();
+
+/**
+ * Applies a React style object to el: camelCase keys are hyphenated, numbers
+ * get px unless the property is unitless, null/boolean/empty values are
+ * skipped, and properties set by the previous object but absent now are
+ * removed. Other inline styles are left alone.
+ */
+export function krateApplyStyle(el: Element, style: Record<string, unknown>): void {
+  const decl = (el as HTMLElement).style;
+  if (!decl) return;
+  const next = new Set<string>();
+  for (const key of Object.keys(style)) {
+    const v = style[key];
+    if (v == null || typeof v === 'boolean' || v === '') continue;
+    const name = cssName(key);
+    const bare = name.replace(/^-(webkit|moz|ms|o)-/, '');
+    const text = typeof v === 'number' && v !== 0 && !name.startsWith('--') && !UNITLESS.has(bare) ? v + 'px' : String(v);
+    decl.setProperty(name, text);
+    next.add(name);
+  }
+  const prev = appliedStyles.get(el);
+  if (prev) {
+    for (const name of prev) {
+      if (!next.has(name)) decl.removeProperty(name);
+    }
+  }
+  appliedStyles.set(el, next);
+}
+
+/**
+ * Sets a prop of a custom element the way React 19 does: objects, arrays and
+ * functions are properties, as is any value for a property the element
+ * already defines. Returns false when the prop is an attribute. An element
+ * that is not defined yet gets the property again once it is, so a class
+ * accessor is not shadowed by the early own property.
+ */
+export function krateCustomProp(el: Element, key: string, value: unknown): boolean {
+  if (el.localName.indexOf('-') < 1 || key.indexOf('-') >= 0) return false;
+  const complex = (typeof value === 'object' && value !== null) || typeof value === 'function';
+  if (!complex && !(key in el)) return false;
+  (el as unknown as Record<string, unknown>)[key] = value;
+  const reg = typeof customElements !== 'undefined' ? customElements : null;
+  if (complex && reg && !reg.get(el.localName) && typeof reg.whenDefined === 'function') {
+    void reg.whenDefined(el.localName).then(() => {
+      const rec = el as unknown as Record<string, unknown>;
+      delete rec[key];
+      rec[key] = value;
+    });
+  }
+  return true;
+}
+
 function setAttr(el: Element, key: string, value: unknown): void {
+  if (el.localName.indexOf('-') > 0 && key !== 'class' && key !== 'className' && key !== 'style' && key !== 'ref' && key !== 'key' && key !== 'children' && !key.startsWith('on')) {
+    if (krateCustomProp(el, key, value)) return;
+  }
   if (key === 'class' || key === 'className') {
-    // Fix 2.8: Guard against false/null/undefined before String() conversion
-    if (value === false || value === null || value === undefined) {
-      el.className = '';
-    } else {
-      el.className = String(value);
+    // Guard against false/null/undefined before String() conversion.
+    const next = value === false || value === null || value === undefined ? '' : String(value);
+    if (el.getAttribute('class') !== next) {
+      // className="" renders class="" (as in React); a missing class stays
+      // missing.
+      if (next === '' && !el.hasAttribute('class') && typeof value !== 'string') return;
+      el.setAttribute('class', next);
     }
   } else if (key === 'style') {
     if (typeof value === 'string') {
-      el.setAttribute('style', value);
+      if (el.getAttribute('style') !== value) el.setAttribute('style', value);
     } else if (value && typeof value === 'object') {
-      Object.assign((el as HTMLElement).style, value);
+      krateApplyStyle(el, value as Record<string, unknown>);
+    } else if (value == null || value === false) {
+      el.removeAttribute('style');
     }
   } else if (key.startsWith('on') && typeof value === 'function') {
-    // Store handler reference on element for cleanup on re-render
-    const eventKey = key.slice(2).toLowerCase();
-    const handlerKey = `__krate_${eventKey}`;
-    const prevHandler = (el as any)[handlerKey];
-    if (prevHandler) {
-      el.removeEventListener(eventKey, prevHandler);
-    }
-    el.addEventListener(eventKey, value as EventListener);
-    (el as any)[handlerKey] = value;
+    krateOn(el, key, value as Parameters<typeof krateOn>[2]);
+  } else if (key === 'value' || key === 'checked' || key === 'selected' || key === 'defaultValue' || key === 'defaultChecked') {
+    // Form-control state is a DOM property, not an attribute: setting the
+    // attribute after user interaction has no effect.
+    krateSetControl(el, key, value);
   } else if (key === 'ref') {
-    if (typeof value === 'function') value(el);
-    else if (value && typeof value === 'object' && 'current' in value) (value.current as unknown) = el;
-  } else if (key === 'key') {
-    // key is metadata only, not set as attribute
-  } else if (value !== null && value !== undefined && value !== false) {
-    el.setAttribute(key, String(value));
+    // Attached now (the node is about to be inserted), detached when the node
+    // is disposed or the rendering effect re-runs. Moving a list row does not
+    // dispose it, so its refs stay attached.
+    const release = krateAttachRef(el, value as KrateRef, undefined, 'now');
+    trackEffect(el, release);
+    onCleanup(release);
+  } else if (key === 'key' || key === 'children' || key === 'dangerouslySetInnerHTML') {
+    // key is reconciliation metadata; children are appended separately.
+  } else {
+    const name = ATTR_ALIASES[key] || key;
+    // aria-* and data-* stringify booleans (aria-selected={false} renders
+    // "false"), as in React.
+    const stringly = /^(aria|data)-/.test(name);
+    if (value === null || value === undefined || (value === false && !stringly)) {
+      if (el.hasAttribute(name)) el.removeAttribute(name);
+    } else {
+      const next = value === true && !stringly ? '' : krateSanitizeAttr(name, String(value));
+      if (el.getAttribute(name) !== next) el.setAttribute(name, next);
+    }
   }
 }
 
-function appendChild(parent: Node, child: unknown): void {
+function applyProps(el: Element, props: Record<string, unknown>): void {
+  for (const key in props) {
+    const value = props[key];
+    if (typeof value === 'function' && (key === 'value' || key === 'checked')) {
+      trackEffect(el, krateControl(el, key, value as () => unknown));
+    } else if (typeof value === 'function' && !key.startsWith('on') && key !== 'ref') {
+      trackEffect(el, createEffect(() => setAttr(el, key, (value as () => unknown)())));
+    } else {
+      setAttr(el, key, value);
+    }
+  }
+  const html = props.dangerouslySetInnerHTML as { __html?: unknown } | undefined;
+  if (html && typeof html === 'object' && html.__html != null) {
+    const next = String(html.__html);
+    if (el.innerHTML !== next) el.innerHTML = next;
+  }
+}
+
+const spreadKeys = new WeakMap<Element, Set<string>>();
+
+/**
+ * Applies a spread props object (`<input {...field} />`) to el and re-applies
+ * it when the state `get` reads changes: attributes, form state, styles and
+ * event handlers are set, and keys the previous object had but the new one
+ * lacks are removed.
+ */
+export function krateSpread(el: Element, get: () => Record<string, unknown> | null | undefined): void {
+  trackEffect(
+    el,
+    createEffect(() => {
+      const props = get() || {};
+      const next = new Set<string>();
+      for (const key of Object.keys(props)) {
+        if (key === 'children' || key === 'key' || key === 'dangerouslySetInnerHTML') continue;
+        next.add(key);
+        setAttr(el, key, props[key]);
+      }
+      const prev = spreadKeys.get(el);
+      if (prev) {
+        for (const key of prev) {
+          if (next.has(key)) continue;
+          if (key.startsWith('on')) krateOn(el, key, null);
+          else setAttr(el, key, undefined);
+        }
+      }
+      spreadKeys.set(el, next);
+    })
+  );
+}
+
+// Virtual nodes
+// While hydration adopts server-rendered list rows, h() returns lightweight
+// descriptors instead of DOM nodes (JS evaluates children before parents, so
+// the tree must exist before it can be matched against the DOM top-down).
+
+/** A deferred element produced by h() while adopting server-rendered DOM. */
+export interface KrateVNode {
+  __kv: 1;
+  tag: string;
+  props: Record<string, unknown> | null;
+  children: unknown[];
+}
+
+/** A value that knows how to mount itself or adopt server-rendered DOM. */
+export interface KrateAdoptable {
+  __ka: 1;
+  mount(): Node;
+  adopt(cursor: AdoptCursor): void;
+}
+
+/** Position inside a parent while adopting: `next` is the next unclaimed node. */
+export interface AdoptCursor {
+  parent: Node;
+  next: Node | null;
+}
+
+let vnodeDepth = 0;
+
+/** Evaluate `fn` with h() producing virtual nodes (see KrateVNode). */
+export function withVNodes<T>(fn: () => T): T {
+  const saved = vnodeDepth;
+  vnodeDepth = saved + 1;
+  try {
+    return fn();
+  } finally {
+    vnodeDepth = saved;
+  }
+}
+
+/** Evaluate `fn` with h() producing real DOM, even inside withVNodes. */
+export function withDOM<T>(fn: () => T): T {
+  const saved = vnodeDepth;
+  vnodeDepth = 0;
+  try {
+    return fn();
+  } finally {
+    vnodeDepth = saved;
+  }
+}
+
+function isVNode(v: unknown): v is KrateVNode {
+  return !!v && typeof v === 'object' && (v as KrateVNode).__kv === 1;
+}
+
+function isAdoptable(v: unknown): v is KrateAdoptable {
+  return !!v && typeof v === 'object' && (v as KrateAdoptable).__ka === 1;
+}
+
+const SVG_NS = 'http://www.w3.org/2000/svg';
+
+// Tags that only exist in SVG. Ambiguous names (a, script, style, title) stay
+// HTML here and are re-created in the SVG namespace when appended to an SVG
+// parent (see adoptSvgChild).
+const SVG_TAGS = new Set([
+  'svg', 'g', 'defs', 'symbol', 'use', 'switch', 'desc', 'metadata', 'path', 'circle', 'ellipse', 'line',
+  'polygon', 'polyline', 'rect', 'text', 'tspan', 'textPath', 'image', 'foreignObject', 'marker', 'mask',
+  'pattern', 'clipPath', 'linearGradient', 'radialGradient', 'stop', 'filter', 'feBlend', 'feColorMatrix',
+  'feComponentTransfer', 'feComposite', 'feConvolveMatrix', 'feDiffuseLighting', 'feDisplacementMap',
+  'feDistantLight', 'feDropShadow', 'feFlood', 'feFuncA', 'feFuncB', 'feFuncG', 'feFuncR',
+  'feGaussianBlur', 'feImage', 'feMerge', 'feMergeNode', 'feMorphology', 'feOffset', 'fePointLight',
+  'feSpecularLighting', 'feSpotLight', 'feTile', 'feTurbulence', 'animate', 'animateMotion',
+  'animateTransform', 'set', 'mpath', 'view',
+]);
+
+/** Creates an element in the namespace its tag belongs to. */
+function createTagElement(tag: string): Element {
+  return SVG_TAGS.has(tag) ? document.createElementNS(SVG_NS, tag) : document.createElement(tag);
+}
+
+/** True when a child appended to parent belongs to the SVG namespace. */
+function inSvg(parent: Node): boolean {
+  const p = parent as Element;
+  return p.namespaceURI === SVG_NS && p.localName !== 'foreignObject';
+}
+
+/** Re-creates an HTML-namespace element (a, style, title, ...) as SVG. */
+function adoptSvgChild(parent: Node, child: Node): Node {
+  const c = child as Element;
+  if (c.nodeType !== 1 || c.namespaceURI === SVG_NS || !inSvg(parent)) return child;
+  const el = document.createElementNS(SVG_NS, c.localName);
+  for (const attr of Array.from(c.attributes)) el.setAttribute(attr.name, attr.value);
+  while (c.firstChild) el.appendChild(c.firstChild);
+  return el;
+}
+
+function buildElement(tag: string, props: Record<string, unknown> | null, children: unknown[]): Element {
+  const el = createTagElement(tag);
+  if (props) applyProps(el, props);
+  if (!props || !props.dangerouslySetInnerHTML) {
+    for (const child of children) appendChild(el, child);
+  }
+  return el;
+}
+
+function materialize(v: KrateVNode): Node {
+  return withDOM(() => buildElement(v.tag, v.props, v.children));
+}
+
+function isTextLike(v: unknown): boolean {
+  return v == null || typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean' || typeof v === 'bigint';
+}
+
+function textOf(v: unknown): string {
+  return v == null || typeof v === 'boolean' ? '' : String(v);
+}
+
+/** Append any renderable value (node, text, array, reactive function) to parent. */
+export function appendChild(parent: Node, child: unknown): void {
   if (child == null || child === false || child === true) return;
 
   if (Array.isArray(child)) {
@@ -146,13 +459,219 @@ function appendChild(parent: Node, child: unknown): void {
   }
 
   if (typeof child === 'function') {
-    const text = document.createTextNode('');
-    parent.appendChild(text);
-    trackEffect(text, createEffect(() => { text.nodeValue = String(child()); }));
+    createRegion(parent, child as () => unknown, null);
     return;
   }
 
-  parent.appendChild(child instanceof Node ? child : document.createTextNode(String(child)));
+  if (isVNode(child)) {
+    parent.appendChild(adoptSvgChild(parent, materialize(child)));
+    return;
+  }
+
+  if (isAdoptable(child)) {
+    parent.appendChild(child.mount());
+    return;
+  }
+
+  parent.appendChild(child instanceof Node ? adoptSvgChild(parent, child) : document.createTextNode(String(child)));
+}
+
+// Reactive regions
+// A function child re-renders when the signals it reads change. A region that
+// only ever renders text is a single text node updated in place; once it
+// renders nodes it switches to a pair of empty comment markers so it can hold
+// any number of nodes (elements, fragments, nested regions and lists).
+
+interface Region {
+  text: Text | null;
+  start: Comment | null;
+  end: Comment | null;
+}
+
+/** Move the disposers tracked on one node to another. */
+function retrack(from: Node, to: Node): void {
+  const arr = effectsByNode.get(from);
+  if (!arr) return;
+  effectsByNode.delete(from);
+  for (const d of arr) trackEffect(to, d);
+}
+
+/** Remove (and dispose) every node strictly between start and end. */
+export function clearBetween(start: Node, end: Node): void {
+  const parent = start.parentNode;
+  if (!parent) return;
+  let node = start.nextSibling;
+  while (node && node !== end) {
+    const next = node.nextSibling;
+    disposeNode(node);
+    parent.removeChild(node);
+    node = next;
+  }
+}
+
+function regionToMarkers(r: Region): void {
+  if (!r.text) return;
+  const t = r.text;
+  const p = t.parentNode as Node;
+  r.start = document.createComment('');
+  r.end = document.createComment('');
+  p.insertBefore(r.start, t);
+  p.insertBefore(r.end, t.nextSibling);
+  retrack(t, r.start);
+  p.removeChild(t);
+  r.text = null;
+}
+
+function updateRegion(r: Region, v: unknown): void {
+  if (isTextLike(v)) {
+    const s = textOf(v);
+    if (r.text) {
+      if (r.text.data !== s) r.text.data = s;
+      return;
+    }
+    clearBetween(r.start as Node, r.end as Node);
+    if (s !== '') (r.end as Node).parentNode!.insertBefore(document.createTextNode(s), r.end);
+    return;
+  }
+  regionToMarkers(r);
+  clearBetween(r.start as Node, r.end as Node);
+  const frag = document.createDocumentFragment();
+  appendChild(frag, v);
+  (r.end as Node).parentNode!.insertBefore(frag, r.end);
+}
+
+function createRegion(parent: Node, fn: () => unknown, before: Node | null): void {
+  const r: Region = { text: null, start: null, end: null };
+  let first = true;
+  const dispose = createEffect(() => {
+    const v = fn();
+    if (!first) {
+      updateRegion(r, v);
+      return;
+    }
+    first = false;
+    if (isTextLike(v)) {
+      r.text = document.createTextNode(textOf(v));
+      parent.insertBefore(r.text, before);
+      return;
+    }
+    r.start = document.createComment('');
+    r.end = document.createComment('');
+    parent.insertBefore(r.start, before);
+    const frag = document.createDocumentFragment();
+    appendChild(frag, v);
+    parent.insertBefore(frag, before);
+    parent.insertBefore(r.end, before);
+  });
+  trackEffect((r.text || r.start) as Node, dispose);
+}
+
+// Adoption (hydration without re-rendering)
+// adoptValue walks a rendered value (virtual nodes, text, arrays, regions,
+// lists) against the server-rendered DOM at the cursor, binding props and
+// effects to the existing nodes. A node that does not match is replaced by a
+// freshly built one, so a mismatch degrades to a local client render.
+
+function skipComments(c: AdoptCursor): void {
+  while (c.next && c.next.nodeType === 8) c.next = c.next.nextSibling;
+}
+
+/** Insert a node at the cursor (before the next unclaimed node). */
+export function insertAt(c: AdoptCursor, node: Node): void {
+  c.parent.insertBefore(node, c.next);
+}
+
+function claimText(c: AdoptCursor, s: string): Text {
+  skipComments(c);
+  const n = c.next;
+  if (s !== '' && n && n.nodeType === 3) {
+    const t = n as Text;
+    if (t.data.length > s.length && t.data.startsWith(s)) t.splitText(s.length);
+    else if (t.data !== s) t.data = s;
+    c.next = t.nextSibling;
+    return t;
+  }
+  const t = document.createTextNode(s);
+  insertAt(c, t);
+  return t;
+}
+
+/** Remove (and dispose) the nodes from the cursor up to `end` (or the end). */
+export function removeRest(c: AdoptCursor, end: Node | null): void {
+  let n = c.next;
+  while (n && n !== end) {
+    const next = n.nextSibling;
+    disposeNode(n);
+    c.parent.removeChild(n);
+    n = next;
+  }
+  c.next = end;
+}
+
+function adoptElement(v: KrateVNode, c: AdoptCursor): void {
+  skipComments(c);
+  const n = c.next;
+  if (n && n.nodeType === 1 && (n as Element).localName.toLowerCase() === v.tag.toLowerCase()) {
+    c.next = n.nextSibling;
+    const el = n as Element;
+    if (v.props) applyProps(el, v.props);
+    if (!v.props || !v.props.dangerouslySetInnerHTML) {
+      const inner: AdoptCursor = { parent: el, next: el.firstChild };
+      for (const child of v.children) adoptValue(child, inner);
+      removeRest(inner, null);
+    }
+    return;
+  }
+  insertAt(c, materialize(v));
+}
+
+function adoptRegion(fn: () => unknown, c: AdoptCursor): void {
+  const r: Region = { text: null, start: null, end: null };
+  let first = true;
+  const dispose = createEffect(() => {
+    if (!first) {
+      updateRegion(r, fn());
+      return;
+    }
+    first = false;
+    const v = withVNodes(fn);
+    if (isTextLike(v)) {
+      r.text = claimText(c, textOf(v));
+      return;
+    }
+    r.start = document.createComment('');
+    insertAt(c, r.start);
+    adoptValue(v, c);
+    r.end = document.createComment('');
+    insertAt(c, r.end);
+  });
+  trackEffect((r.text || r.start) as Node, dispose);
+}
+
+/** Adopt server-rendered DOM at the cursor for a rendered value. */
+export function adoptValue(v: unknown, c: AdoptCursor): void {
+  if (v == null || typeof v === 'boolean') return;
+  if (Array.isArray(v)) {
+    for (const x of v) adoptValue(x, c);
+    return;
+  }
+  if (typeof v === 'function') {
+    adoptRegion(v as () => unknown, c);
+    return;
+  }
+  if (isVNode(v)) {
+    adoptElement(v, c);
+    return;
+  }
+  if (isAdoptable(v)) {
+    v.adopt(c);
+    return;
+  }
+  if (v instanceof Node) {
+    insertAt(c, v);
+    return;
+  }
+  claimText(c, String(v));
 }
 
 export function h(
@@ -161,26 +680,21 @@ export function h(
   ...children: unknown[]
 ): Node {
   if (typeof tag === 'function') {
-    return tag({ ...(props || {}), children });
+    // Keep the props object (not a spread copy) so getter props stay live: a
+    // list row passes `get item(){...}` accessors that read row signals. Each
+    // component call gets an effect owner, so its React effects run
+    // children-before-parents and are cleaned up when its nodes are disposed.
+    const p = props || {};
+    if (children.length > 0 || !('children' in p)) p.children = children;
+    const { value, owner } = krateWithOwner(() => tag(p));
+    trackOwner(value, owner);
+    return value;
   }
 
-  const el = document.createElement(tag);
-
-  if (props) {
-    for (const [key, value] of Object.entries(props)) {
-      if (typeof value === 'function' && !key.startsWith('on')) {
-        trackEffect(el, createEffect(() => setAttr(el, key, value())));
-      } else {
-        setAttr(el, key, value);
-      }
-    }
+  if (vnodeDepth > 0) {
+    return { __kv: 1, tag, props, children } as unknown as Node;
   }
-
-  for (const child of children) {
-    appendChild(el, child);
-  }
-
-  return el;
+  return buildElement(tag, props, children);
 }
 
 function getContainer(container: string | HTMLElement): HTMLElement {
@@ -206,11 +720,11 @@ export function mount(fn: () => Node, container: string | HTMLElement): void {
 export function hydrate(fn: () => Node, container: string | HTMLElement): void {
   const el = getContainer(container);
   if (el.childNodes.length === 0) {
-    // Empty container — fall back to mount behavior
+    // Empty container - fall back to mount behavior
     el.appendChild(fn());
     return;
   }
-  // SSR content exists — run the component to set up effects/signals.
+  // SSR content exists - run the component to set up effects/signals.
   // The freshly-built tree is only used to establish reactive subscriptions;
   // it is not attached to the DOM, so dispose its effects to avoid leaks.
   const tree = fn();

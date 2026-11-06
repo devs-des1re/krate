@@ -1,0 +1,6 @@
+{
+  "steps": [
+    { "op": "click", "sel": "#release-sidebar", "then": "#sidebar" },
+    { "op": "click", "sel": "#release-comments", "then": "#comments" }
+  ]
+}

@@ -2,21 +2,20 @@ package build
 
 import (
 	"github.com/kratejs/krate/packages/compiler/ast"
+	"github.com/kratejs/krate/packages/compiler/internal/irtree"
 )
 
 // FlattenComponentSpreadAttrs rewrites JSX spread attributes that resolve to a
 // statically-known object literal into plain attributes before the annotator /
 // irtree stages consume call-site props.
-//
 // The docs plugin generates pages that call <DocsLayout {...docsProps}> where
 // `const docsProps = {...}` is declared in the same page function. The irtree
 // call-site prop extraction (extractPropsAST / buildPropBindings) skips spread
 // attributes, so those props silently vanished and the theme layout rendered
 // empty. This pass inlines the const object's properties onto the element so
 // the rest of the pipeline sees exactly what `extractPropsAST` expects.
-//
-// Only spreads resolvable to an object literal — inline <Comp {...{a: 1}}> or
-// a same-function `const o = {...}` — are flattened. Identifiers bound to
+// Only spreads resolvable to an object literal - inline <Comp {...{a: 1}}> or
+// a same-function `const o = {...}` - are flattened. Identifiers bound to
 // anything else, member accesses, calls, etc. are left untouched so they keep
 // the pre-existing (skip) behavior.
 func (b *Builder) FlattenComponentSpreadAttrs(prog *ast.Program) {
@@ -34,6 +33,11 @@ func (b *Builder) FlattenComponentSpreadAttrs(prog *ast.Program) {
 			continue
 		}
 		consts := collectConstObjects(fn.Body)
+		// An object changed by the body (`o.x = 1`, `Object.assign(o, ...)`)
+		// no longer matches its literal.
+		for name := range irtree.RenderMutatedNames(fn.Body) {
+			delete(consts, name)
+		}
 		for _, s := range fn.Body {
 			flattenStmtSpreads(s, consts)
 		}
@@ -162,41 +166,44 @@ func flattenChildrenSpreads(children []ast.JSXChild, consts map[string]*ast.Obje
 }
 
 // flattenElementSpreads replaces resolvable spread attributes on a single
-// element with the object literal's properties.
+// element with the object literal's properties, with React's ordering: a
+// later attribute or spread overrides an earlier one of the same name.
 func flattenElementSpreads(el *ast.JSXElement, consts map[string]*ast.ObjectExpr) {
-	out := make([]*ast.JSXAttr, 0, len(el.Opening.Attributes))
-	for _, attr := range el.Opening.Attributes {
-		if !attr.Spread {
-			out = append(out, attr)
-			continue
-		}
+	el.Opening.Attributes, _ = irtree.MergeSpreadAttrs(el.Opening.Attributes, func(attr *ast.JSXAttr) irtree.SpreadExpansion {
 		obj := resolveSpreadObject(attr.Value, consts)
 		if obj == nil {
-			out = append(out, attr)
-			continue
+			return irtree.SpreadExpansion{}
 		}
+		exp := irtree.SpreadExpansion{Resolved: true}
 		for _, prop := range obj.Properties {
-			if prop.Spread || prop.Value == nil {
-				continue
-			}
-			out = append(out, &ast.JSXAttr{
+			exp.Attrs = append(exp.Attrs, &ast.JSXAttr{
 				Position: attr.Position,
 				Name:     prop.Key,
 				Value:    prop.Value,
 			})
 		}
-	}
-	el.Opening.Attributes = out
+		return exp
+	})
 }
 
 // resolveSpreadObject resolves a spread attribute value to an object literal
-// when statically known.
+// when statically known. Literals with spread, computed, method or accessor
+// members are not flattened: their keys or values are not plain attributes.
 func resolveSpreadObject(expr ast.Expr, consts map[string]*ast.ObjectExpr) *ast.ObjectExpr {
+	var obj *ast.ObjectExpr
 	switch v := expr.(type) {
 	case *ast.ObjectExpr:
-		return v
+		obj = v
 	case *ast.Identifier:
-		return consts[v.Name]
+		obj = consts[v.Name]
 	}
-	return nil
+	if obj == nil {
+		return nil
+	}
+	for _, prop := range obj.Properties {
+		if prop == nil || prop.Spread || prop.Computed || prop.Method || prop.Getter || prop.Setter || prop.Value == nil {
+			return nil
+		}
+	}
+	return obj
 }

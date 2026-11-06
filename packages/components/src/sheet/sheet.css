@@ -1,0 +1,73 @@
+.krate-sheet {
+  display: inline-block;
+}
+.krate-sheet-trigger {
+  cursor: pointer;
+}
+.krate-sheet-content {
+  position: fixed;
+  z-index: 1001;
+  width: 320px;
+  max-width: 85vw;
+  height: 100%;
+  top: 0;
+  padding: 24px;
+  background: var(--krate-card-bg, #ffffff);
+  border-inline-start: 1px solid var(--krate-border, #e5e5e5);
+  /* The second shadow is the backdrop: it dims the page and, because the
+     page behind is made inert while a modal is open, clicking it closes it. */
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.2), 0 0 0 100vmax var(--krate-backdrop, rgba(0, 0, 0, 0.45));
+  overflow-y: auto;
+}
+.krate-sheet-content[data-side='right'] { inset-inline-end: 0; }
+.krate-sheet-content[data-side='left'] { inset-inline-start: 0; }
+.krate-sheet-content[data-side='top'] {
+  inset-inline: 0;
+  top: 0;
+  height: auto;
+  max-height: 85vh;
+}
+.krate-sheet-content[data-side='bottom'] {
+  inset-inline: 0;
+  top: auto;
+  bottom: 0;
+  height: auto;
+  max-height: 85vh;
+}
+.krate-sheet-title {
+  font-size: 1.1rem;
+  font-weight: 600;
+  color: var(--krate-text, #0a0a0a);
+  margin: 0 0 4px;
+}
+.krate-sheet-description {
+  font-size: 0.9rem;
+  color: var(--krate-text-muted, #737373);
+  line-height: 1.5;
+}
+.krate-sheet-close {
+  position: absolute;
+  top: 16px;
+  inset-inline-end: 16px;
+  cursor: pointer;
+  background: transparent;
+  border: 0;
+  color: var(--krate-text-muted, #737373);
+}
+
+.krate-sheet-close {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px 12px;
+  border-radius: 6px;
+  border: 1px solid var(--krate-border, #e5e5e5);
+  background: var(--krate-surface, #f5f5f5);
+  color: var(--krate-text, #0a0a0a);
+  font-size: 0.875rem;
+  font-family: inherit;
+  cursor: pointer;
+}
+.krate-sheet-close:hover {
+  background: var(--krate-surface-hover, #e5e5e5);
+}

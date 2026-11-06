@@ -6,10 +6,13 @@ import (
 	"html"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/kratejs/krate/packages/compiler/internal/docfind"
 	"github.com/kratejs/krate/packages/compiler/internal/frontmatter"
+	"github.com/kratejs/krate/packages/compiler/internal/gitinfo"
 	"github.com/kratejs/krate/packages/compiler/internal/markdown"
 	"github.com/kratejs/krate/packages/compiler/internal/pluginutil"
 )
@@ -48,7 +51,7 @@ type Page struct {
 	Keywords      []string      `json:"keywords,omitempty"`
 	CustomSidebar []SidebarItem `json:"customSidebar"`
 
-	// Phase 1 — content fields
+	// Phase 1 - content fields
 	Description string       `json:"description,omitempty"`
 	Toc         TocConfig    `json:"-"`
 	Hero        *HeroConfig  `json:"-"`
@@ -57,17 +60,34 @@ type Page struct {
 	Prev        *NavOverride `json:"-"`
 	Next        *NavOverride `json:"-"`
 
-	// Phase 2 — navigation surface
+	// Phase 2 - navigation surface
 	SidebarCfg *SidebarNavConfig `json:"-"`
 	Badge      *Badge            `json:"badge,omitempty"`
 
-	// Phase 3 — workflow
+	// Phase 3 - workflow
 	Draft   bool   `json:"draft,omitempty"`
 	EditURL string `json:"editUrl,omitempty"`
 
-	// Phase 4 — search/org
+	// Phase 4 - search/org
 	Tags       []string `json:"tags,omitempty"`
 	Categories []string `json:"categories,omitempty"`
+
+	// Phase 5 - dates (RFC3339 or YYYY-MM-DD strings). Date is the published
+	// date; Updated is the last-modified date (frontmatter, else git).
+	Date    string `json:"date,omitempty"`
+	Updated string `json:"updated,omitempty"`
+
+	// Authors lists recent contributors to the source file (from git), most
+	// recent first. Populated when Config.GitLastUpdated is set.
+	Authors []string `json:"authors,omitempty"`
+
+	// Phase 6 - i18n/versioning. Locale is the page's locale ("" when i18n is
+	// not configured); Version is its docs version ("" when unversioned); URL is
+	// the page's absolute site URL, set by the docs plugin (locale/version
+	// aware).
+	Locale  string `json:"locale,omitempty"`
+	Version string `json:"version,omitempty"`
+	URL     string `json:"url,omitempty"`
 }
 
 // TocConfig controls the page's table of contents.
@@ -123,6 +143,9 @@ type Config struct {
 	ContentDir string          // relative to project root
 	Root       string          // absolute project root
 	MDConfig   markdown.Config // markdown rendering config
+	// GitLastUpdated fills Page.Updated from the file's last git commit when
+	// frontmatter does not set it.
+	GitLastUpdated bool
 }
 
 // Scan walks the content directory and parses all .md/.mdx files.
@@ -132,78 +155,128 @@ func Scan(cfg Config) ([]Page, error) {
 		return nil, nil
 	}
 
-	var pages []Page
-
-	err := pluginutil.WalkMD(absDir, func(absPath, relPath string) error {
-		data, err := os.ReadFile(absPath)
-		if err != nil {
-			return fmt.Errorf("reading %s: %w", absPath, err)
-		}
-
-		pagePath := strings.TrimSuffix(relPath, filepath.Ext(relPath))
-
-		var htmlContent string
-		var fm *Frontmatter
-		if strings.HasSuffix(absPath, ".mdx") {
-			htmlContent, fm = ParseMDX(string(data), cfg.MDConfig)
-		} else {
-			htmlContent, fm = ParseMD(string(data), cfg.MDConfig)
-		}
-
-		if fm.Title == "" {
-			fm.Title = PathToTitle(relPath)
-		}
-
-		dirPart := fm.Sidebar
-		if dirPart == "" {
-			if idx := strings.LastIndex(pagePath, "/"); idx > 0 {
-				dirPart = pagePath[:idx]
-			}
-		}
-
-		pages = append(pages, Page{
-			Path:          pagePath,
-			Title:         fm.Title,
-			Order:         fm.Order,
-			Content:       htmlContent,
-			Dir:           dirPart,
-			Sidebar:       fm.Sidebar,
-			SourcePath:    absPath,
-			Keywords:      fm.Keywords,
-			CustomSidebar: fm.CustomSidebar,
-			Description:   fm.Description,
-			Toc:           fm.Toc,
-			Hero:          fm.Hero,
-			Template:      fm.Template,
-			Head:          fm.Head,
-			Prev:          fm.Prev,
-			Next:          fm.Next,
-			SidebarCfg:    fm.SidebarConfig,
-			Badge:         fm.Badge,
-			Draft:         fm.Draft,
-			EditURL:       fm.EditURL,
-			Tags:          fm.Tags,
-			Categories:    fm.Categories,
-		})
+	// Collect the file list first so parsing can run concurrently while staying
+	// deterministic (results are written back by index).
+	absPaths := []string{}
+	relPaths := []string{}
+	if err := pluginutil.WalkMD(absDir, func(absPath, relPath string) error {
+		absPaths = append(absPaths, absPath)
+		relPaths = append(relPaths, relPath)
 		return nil
-	})
+	}); err != nil {
+		return nil, err
+	}
 
-	return pages, err
+	pages := make([]Page, len(absPaths))
+	errs := make([]error, len(absPaths))
+	pool := make(chan struct{}, runtime.GOMAXPROCS(0))
+	var wg sync.WaitGroup
+	for i := range absPaths {
+		wg.Add(1)
+		pool <- struct{}{}
+		go func(i int) {
+			defer wg.Done()
+			defer func() { <-pool }()
+			p, err := scanPage(cfg, absPaths[i], relPaths[i])
+			if err != nil {
+				errs[i] = err
+				return
+			}
+			pages[i] = p
+		}(i)
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			return nil, err
+		}
+	}
+	return pages, nil
+}
+
+// scanPage parses a single content file into a Page (frontmatter, body, and
+// optional git metadata). Safe to run concurrently.
+func scanPage(cfg Config, absPath, relPath string) (Page, error) {
+	data, err := os.ReadFile(absPath)
+	if err != nil {
+		return Page{}, fmt.Errorf("reading %s: %w", absPath, err)
+	}
+
+	pagePath := strings.TrimSuffix(relPath, filepath.Ext(relPath))
+
+	htmlContent, fm, diags := parseDoc(string(data), cfg.MDConfig, strings.HasSuffix(absPath, ".mdx"))
+	for _, d := range diags {
+		if !d.Warning {
+			return Page{}, fmt.Errorf("%s:%d:%d: %s (hint: %s)", absPath, d.Line, d.Col, d.Msg, d.Hint)
+		}
+	}
+
+	if fm.Title == "" {
+		fm.Title = PathToTitle(relPath)
+	}
+
+	dirPart := fm.Sidebar
+	if dirPart == "" {
+		if idx := strings.LastIndex(pagePath, "/"); idx > 0 {
+			dirPart = pagePath[:idx]
+		}
+	}
+
+	updated := fm.Updated
+	var authors []string
+	if cfg.GitLastUpdated {
+		if updated == "" {
+			updated = gitinfo.LastCommit(cfg.Root, absPath)
+		}
+		authors = gitinfo.LastAuthors(cfg.Root, absPath, 5)
+	}
+
+	return Page{
+		Path:          pagePath,
+		Title:         fm.Title,
+		Order:         fm.Order,
+		Content:       htmlContent,
+		Dir:           dirPart,
+		Sidebar:       fm.Sidebar,
+		SourcePath:    absPath,
+		Keywords:      fm.Keywords,
+		CustomSidebar: fm.CustomSidebar,
+		Description:   fm.Description,
+		Toc:           fm.Toc,
+		Hero:          fm.Hero,
+		Template:      fm.Template,
+		Head:          fm.Head,
+		Prev:          fm.Prev,
+		Next:          fm.Next,
+		SidebarCfg:    fm.SidebarConfig,
+		Badge:         fm.Badge,
+		Draft:         fm.Draft,
+		EditURL:       fm.EditURL,
+		Tags:          fm.Tags,
+		Categories:    fm.Categories,
+		Date:          fm.Date,
+		Updated:       updated,
+		Authors:       authors,
+	}, nil
 }
 
 // ParseMD parses a .md file, extracting frontmatter and rendering markdown.
 func ParseMD(src string, cfg markdown.Config) (html string, fm *Frontmatter) {
-	raw, segments := markdown.ParseMDXSegments(src, cfg)
-	html = markdown.RenderSegmentsToHTML(segments)
-	fm = decodeFrontmatter(raw)
+	html, fm, _ = parseDoc(src, cfg, false)
 	return
 }
 
-// ParseMDX parses an .mdx file, extracting frontmatter and rendering with JSX
-// support. The result is identical to ParseMD since both delegate to the same
-// markdown renderer.
+// ParseMDX parses an .mdx file, extracting frontmatter and rendering it with
+// MDX semantics (ESM, JSX and expressions). The HTML is the static form used
+// for search and TOC extraction: components are dropped, code is highlighted.
 func ParseMDX(src string, cfg markdown.Config) (html string, fm *Frontmatter) {
-	return ParseMD(src, cfg)
+	html, fm, _ = parseDoc(src, cfg, true)
+	return
+}
+
+func parseDoc(src string, cfg markdown.Config, mdx bool) (string, *Frontmatter, []markdown.Diagnostic) {
+	res := markdown.Compile(src, cfg, markdown.Options{MDX: mdx})
+	return res.StaticHTML(cfg), decodeFrontmatter(res.Frontmatter), res.Diags
 }
 
 // ParseKeywords splits a frontmatter `keywords:` value (comma or space
@@ -249,16 +322,25 @@ type SearchEntry struct {
 }
 
 // BuildSearchIndex generates a search index from documentation pages.
-func BuildSearchIndex(pages []Page) []SearchEntry {
+func BuildSearchIndex(pages []Page) []SearchEntry { return BuildSearchIndexBase(pages, "") }
+
+// BuildSearchIndexBase is BuildSearchIndex with a site base path prefixed onto
+// every entry. Entries use each page's own (locale- and version-aware) URL, so
+// a section index is /docs/guides/, never /docs/guides/index/.
+func BuildSearchIndexBase(pages []Page, base string) []SearchEntry {
 	var entries []SearchEntry
 	for _, p := range pages {
-		plainText := StripHTMLTags(p.Content)
-		if len(plainText) > 500 {
-			plainText = plainText[:500]
+		// Page content is rendered HTML, so text such as a quoted string is
+		// stored as &quot; or &#39;. The index holds plain text: the search UI
+		// escapes it again when it builds the result list, so leaving entities
+		// in would show them literally in snippets.
+		plainText := html.UnescapeString(StripHTMLTags(p.Content))
+		if r := []rune(plainText); len(r) > 500 {
+			plainText = string(r[:500])
 		}
 		entries = append(entries, SearchEntry{
 			Title:      p.Title,
-			Path:       "/docs/" + p.Path + "/",
+			Path:       base + pagePathURL(p),
 			Content:    appendSearchTerms(plainText, p.Tags, p.Categories),
 			Tags:       p.Tags,
 			Categories: p.Categories,
@@ -283,6 +365,11 @@ func appendSearchTerms(plainText string, tags, categories []string) string {
 // against the tags/categories surface the page; the JSON fallback index gets
 // the same terms appended to content (see BuildSearchIndex).
 func BuildSearchDocuments(pages []Page) []docfind.Document {
+	return BuildSearchDocumentsBase(pages, "")
+}
+
+// BuildSearchDocumentsBase is BuildSearchDocuments with a base path prefix.
+func BuildSearchDocumentsBase(pages []Page, base string) []docfind.Document {
 	documents := make([]docfind.Document, 0, len(pages))
 	for _, p := range pages {
 		keywords := dedupeNonEmpty(p.Keywords, p.Tags, p.Categories)
@@ -293,7 +380,7 @@ func BuildSearchDocuments(pages []Page) []docfind.Document {
 		documents = append(documents, docfind.Document{
 			Title:    p.Title,
 			Category: p.Dir,
-			Href:     PageURL(p.Path),
+			Href:     base + pagePathURL(p),
 			Body:     body,
 			Keywords: keywords,
 		})
@@ -321,10 +408,10 @@ func dedupeNonEmpty(slices ...[]string) []string {
 }
 
 // StripHTMLTags removes HTML tags from a string, keeping the document's line
-// structure: block-level tags (p, li, headings, table cells, …) become line
+// structure: block-level tags (p, li, headings, table cells, ...) become line
 // breaks, and intra-line whitespace is collapsed. This keeps extracted text
 // readable (paragraphs stay separate) and prevents adjacent blocks from running
-// together, e.g. "<td>File</td><td>When loaded</td>" → "File\nWhen loaded".
+// together, e.g. "<td>File</td><td>When loaded</td>" -> "File\nWhen loaded".
 func StripHTMLTags(s string) string {
 	var out strings.Builder
 	var tag strings.Builder
@@ -400,6 +487,8 @@ type Frontmatter struct {
 	EditURL       string
 	Tags          []string
 	Categories    []string
+	Date          string
+	Updated       string
 }
 
 func decodeFrontmatter(fm map[string]any) *Frontmatter {
@@ -424,6 +513,11 @@ func decodeFrontmatter(fm map[string]any) *Frontmatter {
 	f.Keywords = frontmatter.StringSlice(fm["keywords"])
 	f.Tags = frontmatter.StringSlice(fm["tags"])
 	f.Categories = frontmatter.StringSlice(fm["categories"])
+	f.Date = frontmatter.String(fm["date"])
+	f.Updated = frontmatter.String(fm["lastUpdated"])
+	if f.Updated == "" {
+		f.Updated = frontmatter.String(fm["updated"])
+	}
 	f.Badge = decodeBadge(fm["badge"])
 
 	// sidebar (legacy section / custom array / new object form)

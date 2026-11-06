@@ -6,11 +6,16 @@
   "scripts": {
     "dev": "krate dev",
     "build": "krate build",
-    "serve": "krate serve"
+    "serve": "krate serve",
+    "typecheck": "krate typecheck"
   },
   "dependencies": {
-    "@krate/core": "latest",
-    "@krate/runtime": "latest",
-    "@krate/components": "latest"
+    "@krate/core": "__KRATE_VERSION__",
+    "@krate/runtime": "__KRATE_VERSION__",
+    "@krate/components": "__KRATE_VERSION__"
+  },
+  "devDependencies": {
+    "@krate/ts-plugin": "__KRATE_VERSION__",
+    "typescript": "^5.5.0"
   }
 }

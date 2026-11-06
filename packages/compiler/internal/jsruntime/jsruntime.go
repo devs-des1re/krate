@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
+	"strconv"
 	"time"
 
 	"modernc.org/quickjs"
@@ -18,9 +20,15 @@ const (
 
 // Runtime wraps a quickjs VM with krate-specific Web API polyfills
 type Runtime struct {
-	vm          *quickjs.VM
-	projectRoot string // root directory for fs.readFile resolution
-	logPrefix   string // optional prefix for console output (e.g. "[plugin:demo]")
+	vm       *quickjs.VM
+	memLimit uintptr
+	// curBody is the request body of the in-flight API request; the JS side
+	// reads it lazily through the __go_body_* host functions.
+	curBody   []byte
+	logPrefix string // optional prefix for console output (e.g. "[plugin:demo]")
+	// dataCache, when set, caches fetch responses requested with Next-style
+	// options ({ next: { revalidate, tags } } / cache: "force-cache").
+	dataCache *DataCache
 }
 
 // SetLogPrefix sets a prefix prepended to every console line. Plugin hosts set
@@ -55,19 +63,19 @@ func New() (*Runtime, error) {
 		return nil, fmt.Errorf("failed to create JS VM: %w", err)
 	}
 
-	// Set memory limit (32MB default)
-	vm.SetMemoryLimit(32 * 1024 * 1024)
+	// Resource limits are configurable so an unusual project can raise them:
+	// KRATE_JS_MEMORY_MB (default 32), KRATE_JS_STACK_KB (default 256),
+	// KRATE_JS_TIMEOUT (Go duration, default 30s).
+	memLimit := envUnits("KRATE_JS_MEMORY_MB", 32, 1<<20)
+	vm.SetMemoryLimit(memLimit)
+	vm.SetMaxStackSize(envUnits("KRATE_JS_STACK_KB", 256, 1024))
 
-	// Set stack size (256KB)
-	vm.SetMaxStackSize(256 * 1024)
-
-	// Set eval timeout (30 seconds)
-	if err := vm.SetEvalTimeout(30 * time.Second); err != nil {
+	if err := vm.SetEvalTimeout(envDuration("KRATE_JS_TIMEOUT", 30*time.Second)); err != nil {
 		vm.Close()
 		return nil, fmt.Errorf("failed to set eval timeout: %w", err)
 	}
 
-	r := &Runtime{vm: vm}
+	r := &Runtime{vm: vm, memLimit: memLimit}
 
 	// Inject Web API polyfills
 	if err := r.injectPolyfills(); err != nil {
@@ -78,9 +86,48 @@ func New() (*Runtime, error) {
 	return r, nil
 }
 
+// envUnits reads a positive integer from key and multiplies it by unit, falling
+// back to def*unit when unset/invalid.
+func envUnits(key string, def int, unit int) uintptr {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return uintptr(n * unit)
+		}
+	}
+	return uintptr(def * unit)
+}
+
+// envDuration reads a positive Go duration from key, falling back to def.
+func envDuration(key string, def time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			return d
+		}
+	}
+	return def
+}
+
+// setMemoryHeadroom raises (or restores, with 0) the VM memory limit so a
+// request with a large body fits beside the configured base limit.
+func (r *Runtime) setMemoryHeadroom(extra uintptr) {
+	r.vm.SetMemoryLimit(r.memLimit + extra)
+}
+
 // Execute evaluates JavaScript code and returns the result
 func (r *Runtime) Execute(code string) (any, error) {
 	return r.vm.Eval(code, EvalGlobal)
+}
+
+// Compile compiles JavaScript to quickjs bytecode for later evaluation with
+// EvalBytecode. Caching bytecode lets a long-lived VM skip re-parsing a script
+// on every call.
+func (r *Runtime) Compile(code string, flags int) ([]byte, error) {
+	return r.vm.Compile(code, flags)
+}
+
+// EvalBytecode evaluates previously compiled quickjs bytecode.
+func (r *Runtime) EvalBytecode(bytecode []byte) (any, error) {
+	return r.vm.EvalBytecode(bytecode)
 }
 
 // DrainJobs executes pending promise jobs (microtasks). Call after Execute to resolve promises.
@@ -134,16 +181,29 @@ func (r *Runtime) GetGlobal(name string) (any, error) {
 	return r.vm.GetProperty(global, atom)
 }
 
-// RegisterFunc registers a Go function as a global JS function
+// RegisterFunc registers a Go function as a global JS function. A panic in the
+// host function is converted into a JS-catchable error rather than unwinding
+// across the QuickJS FFI boundary.
 func (r *Runtime) RegisterFunc(name string, f func(args []any) (any, error)) error {
-	return r.vm.RegisterHostFunc(name, func(args []any) (any, error) {
+	return r.vm.RegisterHostFunc(name, func(args []any) (res any, err error) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				err = fmt.Errorf("host function %q panicked: %v", name, rec)
+			}
+		}()
 		return f(args)
 	})
 }
 
 // RegisterFuncWithThis registers a Go function that receives the this object
+// (with the same panic containment as RegisterFunc).
 func (r *Runtime) RegisterFuncWithThis(name string, f func(this quickjs.Value, args []any) (any, error)) error {
-	return r.vm.RegisterFunc(name, func(this quickjs.Value, args []any) (any, error) {
+	return r.vm.RegisterFunc(name, func(this quickjs.Value, args []any) (res any, err error) {
+		defer func() {
+			if rec := recover(); rec != nil {
+				err = fmt.Errorf("host function %q panicked: %v", name, rec)
+			}
+		}()
 		return f(this, args)
 	}, true)
 }
@@ -173,23 +233,65 @@ func ToNative(v any) any {
 	}
 }
 
-// EvaluateExpr evaluates a self-contained JS expression in a fresh QuickJS VM
-// and returns its String() representation. Because QuickJS is a full ECMAScript
-// engine, every built-in (Date, Math, String, Number, Array, Object, ...) is
-// available — so SSR evaluation of globals like Date.now() produces a genuine
-// JS-engine value rather than a Go approximation. Returns an error when the
-// expression throws (e.g. it references an identifier that isn't defined).
+// exprVMPool holds idle expression-eval VMs. Creating a QuickJS VM and injecting
+// the polyfill bundle is the dominant cost of EvaluateExpr, so VMs are pooled and
+// reused across calls. A VM is handed to one goroutine at a time (QuickJS VMs are
+// not concurrency-safe) and the pool is bounded to GOMAXPROCS idle VMs; under
+// bursty concurrency extra calls simply create a fresh VM as before.
+var exprVMPool = make(chan *Runtime, max(1, runtime.GOMAXPROCS(0)))
+
+// exprVMPoolEnabled can be disabled with KRATE_NO_EXPR_VM_POOL (used for
+// before/after measurement, and as an escape hatch).
+func exprVMPoolEnabled() bool { return os.Getenv("KRATE_NO_EXPR_VM_POOL") == "" }
+
+func acquireExprVM() (*Runtime, error) {
+	if !exprVMPoolEnabled() {
+		return New()
+	}
+	select {
+	case rt := <-exprVMPool:
+		return rt, nil
+	default:
+		return New()
+	}
+}
+
+func releaseExprVM(rt *Runtime) {
+	if !exprVMPoolEnabled() {
+		_ = rt.Close()
+		return
+	}
+	select {
+	case exprVMPool <- rt:
+	default:
+		_ = rt.Close()
+	}
+}
+
+// EvaluateExpr evaluates a self-contained JS expression and returns its String()
+// representation. Because QuickJS is a full ECMAScript engine, every built-in
+// (Date, Math, String, Number, Array, Object, ...) is available - so SSR
+// evaluation of globals like Date.now() produces a genuine JS-engine value
+// rather than a Go approximation. Returns an error when the expression throws
+// (e.g. it references an identifier that isn't defined).
+//
+// The expression is evaluated inside a strict IIFE so it cannot leak implicit
+// globals into the pooled VM (a fresh VM previously discarded any such state).
+// The eval-timeout deadline is re-armed on every Execute by the bindings, so a
+// VM is safe to reuse even after a thrown expression or a timeout.
 func EvaluateExpr(code string) (string, error) {
-	rt, err := New()
+	rt, err := acquireExprVM()
 	if err != nil {
 		return "", fmt.Errorf("creating JS runtime: %w", err)
 	}
-	defer rt.Close()
 
-	result, err := rt.Execute("String(" + code + ")")
+	result, err := rt.Execute("String((function(){\"use strict\";return (\n" + code + "\n);})())")
 	if err != nil {
+		releaseExprVM(rt)
 		return "", fmt.Errorf("evaluating expression: %w", err)
 	}
+	releaseExprVM(rt)
+
 	switch v := result.(type) {
 	case string:
 		return v, nil

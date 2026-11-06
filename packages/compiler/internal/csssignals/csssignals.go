@@ -1,15 +1,12 @@
 // Package csssignals implements the compiler-side analysis for the zero-JS CSS
 // primitives:
-//
-//   - createCSSChoice(initial, options?) — a radio group (tabs, segments).
-//   - createCSSToggle(initial)           — a single checkbox (on/off).
-//   - createCSSFlags([...])              — independent checkboxes.
-//
+// - createCSSChoice(initial, options?) - a radio group (tabs, segments).
+// - createCSSToggle(initial) - a single checkbox (on/off).
+// - createCSSFlags([...]) - independent checkboxes.
 // They compile to hidden `<input>` controllers, `<label>` triggers, and
-// `:has()` CSS — no client JavaScript. This package owns the analysis (which
+// `:has()` CSS - no client JavaScript. This package owns the analysis (which
 // declarations are transformable, the option universe, matching
 // triggers/panels) and the generated stylesheet. It never mutates the AST.
-//
 // Unlike a fallback design, an un-transformable declaration is a hard error: a
 // declaration that cannot be expressed in CSS must be replaced with
 // `createSignal` by the author, because silently hydrating it would ship
@@ -78,6 +75,9 @@ type Scope struct {
 	// Options is the ordered option universe: choice values, ["on"] for a
 	// toggle, or flag names for flags.
 	Options []string
+	// NS namespaces the root class for scopes built by independent units
+	// (layouts); empty for the page itself.
+	NS string
 	// Index is the page-unique scope index; the root class is ClassPrefix+index.
 	Index int
 	// Class is the scope's root class, shared by every instance.
@@ -86,6 +86,16 @@ type Scope struct {
 	Role Role
 	// Label is an optional accessible label for the scope container.
 	Label string
+	// FormName, when set, is the `name` the hidden controllers submit under
+	// (so a host form receives the selected value under a friendly key).
+	FormName string
+	// Disabled lists options whose controller input is disabled.
+	Disabled []string
+	// Anchor, when set, positions panels relative to their trigger via CSS
+	// anchor positioning (e.g. "bottom-start").
+	Anchor string
+	// Transition fades/slides panels on show.
+	Transition bool
 	// Sentinel is the explicit "closed" option for KindGroup ("" when none).
 	// It is stored as a normal option but rendered without an associated panel.
 	Sentinel string
@@ -113,8 +123,18 @@ func (s *Scope) isChoiceLike() bool { return s.Kind.isChoiceLike() }
 // radio per scope) rather than independent checkboxes. Exported for the builder.
 func (s *Scope) IsChoiceLike() bool { return s.isChoiceLike() }
 
+// IsDisabled reports whether an option's controller input is disabled.
+func (s *Scope) IsDisabled(option string) bool {
+	for _, d := range s.Disabled {
+		if d == option {
+			return true
+		}
+	}
+	return false
+}
+
 // base returns the scope's root class (e.g. "krc0").
-func (s *Scope) base() string { return ClassPrefix + encodeIndex(s.Index) }
+func (s *Scope) base() string { return ClassPrefix + s.NS + encodeIndex(s.Index) }
 
 // RadioClass returns the class marking the controller input for a choice
 // option.
@@ -138,6 +158,20 @@ func (s *Scope) TriggerClass(option string) string {
 		return s.Class + "-t"
 	}
 	return s.Class + "-t-" + sanitizeToken(option)
+}
+
+// TriggerAltClass returns the class of the alternate trigger label shown in
+// place of the primary trigger when the option is already selected. Clicking it
+// points at the scope's "closed" sentinel, so a second click closes the group
+// (accordion item, dropdown/popover trigger).
+func (s *Scope) TriggerAltClass(option string) string {
+	return s.Class + "-ta-" + sanitizeToken(option)
+}
+
+// PanelID returns the DOM id of the panel element shown for an option. It is
+// the target of the opening trigger's aria-controls.
+func (s *Scope) PanelID(token, option string) string {
+	return s.ControlName(token, option) + "--" + sanitizeToken(option)
 }
 
 // ScopeClass is the class the builder adds to the scope anchor.
@@ -209,6 +243,14 @@ type Analyzer struct {
 	haveAny      bool
 	errs         []string
 
+	// partsOptions, when non-nil, overrides the option universe of the primary
+	// choice-like scope with values supplied by call-site parts (a compound
+	// component's <Root.Trigger value="..."/><Root.Content value="...">). When
+	// partsInitial is set it overrides the initial selection too.
+	partsOptions []string
+	partsInitial string
+	partsApplied bool
+
 	// conditions holds every deduped matched panel condition (registration
 	// order), condByKey maps a canonical DNF string to its condition, and
 	// exprIdx is the component-local counter for compound wrapper classes.
@@ -264,15 +306,39 @@ func rangeOptions(min, max, step string) ([]string, bool) {
 type indexFor func(component, variable string) int
 
 // Analyze inspects a component body for CSS signal declarations.
-//
 // When no declaration is present, HaveAny reports false and Errors is empty.
 // When a declaration is present but not compilable, Errors lists the reasons
 // (the build must fail; there is no fallback).
 func Analyze(component string, body []ast.Stmt, index indexFor) *Analyzer {
+	return analyzeBody("", component, body, index, nil, "")
+}
+
+// AnalyzeIn is Analyze with the scope classes namespaced by ns (for example a
+// layout's id prefix), so scopes built by independent units never share a class.
+func AnalyzeIn(ns, component string, body []ast.Stmt, index indexFor) *Analyzer {
+	return analyzeBody(ns, component, body, index, nil, "")
+}
+
+// AnalyzeParts is Analyze with an explicit option universe and initial value
+// supplied by a compound component's call-site parts. Used for scope-root
+// components (<Tabs><Tabs.Trigger value="a">...) whose options are literals at
+// the call site rather than in the root's own body.
+func AnalyzeParts(component string, body []ast.Stmt, index indexFor, options []string, initial string) *Analyzer {
+	return analyzeBody("", component, body, index, options, initial)
+}
+
+// AnalyzePartsIn is AnalyzeParts with namespaced scope classes (see AnalyzeIn).
+func AnalyzePartsIn(ns, component string, body []ast.Stmt, index indexFor, options []string, initial string) *Analyzer {
+	return analyzeBody(ns, component, body, index, options, initial)
+}
+
+func analyzeBody(ns, component string, body []ast.Stmt, index indexFor, partsOptions []string, partsInitial string) *Analyzer {
 	a := &Analyzer{
 		bySetter:      make(map[string]*Scope),
 		byVar:         make(map[string]*Scope),
 		byStackMethod: make(map[string]*Scope),
+		partsOptions:  partsOptions,
+		partsInitial:  partsInitial,
 	}
 	var decls []sigutil.Decl
 	for _, d := range sigutil.Find(body, true) {
@@ -296,8 +362,8 @@ func Analyze(component string, body []ast.Stmt, index indexFor) *Analyzer {
 				a.errs = append(a.errs, "createCSSChoice: "+d.VarErr)
 				continue
 			}
-			if d.Initial == nil || d.Setter == "" {
-				a.errs = append(a.errs, "createCSSChoice needs a literal initial value and a setter")
+			if d.Initial == nil {
+				a.errs = append(a.errs, "createCSSChoice needs a literal initial value")
 				continue
 			}
 			initial, ok := literalValue(d.Initial)
@@ -307,18 +373,19 @@ func Analyze(component string, body []ast.Stmt, index indexFor) *Analyzer {
 			}
 			options := d.Options
 			if len(options) == 0 {
-				options = inferOptions(body, d.Setter, initial)
+				options = inferOptions(body, d.Name, d.Setter, initial)
 			} else if !contains(options, initial) {
 				options = append([]string{initial}, options...)
 			}
-			a.addScope(&Scope{Kind: KindChoice, Var: d.Name, Setter: d.Setter, Initial: initial, Options: options, Role: roleFor(KindChoice, d.As, d.Aria, d.AriaAttrs), Label: d.Label, Vars: d.Vars})
+			initial, options = a.useParts(initial, options, false)
+			a.addScope(&Scope{Kind: KindChoice, Var: d.Name, Setter: d.Setter, Initial: initial, Options: options, Role: roleFor(KindChoice, d.As, d.Aria, d.AriaAttrs), Label: d.Label, FormName: d.FormName, Disabled: d.Disabled, Anchor: d.Anchor, Transition: d.Transition, Vars: d.Vars})
 		case sigutil.CSSKindToggle:
 			if d.VarErr != "" {
 				a.errs = append(a.errs, "createCSSToggle: "+d.VarErr)
 				continue
 			}
-			if d.Initial == nil || d.Setter == "" {
-				a.errs = append(a.errs, "createCSSToggle needs a literal initial value and a setter")
+			if d.Initial == nil {
+				a.errs = append(a.errs, "createCSSToggle needs a literal initial value")
 				continue
 			}
 			initial, ok := literalValue(d.Initial)
@@ -330,24 +397,21 @@ func Analyze(component string, body []ast.Stmt, index indexFor) *Analyzer {
 				a.errs = append(a.errs, "createCSSToggle's initial value must be true or false")
 				continue
 			}
-			a.addScope(&Scope{Kind: KindToggle, Var: d.Name, Setter: d.Setter, Initial: initial, Options: []string{"on"}, Role: roleFor(KindToggle, d.As, d.Aria, d.AriaAttrs), Label: d.Label, Vars: d.Vars})
+			a.addScope(&Scope{Kind: KindToggle, Var: d.Name, Setter: d.Setter, Initial: initial, Options: []string{"on"}, Role: roleFor(KindToggle, d.As, d.Aria, d.AriaAttrs), Label: d.Label, FormName: d.FormName, Disabled: d.Disabled, Anchor: d.Anchor, Transition: d.Transition, Vars: d.Vars})
 		case sigutil.CSSKindFlags:
 			if d.VarErr != "" {
 				a.errs = append(a.errs, "createCSSFlags: "+d.VarErr)
 				continue
 			}
-			if d.Setter == "" || len(d.Options) == 0 {
+			if len(d.Options) == 0 && (a.partsOptions == nil || a.partsApplied) {
 				a.errs = append(a.errs, "createCSSFlags needs a literal array of flag names and a setter")
 				continue
 			}
-			a.addScope(&Scope{Kind: KindFlags, Var: d.Name, Setter: d.Setter, Options: d.Options, Role: roleFor(KindFlags, d.As, d.Aria, d.AriaAttrs), Label: d.Label, Vars: d.Vars})
+			_, flagOptions := a.useParts("", d.Options, false)
+			a.addScope(&Scope{Kind: KindFlags, Var: d.Name, Setter: d.Setter, Options: flagOptions, Role: roleFor(KindFlags, d.As, d.Aria, d.AriaAttrs), Label: d.Label, FormName: d.FormName, Disabled: d.Disabled, Anchor: d.Anchor, Transition: d.Transition, Vars: d.Vars})
 		case sigutil.CSSKindGroup:
 			if d.VarErr != "" {
 				a.errs = append(a.errs, "createCSSGroup: "+d.VarErr)
-				continue
-			}
-			if d.Setter == "" {
-				a.errs = append(a.errs, "createCSSGroup needs a setter")
 				continue
 			}
 			initial := closedOption
@@ -362,8 +426,7 @@ func Analyze(component string, body []ast.Stmt, index indexFor) *Analyzer {
 				}
 			}
 			options := append([]string(nil), d.Options...)
-			closed := initial == closedOption
-			for _, o := range inferOptions(body, d.Setter, "") {
+			for _, o := range inferOptions(body, d.Name, d.Setter, "") {
 				if o == "" || o == closedOption {
 					continue
 				}
@@ -371,6 +434,8 @@ func Analyze(component string, body []ast.Stmt, index indexFor) *Analyzer {
 					options = append(options, o)
 				}
 			}
+			initial, options = a.useParts(initial, options, true)
+			closed := initial == closedOption
 			if !contains(options, closedOption) {
 				options = append(options, closedOption)
 			}
@@ -379,14 +444,14 @@ func Analyze(component string, body []ast.Stmt, index indexFor) *Analyzer {
 			} else if !contains(options, initial) {
 				options = append([]string{initial}, options...)
 			}
-			a.addScope(&Scope{Kind: KindGroup, Var: d.Name, Setter: d.Setter, Initial: initial, Options: options, Sentinel: closedOption, Role: roleFor(KindGroup, d.As, d.Aria, d.AriaAttrs), Label: d.Label, Vars: d.Vars})
+			a.addScope(&Scope{Kind: KindGroup, Var: d.Name, Setter: d.Setter, Initial: initial, Options: options, Sentinel: closedOption, Role: roleFor(KindGroup, d.As, d.Aria, d.AriaAttrs), Label: d.Label, FormName: d.FormName, Disabled: d.Disabled, Anchor: d.Anchor, Transition: d.Transition, Vars: d.Vars})
 		case sigutil.CSSKindRange:
 			if d.VarErr != "" {
 				a.errs = append(a.errs, "createCSSRange: "+d.VarErr)
 				continue
 			}
-			if d.Initial == nil || d.Setter == "" {
-				a.errs = append(a.errs, "createCSSRange needs a numeric initial value and a setter")
+			if d.Initial == nil {
+				a.errs = append(a.errs, "createCSSRange needs a numeric initial value")
 				continue
 			}
 			initial, ok := literalValue(d.Initial)
@@ -413,7 +478,7 @@ func Analyze(component string, body []ast.Stmt, index indexFor) *Analyzer {
 				a.errs = append(a.errs, "createCSSRange's initial value must be within [min, max] on the step grid")
 				continue
 			}
-			a.addScope(&Scope{Kind: KindRange, Var: d.Name, Setter: d.Setter, Initial: initial, Options: options, NumMin: min, NumMax: max, NumStep: step, Role: roleFor(KindRange, d.As, d.Aria, d.AriaAttrs), Label: d.Label, Vars: d.Vars})
+			a.addScope(&Scope{Kind: KindRange, Var: d.Name, Setter: d.Setter, Initial: initial, Options: options, NumMin: min, NumMax: max, NumStep: step, Role: roleFor(KindRange, d.As, d.Aria, d.AriaAttrs), Label: d.Label, FormName: d.FormName, Disabled: d.Disabled, Anchor: d.Anchor, Transition: d.Transition, Vars: d.Vars})
 		case sigutil.CSSKindStack:
 			if d.VarErr != "" {
 				a.errs = append(a.errs, "createCSSStack: "+d.VarErr)
@@ -438,7 +503,7 @@ func Analyze(component string, body []ast.Stmt, index indexFor) *Analyzer {
 					options = append(options, n)
 				}
 			}
-			sc := &Scope{Kind: KindStack, Var: d.Name, Setter: d.Setter, Initial: options[0], Options: options, Levels: len(options), Root: options[0], Role: roleFor(KindStack, d.As, d.Aria, d.AriaAttrs), Label: d.Label, Vars: d.Vars}
+			sc := &Scope{Kind: KindStack, Var: d.Name, Setter: d.Setter, Initial: options[0], Options: options, Levels: len(options), Root: options[0], Role: roleFor(KindStack, d.As, d.Aria, d.AriaAttrs), Label: d.Label, FormName: d.FormName, Disabled: d.Disabled, Anchor: d.Anchor, Transition: d.Transition, Vars: d.Vars}
 			sc.Tree = map[string]string{options[0]: ""}
 			a.stackMethods = append(a.stackMethods, stackBinding{scope: sc, methods: methods})
 			a.addScope(sc)
@@ -474,7 +539,15 @@ func Analyze(component string, body []ast.Stmt, index indexFor) *Analyzer {
 	// Assign stable indices/classes now that we know the component compiles.
 	for _, s := range a.scopes {
 		s.Index = index(component, s.Var)
+		s.NS = ns
 		s.Class = s.base()
+		// Only menus/popovers anchor their panel to the trigger; dialogs and
+		// sheets are fixed/centered (never anchored), so they are excluded.
+		if s.Anchor == "" && s.Kind == KindGroup {
+			if s.Role.Anchored {
+				s.Anchor = "bottom-start"
+			}
+		}
 	}
 
 	// Register every matched panel condition (deduped) in source order now that
@@ -486,11 +559,41 @@ func Analyze(component string, body []ast.Stmt, index indexFor) *Analyzer {
 	return a
 }
 
+// useParts returns the effective (initial, options) for the first choice-like
+// scope, substituting the call-site part-supplied option universe when present.
+// Subsequent choice-like scopes are untouched (a scope root has one primary
+// enumerated scope).
+func (a *Analyzer) useParts(initial string, options []string, zeroIsClosed bool) (string, []string) {
+	if a.partsOptions == nil || a.partsApplied {
+		return initial, options
+	}
+	a.partsApplied = true
+	opts := append([]string(nil), a.partsOptions...)
+	ini := initial
+	if a.partsInitial != "" {
+		ini = a.partsInitial
+	}
+	// For a group, "" is the valid "closed" sentinel, so don't fall back to the
+	// first option; for a choice, an empty initial means "pick the first".
+	if ini == "" && len(opts) > 0 && !zeroIsClosed {
+		ini = opts[0]
+	}
+	if ini != "" && !contains(opts, ini) {
+		opts = append([]string{ini}, opts...)
+	}
+	return ini, opts
+}
+
 func (a *Analyzer) addScope(s *Scope) {
 	a.scopes = append(a.scopes, s)
-	a.bySetter[s.Setter] = s
+	if s.Setter != "" {
+		a.bySetter[s.Setter] = s
+	}
 	a.byVar[s.Var] = s
 }
+
+// ScopeByVar returns the scope whose handle variable has the given name, or nil.
+func (a *Analyzer) ScopeByVar(name string) *Scope { return a.byVar[name] }
 
 // HaveAny reports whether the component declares any CSS signal.
 func (a *Analyzer) HaveAny() bool { return a.haveAny }
@@ -913,9 +1016,8 @@ func (a *Analyzer) registerPanels(expr ast.Expr) {
 		if e == nil {
 			return
 		}
-		if _, ok := a.MatchPanel(e); ok {
-			// Registered (or deduped to an existing condition).
-		}
+		// Registers the panel (or dedupes it to an existing condition).
+		a.MatchPanel(e)
 		for _, child := range e.Children {
 			a.registerPanelChild(child)
 		}
@@ -1043,7 +1145,7 @@ func getterName(call *ast.CallExpr) (string, bool) {
 	case *ast.Identifier:
 		return callee.Name, true
 	case *ast.MemberExpr:
-		// `stack.top()` — the property may be "top"/"peek"; the object is the
+		// `stack.top()` - the property may be "top"/"peek"; the object is the
 		// scope variable.
 		if id, ok := callee.Object.(*ast.Identifier); ok {
 			if prop, ok := callee.Property.(*ast.Identifier); ok && (prop.Name == "top" || prop.Name == "peek") {
@@ -1054,11 +1156,42 @@ func getterName(call *ast.CallExpr) (string, bool) {
 	return "", false
 }
 
-// matchTruthyAtom matches a bare truthy getter read: `on()` (toggle) or
-// `flags.x()` (flag).
+// matchTruthyAtom matches a bare truthy read: `on()` / `flags.x()` (getter
+// API) or the scope-handle helpers `scope.on()`, `scope.off()`, `scope.is(v)`.
 func (a *Analyzer) matchTruthyAtom(expr ast.Expr) (*Atom, bool) {
 	call, ok := expr.(*ast.CallExpr)
-	if !ok || len(call.Args) != 0 {
+	if !ok {
+		return nil, false
+	}
+	if mem, ok := call.Callee.(*ast.MemberExpr); ok && !mem.Computed {
+		obj, ok1 := mem.Object.(*ast.Identifier)
+		prop, ok2 := mem.Property.(*ast.Identifier)
+		if ok1 && ok2 {
+			if s := a.byVar[obj.Name]; s != nil {
+				switch prop.Name {
+				case "on", "off":
+					if len(call.Args) == 0 && s.Kind == KindToggle {
+						return &Atom{Scope: s, Option: "on", Negated: prop.Name == "off"}, true
+					}
+				case "is":
+					if len(call.Args) != 1 {
+						return nil, false
+					}
+					if s.Kind == KindToggle {
+						if b, ok := literalBool(call.Args[0]); ok {
+							return &Atom{Scope: s, Option: "on", Negated: !b}, true
+						}
+					} else if s.isChoiceLike() || s.Kind == KindFlags {
+						if v, ok := literalValue(call.Args[0]); ok && contains(s.Options, v) {
+							return &Atom{Scope: s, Option: v}, true
+						}
+					}
+					return nil, false
+				}
+			}
+		}
+	}
+	if len(call.Args) != 0 {
 		return nil, false
 	}
 	switch callee := call.Callee.(type) {
@@ -1133,7 +1266,7 @@ func (a *Analyzer) negate(terms [][]*Atom) [][]*Atom {
 // mergeTerm dedupes atoms within one AND-term and drops the term when it
 // contains an atom and its negation (an impossible conjunction).
 func (a *Analyzer) mergeTerm(atoms []*Atom) []*Atom {
-	saw := make(map[string]*Atom, len(atoms)) // abs-key → first atom (records polarity)
+	saw := make(map[string]*Atom, len(atoms)) // abs-key -> first atom (records polarity)
 	out := make([]*Atom, 0, len(atoms))
 	for _, at := range atoms {
 		abs := a.atomAbsKey(at)
@@ -1348,7 +1481,7 @@ func literalValue(expr ast.Expr) (string, bool) {
 
 // inferOptions collects every literal the choice setter is invoked with
 // throughout the body (in source order), then prepends the initial value.
-func inferOptions(body []ast.Stmt, setter, initial string) []string {
+func inferOptions(body []ast.Stmt, varName, setter, initial string) []string {
 	var out []string
 	seen := make(map[string]bool)
 	add := func(v string) {
@@ -1359,12 +1492,28 @@ func inferOptions(body []ast.Stmt, setter, initial string) []string {
 	}
 	add(initial)
 	walkStmts(body, func(call *ast.CallExpr) {
-		id, ok := call.Callee.(*ast.Identifier)
-		if !ok || id.Name != setter || len(call.Args) != 1 {
+		// Setter form: `set('lit')`.
+		if id, ok := call.Callee.(*ast.Identifier); ok && id.Name == setter && len(call.Args) == 1 {
+			if v, ok := literalValue(call.Args[0]); ok {
+				add(v)
+			}
 			return
 		}
-		if v, ok := literalValue(call.Args[0]); ok {
-			add(v)
+		// Handle form: `scope.trigger('lit')` / `.panel('lit')` / `.is('lit')`.
+		mem, ok := call.Callee.(*ast.MemberExpr)
+		if !ok || mem.Computed || len(call.Args) != 1 {
+			return
+		}
+		obj, ok1 := mem.Object.(*ast.Identifier)
+		prop, ok2 := mem.Property.(*ast.Identifier)
+		if !ok1 || !ok2 || obj.Name != varName {
+			return
+		}
+		switch prop.Name {
+		case "trigger", "panel", "is":
+			if v, ok := literalValue(call.Args[0]); ok {
+				add(v)
+			}
 		}
 	})
 	return out

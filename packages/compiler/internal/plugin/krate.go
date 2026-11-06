@@ -1,11 +1,11 @@
 package plugin
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
 
-	"github.com/kratejs/krate/packages/compiler/internal/jsruntime"
 	"github.com/kratejs/krate/packages/compiler/internal/pluginapi"
 	"github.com/kratejs/krate/packages/compiler/internal/version"
 )
@@ -23,6 +23,11 @@ type krateCapabilities struct {
 	Pages    []string
 	Version  string
 	Config   interface{}
+
+	// hookName and hookCtx are serialized on demand by _krate_hookInput, so a
+	// plugin that does not implement the hook never pays for the encoding.
+	hookName string
+	hookCtx  interface{}
 
 	mu       sync.Mutex
 	files    []fileEntry
@@ -43,6 +48,8 @@ func newKrateCapabilities(root, outDir string, env CommunityEnv, hookName string
 		DevMode:  env.DevMode,
 		Pages:    pages,
 		Version:  version.Value, Config: env.Config,
+		hookName: hookName,
+		hookCtx:  hookCtx,
 	}
 }
 
@@ -90,10 +97,55 @@ func (c *krateCapabilities) applyTo(output *communityOutput) {
 	}
 }
 
-// registerKrateHostFuncs installs the Go-backed capability functions on the
-// runtime. The invocation script then exposes them as methods on `krate`.
-func registerKrateHostFuncs(rt *jsruntime.Runtime, cap *krateCapabilities) error {
+// registerKrateHostFuncs installs the Go-backed capability functions on the VM.
+// The invocation script then exposes them as methods on `krate`. The functions
+// read the current invocation's capabilities from vm.cap (set before each hook
+// runs), so they are registered once per pooled VM rather than per invocation.
+func registerKrateHostFuncs(vm *pluginVM) error {
+	rt := vm.rt
+	currentCap := func() (*krateCapabilities, error) {
+		c := vm.cap
+		if c == nil {
+			return nil, fmt.Errorf("krate capability used outside a hook invocation")
+		}
+		return c, nil
+	}
+
+	// _krate_hookInput returns the hook context and the krate metadata as one
+	// JSON document. The invocation script calls it only once the plugin is
+	// known to implement the hook, then parses it with JSON.parse: embedding
+	// the (page-sized, for AfterParse an entire AST) context in the script
+	// source made QuickJS lex and compile it as JavaScript on every call.
+	if err := rt.RegisterFunc("_krate_hookInput", func(args []any) (any, error) {
+		cap, err := currentCap()
+		if err != nil {
+			return nil, err
+		}
+		ctxJSON, err := marshalHookContext(cap.hookName, cap.hookCtx)
+		if err != nil {
+			return nil, fmt.Errorf("serializing hook context: %w", err)
+		}
+		krateJSON, err := json.Marshal(cap.metadata())
+		if err != nil {
+			return nil, fmt.Errorf("serializing krate metadata: %w", err)
+		}
+		var sb strings.Builder
+		sb.Grow(len(ctxJSON) + len(krateJSON) + 20)
+		sb.WriteString(`{"ctx":`)
+		sb.Write(ctxJSON)
+		sb.WriteString(`,"krate":`)
+		sb.Write(krateJSON)
+		sb.WriteString(`}`)
+		return sb.String(), nil
+	}); err != nil {
+		return err
+	}
+
 	if err := rt.RegisterFunc("_krate_resolveFile", func(args []any) (any, error) {
+		cap, err := currentCap()
+		if err != nil {
+			return nil, err
+		}
 		spec, err := stringArg(args, 0, "resolveFile")
 		if err != nil {
 			return nil, err
@@ -104,6 +156,10 @@ func registerKrateHostFuncs(rt *jsruntime.Runtime, cap *krateCapabilities) error
 	}
 
 	if err := rt.RegisterFunc("_krate_readFile", func(args []any) (any, error) {
+		cap, err := currentCap()
+		if err != nil {
+			return nil, err
+		}
 		spec, err := stringArg(args, 0, "readFile")
 		if err != nil {
 			return nil, err
@@ -114,6 +170,10 @@ func registerKrateHostFuncs(rt *jsruntime.Runtime, cap *krateCapabilities) error
 	}
 
 	if err := rt.RegisterFunc("_krate_emitFile", func(args []any) (any, error) {
+		cap, err := currentCap()
+		if err != nil {
+			return nil, err
+		}
 		path, err := stringArg(args, 0, "emitFile")
 		if err != nil {
 			return nil, err
@@ -131,6 +191,10 @@ func registerKrateHostFuncs(rt *jsruntime.Runtime, cap *krateCapabilities) error
 	}
 
 	if err := rt.RegisterFunc("_krate_writeFileToRoot", func(args []any) (any, error) {
+		cap, err := currentCap()
+		if err != nil {
+			return nil, err
+		}
 		rel, err := stringArg(args, 0, "writeFileToRoot")
 		if err != nil {
 			return nil, err
@@ -148,6 +212,10 @@ func registerKrateHostFuncs(rt *jsruntime.Runtime, cap *krateCapabilities) error
 	}
 
 	if err := rt.RegisterFunc("_krate_injectHead", func(args []any) (any, error) {
+		cap, err := currentCap()
+		if err != nil {
+			return nil, err
+		}
 		html, err := stringArg(args, 0, "injectHead")
 		if err != nil {
 			return nil, err
@@ -162,6 +230,10 @@ func registerKrateHostFuncs(rt *jsruntime.Runtime, cap *krateCapabilities) error
 	}
 
 	if err := rt.RegisterFunc("_krate_injectCSS", func(args []any) (any, error) {
+		cap, err := currentCap()
+		if err != nil {
+			return nil, err
+		}
 		css, err := stringArg(args, 0, "injectCSS")
 		if err != nil {
 			return nil, err

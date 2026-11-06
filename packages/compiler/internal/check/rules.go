@@ -7,7 +7,7 @@ import (
 	"golang.org/x/net/html"
 )
 
-// ─── a11y ──────────────────────────────────────────────────────────────────
+// a11y
 
 // ruleImgAlt flags <img> elements with a missing or empty alt attribute. An
 // explicit alt="" is valid for decorative images, but a *missing* alt is the
@@ -29,7 +29,7 @@ func ruleImgAlt(p *Page, _ *Config) []Finding {
 	return out
 }
 
-// ruleHeadingOrder checks that heading levels do not skip (e.g. h1 → h3) and
+// ruleHeadingOrder checks that heading levels do not skip (e.g. h1 -> h3) and
 // that a page has exactly one h1.
 func ruleHeadingOrder(p *Page, _ *Config) []Finding {
 	d, err := parseHTML(p.HTML)
@@ -110,7 +110,7 @@ func ruleAccessibleName(p *Page, _ *Config) []Finding {
 	return out
 }
 
-// ─── seo ───────────────────────────────────────────────────────────────────
+// seo
 
 func ruleTitle(p *Page, _ *Config) []Finding {
 	d, err := parseHTML(p.HTML)
@@ -122,12 +122,12 @@ func ruleTitle(p *Page, _ *Config) []Finding {
 	if title == "" {
 		return []Finding{{
 			Message: "page has no <title>",
-			Hint:    "Export a <Head><title>…</title></Head> or rely on seo.siteName.",
+			Hint:    "Export a <Head><title>...</title></Head> or rely on seo.siteName.",
 		}}
 	}
 	if len([]rune(title)) > 60 {
 		return []Finding{{
-			Message: fmt.Sprintf("<title> is %d characters (recommended ≤ 60)", len([]rune(title))),
+			Message: fmt.Sprintf("<title> is %d characters (recommended <= 60)", len([]rune(title))),
 			Hint:    "Shorten the title so it is not truncated in search results.",
 		}}
 	}
@@ -143,12 +143,12 @@ func ruleDescription(p *Page, _ *Config) []Finding {
 	if !ok || strings.TrimSpace(desc) == "" {
 		return []Finding{{
 			Message: "page has no meta description",
-			Hint:    "Set seo.description, or add <meta name=\"description\" content=\"…\">.",
+			Hint:    "Set site.description (or seo.description) in krate.config.ts, or add <meta name=\"description\" content=\"...\"> to the page.",
 		}}
 	}
 	if len([]rune(desc)) > 160 {
 		return []Finding{{
-			Message: fmt.Sprintf("meta description is %d characters (recommended ≤ 160)", len([]rune(desc))),
+			Message: fmt.Sprintf("meta description is %d characters (recommended <= 160)", len([]rune(desc))),
 			Hint:    "Tighten the description; search engines truncate around 160.",
 		}}
 	}
@@ -205,7 +205,7 @@ func ruleLang(p *Page, _ *Config) []Finding {
 	return nil
 }
 
-// ─── perf ──────────────────────────────────────────────────────────────────
+// perf
 
 func ruleJSBudget(p *Page, cfg *Config) []Finding {
 	if cfg.JSBudgetBytes <= 0 || p.JSBytes <= cfg.JSBudgetBytes {
@@ -214,6 +214,40 @@ func ruleJSBudget(p *Page, cfg *Config) []Finding {
 	return []Finding{{
 		Message: fmt.Sprintf("route ships %s of JS (budget %s)", humanBytes(p.JSBytes), humanBytes(cfg.JSBudgetBytes)),
 		Hint:    "Move logic to a server component, or raise checks.budget.js.",
+	}}
+}
+
+func ruleHydrationBudget(p *Page, cfg *Config) []Finding {
+	if cfg.HydrationBudgetBytes <= 0 || p.HydrationBytes <= cfg.HydrationBudgetBytes {
+		return nil
+	}
+	return []Finding{{
+		Message: fmt.Sprintf("route ships %s of hydration JS (budget %s)", humanBytes(p.HydrationBytes), humanBytes(cfg.HydrationBudgetBytes)),
+		Hint:    "Reduce the interactive surface, split work into lazy chunks, or raise checks.budget.hydration.",
+	}}
+}
+
+func ruleIslandBudget(p *Page, cfg *Config) []Finding {
+	if cfg.IslandBudgetBytes <= 0 || p.IslandBytes <= cfg.IslandBudgetBytes {
+		return nil
+	}
+	return []Finding{{
+		Message: fmt.Sprintf("route ships %s of island chunks (budget %s)", humanBytes(p.IslandBytes), humanBytes(cfg.IslandBudgetBytes)),
+		Hint:    "Move work to a server component, avoid unnecessary compiled-package islands, or raise checks.budget.islandJS.",
+	}}
+}
+
+func ruleRouteBudget(p *Page, cfg *Config) []Finding {
+	if cfg.RouteBudgetBytes <= 0 {
+		return nil
+	}
+	total := len(p.HTML) + p.CSSBytes + p.JSBytes + p.IslandBytes
+	if total <= cfg.RouteBudgetBytes {
+		return nil
+	}
+	return []Finding{{
+		Message: fmt.Sprintf("route ships %s of HTML/CSS/JS (budget %s)", humanBytes(total), humanBytes(cfg.RouteBudgetBytes)),
+		Hint:    "Remove unused content or client code, or raise checks.budget.route.",
 	}}
 }
 
@@ -242,7 +276,7 @@ func ruleImageDims(p *Page, _ *Config) []Finding {
 	return out
 }
 
-// ─── helpers ───────────────────────────────────────────────────────────────
+// helpers
 
 type interfaceNode struct {
 	tag  string

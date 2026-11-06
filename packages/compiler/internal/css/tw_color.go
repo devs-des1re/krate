@@ -6,7 +6,7 @@ import (
 )
 
 // splitColorModifier splits a color utility's value into the color key and an
-// optional alpha modifier: "blue-500/50" → ("blue-500", "50"); "blue-500" →
+// optional alpha modifier: "blue-500/50" -> ("blue-500", "50"); "blue-500" ->
 // ("blue-500", ""). Bracketed values may contain `/`, so brackets are honoured.
 func splitColorModifier(v string) (color, alpha string) {
 	depth := 0
@@ -28,7 +28,7 @@ func splitColorModifier(v string) (color, alpha string) {
 }
 
 // resolveAlpha resolves an alpha modifier to a CSS color-alpha component:
-// "50" → "0.5", "[0.42]" → "0.42", "75" → "0.75". Returns ok=false for a
+// "50" -> "0.5", "[0.42]" -> "0.42", "75" -> "0.75". Returns ok=false for a
 // non-numeric modifier.
 func resolveAlpha(a string) (string, bool) {
 	if a == "" {
@@ -49,74 +49,64 @@ func resolveAlpha(a string) (string, bool) {
 // the theme and returns the CSS color. When alpha is set and the color is a hex
 // value it is re-emitted as `rgb(r g b / a)`.
 func colorValue(key, alpha string, theme TailwindTheme) (string, bool) {
-	if v, ok := theme.BgColors[key]; ok {
+	resolved := func(v string) (string, bool) {
+		v = theme.themeRef("color-"+key, v)
 		if a, ok := resolveAlpha(alpha); ok {
 			return withAlpha(v, a), true
 		}
 		return v, true
 	}
-	// shade form: <name>-<shade>
-	if name, shade, ok := splitColorShade(key); ok {
+	if v, ok := theme.BgColors[key]; ok {
+		return resolved(v)
+	}
+	// shade form: <name>-<shade>. Shade names may be numeric (500) or custom
+	// (light), so split on the last hyphen rather than requiring digits.
+	if i := strings.LastIndexByte(key, '-'); i > 0 {
+		name, shade := key[:i], key[i+1:]
 		if shades, ok := theme.Colors[name]; ok {
 			if hex, ok := shades[shade]; ok {
-				if a, ok := resolveAlpha(alpha); ok {
-					return withAlpha(hex, a), true
-				}
-				return hex, true
+				return resolved(hex)
 			}
+		}
+	}
+	// flat / DEFAULT: `bg-brand` -> colors.brand.DEFAULT
+	if shades, ok := theme.Colors[key]; ok {
+		if hex, ok := shades["DEFAULT"]; ok {
+			return resolved(hex)
 		}
 	}
 	// arbitrary: [#ff0000]/[rgb(...)]
 	if strings.HasPrefix(key, "[") && strings.HasSuffix(key, "]") {
-		val := key[1 : len(key)-1]
-		if a, ok := resolveAlpha(alpha); ok {
-			return withAlpha(val, a), true
-		}
-		return val, true
+		return resolved(key[1 : len(key)-1])
 	}
 	return "", false
 }
 
-// splitColorShade splits "blue-500" into ("blue","500"); a non-shade key returns
-// ok=false.
-func splitColorShade(key string) (name, shade string, ok bool) {
-	i := strings.LastIndexByte(key, '-')
-	if i <= 0 {
-		return "", "", false
-	}
-	name, shade = key[:i], key[i+1:]
-	if shade == "" {
-		return "", "", false
-	}
-	for _, r := range shade {
-		if r < '0' || r > '9' {
-			return "", "", false
-		}
-	}
-	return name, shade, true
-}
-
-// withAlpha converts a hex or rgb color to an `rgb(r g b / a)` form when the
-// input is a 3/6-digit hex; other values are returned unchanged.
+// withAlpha applies an alpha component to a color. 3/6-digit hex colors become
+// `rgb(r g b / a)`; any other color (oklch, var(), named, ...) is mixed with
+// transparent so the alpha is never silently dropped.
 func withAlpha(color, alpha string) string {
 	hex := strings.TrimPrefix(color, "#")
 	if len(hex) == 3 {
 		hex = string([]byte{hex[0], hex[0], hex[1], hex[1], hex[2], hex[2]})
 	}
-	if len(hex) != 6 {
-		return color
+	if strings.HasPrefix(color, "#") && len(hex) == 6 {
+		r, err1 := strconv.ParseUint(hex[0:2], 16, 8)
+		g, err2 := strconv.ParseUint(hex[2:4], 16, 8)
+		b, err3 := strconv.ParseUint(hex[4:6], 16, 8)
+		if err1 == nil && err2 == nil && err3 == nil {
+			return "rgb(" + strconv.Itoa(int(r)) + " " + strconv.Itoa(int(g)) + " " + strconv.Itoa(int(b)) + " / " + alpha + ")"
+		}
 	}
-	r, err1 := strconv.ParseUint(hex[0:2], 16, 8)
-	g, err2 := strconv.ParseUint(hex[2:4], 16, 8)
-	b, err3 := strconv.ParseUint(hex[4:6], 16, 8)
-	if err1 != nil || err2 != nil || err3 != nil {
-		return color
+	pct := alpha
+	if f, err := strconv.ParseFloat(alpha, 64); err == nil {
+		pct = formatNum(f*100) + "%"
 	}
-	return "rgb(" + strconv.Itoa(int(r)) + " " + strconv.Itoa(int(g)) + " " + strconv.Itoa(int(b)) + " / " + alpha + ")"
+	return "color-mix(in oklab, " + color + " " + pct + ", transparent)"
 }
 
 // negateValue returns the negated form of a length/number value, preserving
-// units: "1rem" → "-1rem", "0" → "-0" (rendered "0").
+// units: "1rem" -> "-1rem", "0" -> "-0" (rendered "0").
 func negateValue(v string) string {
 	if v == "" {
 		return v

@@ -1,11 +1,24 @@
 package irtree
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/kratejs/krate/packages/compiler/ast"
 	"github.com/kratejs/krate/packages/compiler/internal/escape"
 )
+
+// indentUnit is one level of source indentation. The generated JS is emitted
+// readable (newlines + indentation) and minified by esbuild for production, so
+// devtools and view-source show sane code without shipping the extra bytes.
+const indentUnit = "  "
+
+func indent(n int) string {
+	if n <= 0 {
+		return ""
+	}
+	return strings.Repeat(indentUnit, n)
+}
 
 // generateExprJS converts an AST expression to a JavaScript source string.
 // Used for handler bodies, effect expressions, and complex slot expressions.
@@ -36,14 +49,24 @@ func generateExprJS(expr ast.Expr, signals map[string]ast.Expr) string {
 	case *ast.Identifier:
 		return e.Name
 	case *ast.CallExpr:
-		calleeJS := generateExprJS(e.Callee, signals)
+		calleeJS := operandJS(e.Callee, signals)
+		switch e.Callee.(type) {
+		case *ast.BinaryExpr, *ast.ConditionalExpr:
+			if !strings.HasPrefix(calleeJS, "(") {
+				calleeJS = "(" + calleeJS + ")"
+			}
+		}
+		opt := ""
+		if e.Optional {
+			opt = "?."
+		}
 		var argsJS []string
 		for _, arg := range e.Args {
 			argsJS = append(argsJS, generateExprJS(arg, signals))
 		}
-		return calleeJS + "(" + strings.Join(argsJS, ", ") + ")"
+		return calleeJS + opt + "(" + strings.Join(argsJS, ", ") + ")"
 	case *ast.MemberExpr:
-		objJS := generateExprJS(e.Object, signals)
+		objJS := operandJS(e.Object, signals)
 		if e.Computed {
 			propJS := generateExprJS(e.Property, signals)
 			if e.Optional {
@@ -62,42 +85,61 @@ func generateExprJS(expr ast.Expr, signals map[string]ast.Expr) string {
 		}
 		return objJS + "." + propName
 	case *ast.BinaryExpr:
-		left := generateExprJS(e.Left, signals)
-		right := generateExprJS(e.Right, signals)
-		if e.Op == "&&" {
-			return "(" + left + "?" + right + ":'')"
+		if e.Op == "=" {
+			switch e.Left.(type) {
+			case *ast.ObjectExpr, *ast.ArrayExpr:
+				return "(" + renderPattern(e.Left, signals) + " = " + generateExprJS(e.Right, signals) + ")"
+			}
 		}
+		left := generateExprJS(e.Left, signals)
+		if e.Op == "**" && isPrefixOperator(e.Left) {
+			left = "(" + left + ")"
+		}
+		right := generateExprJS(e.Right, signals)
+		// Preserve real JS semantics for `&&` (falsy left operand is returned
+		// unchanged rather than collapsed to ''). The runtime and SSR renderer
+		// both skip false/null/undefined, so conditional JSX still renders
+		// nothing when the guard fails - matching React.
 		return "(" + left + " " + e.Op + " " + right + ")"
 	case *ast.UnaryExpr:
-		arg := generateExprJS(e.Arg, signals)
-		if e.Postfix {
-			return arg + e.Op
-		}
-		if e.Op == "typeof" {
-			// typeof is a keyword; concatenating without a space yields an
-			// identifier (`typeofx`) instead of the typeof operator.
-			return "typeof " + arg
-		}
-		return e.Op + arg
+		return renderUnaryJS(e, signals)
 	case *ast.ConditionalExpr:
 		test := generateExprJS(e.Test, signals)
 		consequent := generateExprJS(e.Consequent, signals)
 		alternate := generateExprJS(e.Alternate, signals)
 		return "(" + test + "?" + consequent + ":" + alternate + ")"
 	case *ast.ArrowFn:
+		if e.Function {
+			return renderFunctionExpr(e, signals)
+		}
 		return renderArrowFn(e, signals)
 	case *ast.ArrayExpr:
 		var elems []string
 		for _, el := range e.Elements {
 			elems = append(elems, generateExprJS(el, signals))
 		}
+		// A trailing hole needs its own comma: `[a,,]` has length 2.
+		if n := len(e.Elements); n > 0 && e.Elements[n-1] == nil {
+			elems = append(elems, "")
+		}
 		return "[" + strings.Join(elems, ",") + "]"
+	case *ast.ClassExpr:
+		return "(" + renderClassJS(e.Class, signals, 0) + ")"
+	case *ast.TaggedTemplateExpr:
+		return operandJS(e.Tag, signals) + generateTemplateExpr(e.Quasi, signals)
+	case *ast.MetaProperty:
+		return e.Meta + "." + e.Property
+	case *ast.ParenExpr:
+		return "(" + generateExprJS(e.Expr, signals) + ")"
 	case *ast.ObjectExpr:
 		return generateObjectExpr(e, signals)
 	case *ast.TemplateExpr:
 		return generateTemplateExpr(e, signals)
 	case *ast.NewExpr:
 		calleeJS := generateExprJS(e.Callee, signals)
+		if !isPlainNewCallee(e.Callee) {
+			calleeJS = "(" + calleeJS + ")"
+		}
 		var argsJS []string
 		for _, arg := range e.Args {
 			argsJS = append(argsJS, generateExprJS(arg, signals))
@@ -108,6 +150,9 @@ func generateExprJS(expr ast.Expr, signals map[string]ast.Expr) string {
 	case *ast.AwaitExpr:
 		return "await " + generateExprJS(e.Arg, signals)
 	case *ast.DynamicImport:
+		if e.Options != nil {
+			return "import(" + generateExprJS(e.Arg, signals) + ", " + generateExprJS(e.Options, signals) + ")"
+		}
 		return "import(" + generateExprJS(e.Arg, signals) + ")"
 	case *ast.ImportMetaExpr:
 		return "import.meta"
@@ -118,8 +163,29 @@ func generateExprJS(expr ast.Expr, signals map[string]ast.Expr) string {
 	case *ast.JSXFragment:
 		return generateJSXFragmentJS(e, signals)
 	default:
-		return ""
+		// Unknown node: emit a visible placeholder rather than silently
+		// dropping the expression. The build validator (codegenIssues) fails
+		// the build for unsupported nodes, so this is a defensive fallback.
+		return "/*krate:unsupported:" + fmt.Sprintf("%T", expr) + "*/undefined"
 	}
+}
+
+// unaryPrefixJS joins a prefix operator and its rendered operand. Keyword
+// operators (typeof, void, delete, await, yield, new) need a space, or
+// `void foo()` becomes the identifier `voidfoo`. Sign operators need one when
+// the operand starts with the same sign, or `-(-x)` printed as `--x` would be
+// a decrement.
+func unaryPrefixJS(op, arg string) string {
+	if op == "" {
+		return arg
+	}
+	if c := op[len(op)-1]; (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
+		return op + " " + arg
+	}
+	if (op == "-" || op == "+") && arg != "" && arg[0] == op[0] {
+		return op + " " + arg
+	}
+	return op + arg
 }
 
 // GenerateExprJS renders an AST expression to JavaScript source. Exported so
@@ -127,6 +193,34 @@ func generateExprJS(expr ast.Expr, signals map[string]ast.Expr) string {
 // engine for evaluation (real JS built-ins: Date, Math, String, Number, ...).
 func GenerateExprJS(expr ast.Expr, signals map[string]ast.Expr) string {
 	return generateExprJS(expr, signals)
+}
+
+// renderParam renders a function parameter including rest and default forms.
+func renderParam(p *ast.Param) string {
+	if p == nil {
+		return ""
+	}
+	s := p.Name
+	if p.Target != nil {
+		s = renderPattern(p.Target, nil)
+	} else if p.Pattern != "" {
+		s = p.Pattern
+	}
+	if p.IsRest {
+		s = "..." + s
+	}
+	if p.Default != nil {
+		s += "=" + generateExprJS(p.Default, nil)
+	}
+	return s
+}
+
+func renderParams(params []*ast.Param) string {
+	var parts []string
+	for _, p := range params {
+		parts = append(parts, renderParam(p))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // renderArrowFn renders an ArrowFn AST node to a JS function expression string.
@@ -139,30 +233,31 @@ func renderArrowFn(fn *ast.ArrowFn, signals map[string]ast.Expr) string {
 		b.WriteString("async ")
 	}
 	b.WriteByte('(')
-	for i, p := range fn.Params {
-		if i > 0 {
-			b.WriteString(", ")
-		}
-		if p.Pattern != "" {
-			b.WriteString(p.Pattern)
-		} else {
-			b.WriteString(p.Name)
-		}
-	}
+	b.WriteString(renderParams(fn.Params))
 	b.WriteString(")=>")
 	if fn.Expression {
-		// Expression body: return the expression
+		// Expression body: return the expression. An object literal must be
+		// parenthesized, otherwise `() => ({...})` becomes a block body.
 		bodyExpr := arrowBodyExpr(fn)
 		if bodyExpr != nil {
-			b.WriteString(generateExprJS(bodyExpr, signals))
+			js := generateExprJS(bodyExpr, signals)
+			if strings.HasPrefix(js, "{") {
+				b.WriteByte('(')
+				b.WriteString(js)
+				b.WriteByte(')')
+			} else {
+				b.WriteString(js)
+			}
 		} else {
 			b.WriteString("{}")
 		}
 	} else {
 		// Block body
 		b.WriteByte('{')
-		for _, stmt := range fn.Body {
-			b.WriteString(renderStmtJS(stmt, signals))
+		if len(fn.Body) > 0 {
+			b.WriteByte('\n')
+			b.WriteString(renderStmtBlock(fn.Body, signals, 1))
+			b.WriteByte('\n')
 		}
 		b.WriteByte('}')
 	}
@@ -177,11 +272,34 @@ func RenderComponentFnJS(fn *ast.FnDecl) string {
 	if fn == nil {
 		return ""
 	}
-	return renderStmtJS(fn, nil)
+	// List rows render components through the runtime h(); the reactive form
+	// keeps their markup in sync with the props getters rows pass.
+	return renderFnDeclJS(fn, nil)
 }
 
-// renderStmtJS renders a statement to JS source.
+// renderStmtJS renders a top-level statement to JS source.
 func renderStmtJS(stmt ast.Stmt, signals map[string]ast.Expr) string {
+	return renderStmt(stmt, signals, 0)
+}
+
+// renderStmtBlock renders a list of statements each on its own line, indented
+// to the given level, without a trailing newline.
+func renderStmtBlock(stmts []ast.Stmt, signals map[string]ast.Expr, level int) string {
+	var b strings.Builder
+	for i, s := range stmts {
+		if i > 0 {
+			b.WriteByte('\n')
+		}
+		b.WriteString(indent(level))
+		b.WriteString(renderStmt(s, signals, level))
+	}
+	return b.String()
+}
+
+// renderStmt renders a statement to JS source. The returned string does not
+// include leading indentation for the statement itself; nested blocks are
+// indented relative to level.
+func renderStmt(stmt ast.Stmt, signals map[string]ast.Expr, level int) string {
 	switch s := stmt.(type) {
 	case *ast.ReturnStmt:
 		if s.Value != nil {
@@ -189,20 +307,20 @@ func renderStmtJS(stmt ast.Stmt, signals map[string]ast.Expr) string {
 		}
 		return "return;"
 	case *ast.ExprStmt:
-		return generateExprJS(s.Expression, signals) + ";"
+		js := generateExprJS(s.Expression, signals)
+		if startsAmbiguously(js) {
+			js = "(" + js + ")"
+		}
+		return js + ";"
 	case *ast.VarStmt:
 		var parts []string
+		keyword := varKeyword(s.Kind)
 		for _, decl := range s.Decls {
-			keyword := "var"
-			switch s.Kind {
-			case ast.VarConst:
-				keyword = "const"
-			case ast.VarLet:
-				keyword = "let"
-			}
 			if decl.IsDestructuring {
 				pattern := decl.Pattern
-				if pattern == "" {
+				if decl.Target != nil {
+					pattern = renderPattern(decl.Target, signals)
+				} else if pattern == "" {
 					pattern = "[" + strings.Join(decl.Names, ",") + "]"
 				}
 				parts = append(parts, keyword+" "+pattern+"="+generateExprJS(decl.Init, signals))
@@ -217,91 +335,153 @@ func renderStmtJS(stmt ast.Stmt, signals map[string]ast.Expr) string {
 		return strings.Join(parts, ";") + ";"
 	case *ast.IfStmt:
 		test := generateExprJS(s.Test, signals)
-		var consequentJS strings.Builder
-		for _, cs := range s.Consequent {
-			consequentJS.WriteString(renderStmtJS(cs, signals))
-		}
-		result := "if(" + test + "){" + consequentJS.String() + "}"
-		if len(s.Alternate) > 0 {
-			var alternateJS strings.Builder
-			for _, as := range s.Alternate {
-				alternateJS.WriteString(renderStmtJS(as, signals))
-			}
-			result += "else{" + alternateJS.String() + "}"
-		}
-		return result
-	case *ast.BlockStmt:
 		var b strings.Builder
-		b.WriteByte('{')
-		for _, inner := range s.Body {
-			b.WriteString(renderStmtJS(inner, signals))
+		b.WriteString("if (")
+		b.WriteString(test)
+		b.WriteString(") {")
+		if len(s.Consequent) > 0 {
+			b.WriteByte('\n')
+			b.WriteString(renderStmtBlock(s.Consequent, signals, level+1))
+			b.WriteByte('\n')
+			b.WriteString(indent(level))
 		}
+		b.WriteByte('}')
+		if len(s.Alternate) > 0 {
+			// Render `else if` chains without an extra nesting level.
+			if len(s.Alternate) == 1 {
+				if elif, ok := s.Alternate[0].(*ast.IfStmt); ok {
+					b.WriteString(" else ")
+					b.WriteString(renderStmt(elif, signals, level))
+					return b.String()
+				}
+			}
+			b.WriteString(" else {")
+			b.WriteByte('\n')
+			b.WriteString(renderStmtBlock(s.Alternate, signals, level+1))
+			b.WriteByte('\n')
+			b.WriteString(indent(level))
+			b.WriteByte('}')
+		}
+		return b.String()
+	case *ast.BlockStmt:
+		if len(s.Body) == 0 {
+			return "{}"
+		}
+		var b strings.Builder
+		b.WriteString("{\n")
+		b.WriteString(renderStmtBlock(s.Body, signals, level+1))
+		b.WriteByte('\n')
+		b.WriteString(indent(level))
 		b.WriteByte('}')
 		return b.String()
 	case *ast.FnDecl:
 		var b strings.Builder
-		b.WriteString("function ")
+		if s.Async {
+			b.WriteString("async ")
+		}
+		b.WriteString("function")
+		if s.Generator {
+			b.WriteByte('*')
+		}
+		b.WriteByte(' ')
 		b.WriteString(s.Name)
 		b.WriteString("(")
-		for i, p := range s.Params {
-			if i > 0 {
-				b.WriteString(", ")
-			}
-			if p.Pattern != "" {
-				b.WriteString(p.Pattern)
-			} else {
-				b.WriteString(p.Name)
-			}
+		b.WriteString(renderParams(s.Params))
+		b.WriteString(") {")
+		if len(s.Body) > 0 {
+			b.WriteByte('\n')
+			b.WriteString(renderStmtBlock(s.Body, signals, level+1))
+			b.WriteByte('\n')
+			b.WriteString(indent(level))
 		}
-		b.WriteString("){")
-		for _, stmt := range s.Body {
-			b.WriteString(renderStmtJS(stmt, signals))
-		}
-		b.WriteString("}")
+		b.WriteByte('}')
 		return b.String()
 	case *ast.ForStmt:
 		var b strings.Builder
-		b.WriteString("for(")
+		b.WriteString("for (")
 		if s.Init != nil {
 			if vs, ok := s.Init.(*ast.VarStmt); ok {
 				b.WriteString(renderVarInitJS(vs, signals))
 			} else {
-				init := renderStmtJS(s.Init, signals)
+				init := renderStmt(s.Init, signals, level)
 				init = strings.TrimSuffix(init, ";")
 				b.WriteString(init)
 			}
 		}
-		b.WriteString(";")
+		b.WriteString("; ")
 		if s.Test != nil {
 			b.WriteString(generateExprJS(s.Test, signals))
 		}
-		b.WriteString(";")
+		b.WriteString("; ")
 		if s.Update != nil {
 			b.WriteString(generateExprJS(s.Update, signals))
 		}
-		b.WriteString("){")
-		for _, stmt := range s.Body {
-			b.WriteString(renderStmtJS(stmt, signals))
+		b.WriteString(") {")
+		if len(s.Body) > 0 {
+			b.WriteByte('\n')
+			b.WriteString(renderStmtBlock(s.Body, signals, level+1))
+			b.WriteByte('\n')
+			b.WriteString(indent(level))
 		}
-		b.WriteString("}")
+		b.WriteByte('}')
+		return b.String()
+	case *ast.ForInStmt:
+		op := "in"
+		if s.IsForOf {
+			op = "of"
+		}
+		left := generateExprJS(s.Left, signals)
+		switch s.Left.(type) {
+		case *ast.ObjectExpr, *ast.ArrayExpr:
+			left = renderPattern(s.Left, signals)
+		}
+		var b strings.Builder
+		b.WriteString("for ")
+		if s.Await {
+			b.WriteString("await ")
+		}
+		b.WriteString("(")
+		if s.Keyword != "" {
+			b.WriteString(s.Keyword)
+			b.WriteByte(' ')
+		}
+		b.WriteString(left)
+		b.WriteByte(' ')
+		b.WriteString(op)
+		b.WriteByte(' ')
+		b.WriteString(generateExprJS(s.Right, signals))
+		b.WriteString(") {")
+		if len(s.Body) > 0 {
+			b.WriteByte('\n')
+			b.WriteString(renderStmtBlock(s.Body, signals, level+1))
+			b.WriteByte('\n')
+			b.WriteString(indent(level))
+		}
+		b.WriteByte('}')
 		return b.String()
 	case *ast.WhileStmt:
 		var b strings.Builder
-		b.WriteString("while(")
+		b.WriteString("while (")
 		b.WriteString(generateExprJS(s.Test, signals))
-		b.WriteString("){")
-		for _, stmt := range s.Body {
-			b.WriteString(renderStmtJS(stmt, signals))
+		b.WriteString(") {")
+		if len(s.Body) > 0 {
+			b.WriteByte('\n')
+			b.WriteString(renderStmtBlock(s.Body, signals, level+1))
+			b.WriteByte('\n')
+			b.WriteString(indent(level))
 		}
-		b.WriteString("}")
+		b.WriteByte('}')
 		return b.String()
 	case *ast.DoWhileStmt:
 		var b strings.Builder
-		b.WriteString("do{")
-		for _, stmt := range s.Body {
-			b.WriteString(renderStmtJS(stmt, signals))
+		b.WriteString("do {")
+		if len(s.Body) > 0 {
+			b.WriteByte('\n')
+			b.WriteString(renderStmtBlock(s.Body, signals, level+1))
+			b.WriteByte('\n')
+			b.WriteString(indent(level))
 		}
-		b.WriteString("}while(")
+		b.WriteString("} while (")
 		b.WriteString(generateExprJS(s.Test, signals))
 		b.WriteString(");")
 		return b.String()
@@ -317,51 +497,92 @@ func renderStmtJS(stmt ast.Stmt, signals map[string]ast.Expr) string {
 		return "continue;"
 	case *ast.SwitchStmt:
 		var b strings.Builder
-		b.WriteString("switch(")
+		b.WriteString("switch (")
 		b.WriteString(generateExprJS(s.Discriminant, signals))
-		b.WriteString("){")
+		b.WriteString(") {\n")
 		for _, c := range s.Cases {
 			if c.Test != nil {
+				b.WriteString(indent(level + 1))
 				b.WriteString("case ")
 				b.WriteString(generateExprJS(c.Test, signals))
-				b.WriteString(":")
+				b.WriteString(":\n")
 			} else {
-				b.WriteString("default:")
+				b.WriteString(indent(level + 1))
+				b.WriteString("default:\n")
 			}
-			for _, stmt := range c.Body {
-				b.WriteString(renderStmtJS(stmt, signals))
+			if len(c.Body) > 0 {
+				b.WriteString(renderStmtBlock(c.Body, signals, level+2))
+				b.WriteByte('\n')
 			}
 		}
-		b.WriteString("}")
+		b.WriteString(indent(level))
+		b.WriteByte('}')
 		return b.String()
 	case *ast.TryStmt:
 		var b strings.Builder
-		b.WriteString("try{")
-		for _, stmt := range s.Body {
-			b.WriteString(renderStmtJS(stmt, signals))
+		b.WriteString("try {")
+		if len(s.Body) > 0 {
+			b.WriteByte('\n')
+			b.WriteString(renderStmtBlock(s.Body, signals, level+1))
+			b.WriteByte('\n')
+			b.WriteString(indent(level))
 		}
-		b.WriteString("}")
+		b.WriteByte('}')
 		if s.Catch != nil {
-			b.WriteString("catch(")
-			b.WriteString(s.Catch.Param)
-			b.WriteString("){")
-			for _, stmt := range s.Catch.Body {
-				b.WriteString(renderStmtJS(stmt, signals))
+			switch {
+			case s.Catch.ParamTarget != nil:
+				b.WriteString(" catch (" + renderPattern(s.Catch.ParamTarget, signals) + ") {")
+			case s.Catch.Param != "":
+				b.WriteString(" catch (" + s.Catch.Param + ") {")
+			default:
+				b.WriteString(" catch {")
 			}
-			b.WriteString("}")
+			if len(s.Catch.Body) > 0 {
+				b.WriteByte('\n')
+				b.WriteString(renderStmtBlock(s.Catch.Body, signals, level+1))
+				b.WriteByte('\n')
+				b.WriteString(indent(level))
+			}
+			b.WriteByte('}')
 		}
 		if len(s.Finally) > 0 {
-			b.WriteString("finally{")
-			for _, stmt := range s.Finally {
-				b.WriteString(renderStmtJS(stmt, signals))
-			}
-			b.WriteString("}")
+			b.WriteString(" finally {")
+			b.WriteByte('\n')
+			b.WriteString(renderStmtBlock(s.Finally, signals, level+1))
+			b.WriteByte('\n')
+			b.WriteString(indent(level))
+			b.WriteByte('}')
 		}
 		return b.String()
 	case *ast.ThrowStmt:
 		return "throw " + generateExprJS(s.Value, signals) + ";"
+	case *ast.ClassDecl:
+		return renderClassJS(s, signals, level)
+	case *ast.LabeledStmt:
+		return s.Label + ": " + renderStmt(s.Body, signals, level)
+	case *ast.EmptyStmt:
+		return ";"
+	case *ast.DebuggerStmt:
+		return "debugger;"
+	case *ast.WithStmt:
+		return "with (" + generateExprJS(s.Object, signals) + ") " + renderFnBodyJS(s.Body, signals, level)
 	default:
-		return ""
+		return "/*krate:unsupported:" + fmt.Sprintf("%T", stmt) + "*/;"
+	}
+}
+
+func varKeyword(kind ast.VarKind) string {
+	switch kind {
+	case ast.VarConst:
+		return "const"
+	case ast.VarLet:
+		return "let"
+	case ast.VarUsing:
+		return "using"
+	case ast.VarAwaitUsing:
+		return "await using"
+	default:
+		return "var"
 	}
 }
 
@@ -373,14 +594,59 @@ func generateObjectExpr(obj *ast.ObjectExpr, signals map[string]ast.Expr) string
 			parts = append(parts, "..."+generateExprJS(prop.Value, signals))
 			continue
 		}
+		if prop.Method {
+			if prop.Getter || prop.Setter || prop.Computed || prop.KeyNumeric || isGeneratorFn(prop.Value) {
+				parts = append(parts, generateAccessorMethod(prop, signals))
+			} else {
+				parts = append(parts, generateMethod(prop.Key, prop.Value, signals))
+			}
+			continue
+		}
 		valJS := generateExprJS(prop.Value, signals)
 		if prop.Shorthand {
 			parts = append(parts, prop.Key)
 		} else {
-			parts = append(parts, jsObjectKey(prop.Key)+":"+valJS)
+			parts = append(parts, renderPropKey(prop, signals)+":"+valJS)
 		}
 	}
 	return "{" + strings.Join(parts, ",") + "}"
+}
+
+// generateMethod renders an object-literal method shorthand (e.g.
+// `{ onSubmit() { ... } }`) from its function value.
+func generateMethod(key string, value ast.Expr, signals map[string]ast.Expr) string {
+	async := false
+	var params []*ast.Param
+	var body []ast.Stmt
+	switch fn := value.(type) {
+	case *ast.ArrowFn:
+		async = fn.Async
+		params = fn.Params
+		if fn.Expression {
+			if e := arrowBodyExpr(fn); e != nil {
+				body = []ast.Stmt{&ast.ReturnStmt{Value: e}}
+			}
+		} else {
+			body = fn.Body
+		}
+	default:
+		return jsObjectKey(key) + ":" + generateExprJS(value, signals)
+	}
+	var b strings.Builder
+	if async {
+		b.WriteString("async ")
+	}
+	b.WriteString(jsObjectKey(key))
+	b.WriteByte('(')
+	b.WriteString(renderParams(params))
+	b.WriteString(") {")
+	if len(body) > 0 {
+		b.WriteByte('\n')
+		b.WriteString(renderStmtBlock(body, signals, 1))
+		b.WriteByte('\n')
+	}
+	b.WriteByte('}')
+	return b.String()
 }
 
 // generateTemplateExpr renders a TemplateExpr to JS source.
@@ -426,7 +692,14 @@ func arrowBodyExpr(arrow *ast.ArrowFn) ast.Expr {
 func generateJSXJS(el *ast.JSXElement, signals map[string]ast.Expr) string {
 	var b strings.Builder
 	name := el.Opening.Name
-	// Uppercase tag names are components — reference them as function refs so
+	// The built-in <Link> lowers to an <a> carrying the SPA/prefetch data
+	// attributes - in the client codegen as well as the server/IR path. Without
+	// this, a client component using <Link> would emit `h(Link, ...)` and throw
+	// "Link is not defined" at hydration.
+	if name == "Link" {
+		return generateLinkJSX(el, signals)
+	}
+	// Uppercase tag names are components - reference them as function refs so
 	// the runtime `h()` invokes the component rather than creating a DOM
 	// element with a bogus tag like <Toast>.
 	if len(name) > 0 && name[0] >= 'A' && name[0] <= 'Z' {
@@ -488,6 +761,92 @@ func generateJSXJS(el *ast.JSXElement, signals map[string]ast.Expr) string {
 	return b.String()
 }
 
+// generateLinkJSX lowers the built-in <Link> to an <a> with the SPA navigation
+// and prefetch data attributes the runtime router looks for. The router filters
+// non-local links at runtime (origin/scheme), so `data-krate-link` is always
+// emitted for internal handling; `external` opts out explicitly.
+func generateLinkJSX(el *ast.JSXElement, signals map[string]ast.Expr) string {
+	prefetch := "true"
+	replace := ""
+	external := false
+	scrollFalse := false
+	var props []string
+	for _, attr := range el.Opening.Attributes {
+		if attr.Spread {
+			props = append(props, "..."+generateExprJS(attr.Value, signals))
+			continue
+		}
+		var val string
+		if attr.Value != nil {
+			val = generateExprJS(attr.Value, signals)
+		}
+		switch attr.Name {
+		case "prefetch":
+			if attr.Value != nil {
+				prefetch = val
+			}
+		case "replace":
+			if attr.Value == nil {
+				replace = "true"
+			} else {
+				replace = val
+			}
+		case "external":
+			external = true
+		case "scroll":
+			if lit, ok := attr.Value.(*ast.Literal); ok && lit.Value == "false" {
+				scrollFalse = true
+			} else if attr.Value != nil {
+				props = append(props, "'data-krate-scroll':("+val+")===false?'false':undefined")
+			}
+		default:
+			key := attr.Name
+			if key == "className" {
+				key = "class"
+			}
+			if attr.Value == nil {
+				props = append(props, jsObjectKey(key)+":true")
+			} else {
+				props = append(props, jsObjectKey(key)+":"+val)
+			}
+		}
+	}
+	if external {
+		props = append(props, "'data-krate-external':true")
+	} else {
+		props = append(props, "'data-krate-link':true")
+		props = append(props, "'data-prefetch':("+prefetch+")")
+		if replace != "" {
+			props = append(props, "'data-krate-replace':("+replace+")")
+		}
+		if scrollFalse {
+			props = append(props, "'data-krate-scroll':'false'")
+		}
+	}
+
+	var b strings.Builder
+	b.WriteString("h('a',{")
+	b.WriteString(strings.Join(props, ","))
+	b.WriteString("}")
+	for _, child := range el.Children {
+		b.WriteString(",")
+		switch c := child.(type) {
+		case *ast.JSXText:
+			b.WriteString("'")
+			b.WriteString(escape.JSString(c.Value))
+			b.WriteString("'")
+		case *ast.JSXExprContainer:
+			b.WriteString(generateExprJS(c.Expression, signals))
+		case *ast.JSXElementChild:
+			b.WriteString(generateJSXJS(c.Element, signals))
+		case *ast.JSXFragmentChild:
+			b.WriteString(generateJSXFragmentJS(c.Fragment, signals))
+		}
+	}
+	b.WriteString(")")
+	return b.String()
+}
+
 // generateJSXFragmentJS converts a JSXFragment to a JS array expression.
 func generateJSXFragmentJS(frag *ast.JSXFragment, signals map[string]ast.Expr) string {
 	if len(frag.Children) == 0 {
@@ -520,28 +879,23 @@ func generateJSXFragmentJS(frag *ast.JSXFragment, signals map[string]ast.Expr) s
 func renderVarInitJS(s *ast.VarStmt, signals map[string]ast.Expr) string {
 	var parts []string
 	for _, decl := range s.Decls {
-		keyword := "var"
-		switch s.Kind {
-		case ast.VarConst:
-			keyword = "const"
-		case ast.VarLet:
-			keyword = "let"
-		}
 		if decl.IsDestructuring {
-			if decl.Pattern != "" {
-				parts = append(parts, keyword+" "+decl.Pattern+"="+generateExprJS(decl.Init, signals))
-			} else {
-				parts = append(parts, keyword+" ["+strings.Join(decl.Names, ",")+"]="+generateExprJS(decl.Init, signals))
+			pattern := decl.Pattern
+			if decl.Target != nil {
+				pattern = renderPattern(decl.Target, signals)
+			} else if pattern == "" {
+				pattern = "[" + strings.Join(decl.Names, ",") + "]"
 			}
+			parts = append(parts, pattern+"="+generateExprJS(decl.Init, signals))
 		} else if decl.Name != "" {
 			init := ""
 			if decl.Init != nil {
 				init = "=" + generateExprJS(decl.Init, signals)
 			}
-			parts = append(parts, keyword+" "+decl.Name+init)
+			parts = append(parts, decl.Name+init)
 		}
 	}
-	return strings.Join(parts, ",")
+	return varKeyword(s.Kind) + " " + strings.Join(parts, ", ")
 }
 
 // jsObjectKey renders an object-literal key, quoting it when it is not a
@@ -571,6 +925,346 @@ func isJSIdentifier(s string) bool {
 	return true
 }
 
+// codegenIssues validates that every construct reachable from a function body
+// is supported by the JS code generator. It guarantees no node is silently
+// dropped: an unsupported statement or expression becomes a hard build error
+// instead of vanishing from the emitted hydration/SSR code.
+//
+// mk builds the positioned error for a finding; nil falls back to a plain
+// error naming the function.
+func codegenIssues(fn *ast.FnDecl, mk func(pos ast.Pos, msg, hint string) error) []error {
+	if fn == nil {
+		return nil
+	}
+	var issues []error
+	where := fn.Name
+	if where == "" {
+		where = "<anonymous>"
+	}
+	if mk == nil {
+		mk = func(pos ast.Pos, msg, hint string) error {
+			return fmt.Errorf("%s:%d:%d: %s (hint: %s)", where, pos.Line, pos.Col, msg, hint)
+		}
+	}
+	report := func(pos ast.Pos, kind string, node interface{}) {
+		issues = append(issues, mk(pos,
+			fmt.Sprintf("%s: the client code generator cannot emit this %s (%T)", where, kind, node),
+			"this is an internal compiler limitation; please report it with the snippet, and rewrite the construct with plain expressions meanwhile"))
+	}
+
+	var walkExpr func(ast.Expr)
+	var walkStmt func(ast.Stmt)
+	var walkJSXChild func(ast.JSXChild)
+	walkClass := func(c *ast.ClassDecl) {
+		if c == nil {
+			return
+		}
+		walkExpr(c.SuperClass)
+		for _, m := range c.Members {
+			if m == nil {
+				continue
+			}
+			walkExpr(m.KeyExpr)
+			walkExpr(m.Init)
+			for _, s := range m.Body {
+				walkStmt(s)
+			}
+		}
+	}
+
+	walkExpr = func(e ast.Expr) {
+		if e == nil {
+			return
+		}
+		switch v := e.(type) {
+		case *ast.Identifier, *ast.Literal, *ast.ThisExpr, *ast.ImportMetaExpr:
+		case *ast.CallExpr:
+			walkExpr(v.Callee)
+			for _, a := range v.Args {
+				walkExpr(a)
+			}
+		case *ast.MemberExpr:
+			walkExpr(v.Object)
+			walkExpr(v.Property)
+		case *ast.BinaryExpr:
+			walkExpr(v.Left)
+			walkExpr(v.Right)
+		case *ast.UnaryExpr:
+			walkExpr(v.Arg)
+		case *ast.ConditionalExpr:
+			walkExpr(v.Test)
+			walkExpr(v.Consequent)
+			walkExpr(v.Alternate)
+		case *ast.TypeAssertion:
+			walkExpr(v.Expr)
+		case *ast.ArrowFn:
+			for _, s := range v.Body {
+				walkStmt(s)
+			}
+		case *ast.ObjectExpr:
+			for _, p := range v.Properties {
+				if p.Computed {
+					walkExpr(p.KeyExpr)
+				}
+				walkExpr(p.Value)
+			}
+		case *ast.ArrayExpr:
+			for _, el := range v.Elements {
+				walkExpr(el)
+			}
+		case *ast.TemplateExpr:
+			for _, p := range v.Parts {
+				walkExpr(p)
+			}
+		case *ast.JSXElement:
+			if v.Opening != nil {
+				for _, a := range v.Opening.Attributes {
+					if a != nil {
+						walkExpr(a.Value)
+					}
+				}
+			}
+			for _, c := range v.Children {
+				walkJSXChild(c)
+			}
+		case *ast.JSXFragment:
+			for _, c := range v.Children {
+				walkJSXChild(c)
+			}
+		case *ast.NewExpr:
+			walkExpr(v.Callee)
+			for _, a := range v.Args {
+				walkExpr(a)
+			}
+		case *ast.AwaitExpr:
+			walkExpr(v.Arg)
+		case *ast.DynamicImport:
+			walkExpr(v.Arg)
+			walkExpr(v.Options)
+		case *ast.ClassExpr:
+			walkClass(v.Class)
+		case *ast.TaggedTemplateExpr:
+			walkExpr(v.Tag)
+			walkExpr(v.Quasi)
+		case *ast.ParenExpr:
+			walkExpr(v.Expr)
+		case *ast.MetaProperty:
+		default:
+			report(e.Pos(), "expression", e)
+		}
+	}
+
+	walkJSXChild = func(c ast.JSXChild) {
+		switch v := c.(type) {
+		case *ast.JSXText:
+		case *ast.JSXExprContainer:
+			walkExpr(v.Expression)
+		case *ast.JSXElementChild:
+			walkExpr(v.Element)
+		case *ast.JSXFragmentChild:
+			walkExpr(v.Fragment)
+		}
+	}
+
+	walkStmt = func(s ast.Stmt) {
+		switch v := s.(type) {
+		case nil:
+			// Optional statements (a `for (;;)` without an init).
+		case *ast.ClassDecl:
+			name := v.Name
+			if name == "" {
+				name = "anonymous class"
+			}
+			issues = append(issues, mk(v.Position,
+				fmt.Sprintf("%s: class declaration %s inside a component or helper function is not supported in client code", where, name),
+				"move the class to module scope in a separate module and import it, or replace it with plain objects and functions"))
+		case *ast.ReturnStmt:
+			walkExpr(v.Value)
+		case *ast.ExprStmt:
+			walkExpr(v.Expression)
+		case *ast.VarStmt:
+			for _, d := range v.Decls {
+				walkExpr(d.Init)
+			}
+		case *ast.IfStmt:
+			walkExpr(v.Test)
+			for _, c := range v.Consequent {
+				walkStmt(c)
+			}
+			for _, a := range v.Alternate {
+				walkStmt(a)
+			}
+		case *ast.BlockStmt:
+			for _, c := range v.Body {
+				walkStmt(c)
+			}
+		case *ast.FnDecl:
+			for _, c := range v.Body {
+				walkStmt(c)
+			}
+		case *ast.ForStmt:
+			walkStmt(v.Init)
+			walkExpr(v.Test)
+			walkExpr(v.Update)
+			for _, c := range v.Body {
+				walkStmt(c)
+			}
+		case *ast.ForInStmt:
+			walkExpr(v.Left)
+			walkExpr(v.Right)
+			for _, c := range v.Body {
+				walkStmt(c)
+			}
+		case *ast.WhileStmt:
+			walkExpr(v.Test)
+			for _, c := range v.Body {
+				walkStmt(c)
+			}
+		case *ast.DoWhileStmt:
+			walkExpr(v.Test)
+			for _, c := range v.Body {
+				walkStmt(c)
+			}
+		case *ast.SwitchStmt:
+			walkExpr(v.Discriminant)
+			for _, c := range v.Cases {
+				walkExpr(c.Test)
+				for _, b := range c.Body {
+					walkStmt(b)
+				}
+			}
+		case *ast.TryStmt:
+			for _, c := range v.Body {
+				walkStmt(c)
+			}
+			if v.Catch != nil {
+				for _, c := range v.Catch.Body {
+					walkStmt(c)
+				}
+			}
+			for _, c := range v.Finally {
+				walkStmt(c)
+			}
+		case *ast.ThrowStmt:
+			walkExpr(v.Value)
+		case *ast.LabeledStmt:
+			walkStmt(v.Body)
+		case *ast.WithStmt:
+			walkExpr(v.Object)
+			for _, c := range v.Body {
+				walkStmt(c)
+			}
+		case *ast.EmptyStmt, *ast.DebuggerStmt:
+		case *ast.BreakStmt, *ast.ContinueStmt:
+		default:
+			report(s.Pos(), "statement", s)
+		}
+	}
+
+	for _, s := range fn.Body {
+		walkStmt(s)
+	}
+	return issues
+}
+
 // String literal values are decoded once at parse time (see
 // parser.decodeStringToken -> escape.UnescapeJSString), so consumers here read
 // the literal runtime value directly.
+
+// unwrapTypes strips type-only wrappers that print as their inner expression.
+func unwrapTypes(e ast.Expr) ast.Expr {
+	for {
+		ta, ok := e.(*ast.TypeAssertion)
+		if !ok {
+			return e
+		}
+		e = ta.Expr
+	}
+}
+
+// isPrefixOperator reports a prefix unary (or await) expression, which is
+// not a valid left operand of ** and not a valid member object.
+func isPrefixOperator(e ast.Expr) bool {
+	switch v := unwrapTypes(e).(type) {
+	case *ast.UnaryExpr:
+		return !v.Postfix
+	case *ast.AwaitExpr:
+		return true
+	}
+	return false
+}
+
+// operandJS renders e as the object of a member access, a callee or a tag.
+// The parser drops source parentheses, so the printer restores the ones the
+// grammar needs: unary and await operands, arrow functions, and integer
+// literals (255.x is a syntax error, (255).x is not).
+func operandJS(e ast.Expr, signals map[string]ast.Expr) string {
+	js := generateExprJS(e, signals)
+	wrap := false
+	switch v := unwrapTypes(e).(type) {
+	case *ast.UnaryExpr, *ast.AwaitExpr:
+		wrap = true
+	case *ast.ArrowFn:
+		wrap = !v.Function
+	case *ast.Literal:
+		wrap = v.Kind == ast.NumberLit && isDecimalInteger(v.Value)
+		if v.Kind == ast.NumberLit && strings.HasPrefix(v.Value, "-") {
+			wrap = true
+		}
+	}
+	if wrap {
+		return "(" + js + ")"
+	}
+	return js
+}
+
+func isDecimalInteger(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if !(c >= '0' && c <= '9') && c != '_' {
+			return false
+		}
+	}
+	return true
+}
+
+// isPlainNewCallee reports whether `new <callee>(...)` parses the callee as
+// written: a name or a member chain with no call, optional link or computed
+// base that would end the callee early.
+func isPlainNewCallee(e ast.Expr) bool {
+	switch v := unwrapTypes(e).(type) {
+	case *ast.Identifier, *ast.ThisExpr, *ast.ImportMetaExpr, *ast.MetaProperty:
+		return true
+	case *ast.MemberExpr:
+		return !v.Optional && isPlainNewCallee(v.Object)
+	case *ast.ClassExpr, *ast.ParenExpr:
+		return true
+	case *ast.ArrowFn:
+		return v.Function
+	}
+	return false
+}
+
+// startsAmbiguously reports statement text that would parse as a block,
+// function declaration or class declaration instead of an expression.
+func startsAmbiguously(js string) bool {
+	if strings.HasPrefix(js, "{") || strings.HasPrefix(js, "let [") {
+		return true
+	}
+	for _, kw := range []string{"function", "class", "async function"} {
+		if strings.HasPrefix(js, kw) {
+			rest := js[len(kw):]
+			if rest == "" {
+				return true
+			}
+			c := rest[0]
+			if !(c == '_' || c == '$' || c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z') {
+				return true
+			}
+		}
+	}
+	return false
+}

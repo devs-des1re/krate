@@ -1,0 +1,10 @@
+{
+  "steps": [
+    { "op": "fill", "sel": "#text", "text": "hello" },
+    { "op": "click", "sel": "#send" },
+    { "op": "eval", "js": "window.__release()", "then": "body:has(#messages li):has(#text:placeholder-shown)" },
+    { "op": "fill", "sel": "#text", "text": "again" },
+    { "op": "press", "sel": "#text", "key": "Enter" },
+    { "op": "eval", "js": "window.__release()", "then": "body:has(#messages li:nth-child(2)):has(#text:placeholder-shown)" }
+  ]
+}

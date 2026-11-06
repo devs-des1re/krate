@@ -10,16 +10,16 @@ func TestResolvePathAliasExactMatch(t *testing.T) {
 	dir := t.TempDir()
 	// Create target file
 	utilsDir := filepath.Join(dir, "src", "utils")
-	os.MkdirAll(utilsDir, 0755)
-	os.WriteFile(filepath.Join(utilsDir, "helper.ts"), []byte("export const x = 1"), 0644)
+	_ = os.MkdirAll(utilsDir, 0755)
+	_ = os.WriteFile(filepath.Join(utilsDir, "helper.ts"), []byte("export const x = 1"), 0644)
 
 	aliases := []pathAlias{
 		{prefix: "@utils", targets: []string{"./src/utils/index.ts"}},
 	}
 	// Also create index.ts
-	os.WriteFile(filepath.Join(utilsDir, "index.ts"), []byte("export const x = 1"), 0644)
+	_ = os.WriteFile(filepath.Join(utilsDir, "index.ts"), []byte("export const x = 1"), 0644)
 
-	result := resolvePathAlias("@utils", aliases, dir)
+	result := resolvePathAlias("@utils", aliases, dir, fileExists)
 	if result == "" {
 		t.Fatal("expected to resolve @utils, got empty string")
 	}
@@ -30,16 +30,16 @@ func TestResolvePathAliasExactMatch(t *testing.T) {
 
 func TestResolvePathAliasWildcard(t *testing.T) {
 	dir := t.TempDir()
-	// Create target file — alias "./*" resolves relative to tsBaseDir (dir)
+	// Create target file - alias "./*" resolves relative to tsBaseDir (dir)
 	compDir := filepath.Join(dir, "components")
-	os.MkdirAll(compDir, 0755)
-	os.WriteFile(filepath.Join(compDir, "Button.tsx"), []byte("export default function Button() {}"), 0644)
+	_ = os.MkdirAll(compDir, 0755)
+	_ = os.WriteFile(filepath.Join(compDir, "Button.tsx"), []byte("export default function Button() {}"), 0644)
 
 	aliases := []pathAlias{
 		{prefix: "@/*", targets: []string{"./*"}},
 	}
 
-	result := resolvePathAlias("@/components/Button", aliases, dir)
+	result := resolvePathAlias("@/components/Button", aliases, dir, fileExists)
 	if result == "" {
 		t.Fatal("expected to resolve @/components/Button, got empty string")
 	}
@@ -52,14 +52,14 @@ func TestResolvePathAliasWildcard(t *testing.T) {
 func TestResolvePathAliasWithExtension(t *testing.T) {
 	dir := t.TempDir()
 	compDir := filepath.Join(dir, "components")
-	os.MkdirAll(compDir, 0755)
-	os.WriteFile(filepath.Join(compDir, "Button.tsx"), []byte("export default function Button() {}"), 0644)
+	_ = os.MkdirAll(compDir, 0755)
+	_ = os.WriteFile(filepath.Join(compDir, "Button.tsx"), []byte("export default function Button() {}"), 0644)
 
 	aliases := []pathAlias{
 		{prefix: "@/*", targets: []string{"./*"}},
 	}
 
-	result := resolvePathAlias("@/components/Button", aliases, dir)
+	result := resolvePathAlias("@/components/Button", aliases, dir, fileExists)
 	if result == "" {
 		t.Fatal("expected to resolve @/components/Button with extension")
 	}
@@ -67,16 +67,16 @@ func TestResolvePathAliasWithExtension(t *testing.T) {
 
 func TestResolvePathAliasDirectoryIndex(t *testing.T) {
 	dir := t.TempDir()
-	// Create directory with index.tsx — alias resolves relative to tsBaseDir (dir)
+	// Create directory with index.tsx - alias resolves relative to tsBaseDir (dir)
 	compDir := filepath.Join(dir, "components", "Card")
-	os.MkdirAll(compDir, 0755)
-	os.WriteFile(filepath.Join(compDir, "index.tsx"), []byte("export default function Card() {}"), 0644)
+	_ = os.MkdirAll(compDir, 0755)
+	_ = os.WriteFile(filepath.Join(compDir, "index.tsx"), []byte("export default function Card() {}"), 0644)
 
 	aliases := []pathAlias{
 		{prefix: "@/*", targets: []string{"./*"}},
 	}
 
-	result := resolvePathAlias("@/components/Card", aliases, dir)
+	result := resolvePathAlias("@/components/Card", aliases, dir, fileExists)
 	if result == "" {
 		t.Fatal("expected to resolve @/components/Card to directory index")
 	}
@@ -92,7 +92,7 @@ func TestResolvePathAliasNoMatch(t *testing.T) {
 		{prefix: "@/*", targets: []string{"./*"}},
 	}
 
-	result := resolvePathAlias("lodash", aliases, dir)
+	result := resolvePathAlias("lodash", aliases, dir, fileExists)
 	if result != "" {
 		t.Errorf("expected empty for non-matching alias, got %s", result)
 	}
@@ -104,7 +104,7 @@ func TestResolvePathAliasFileNotFound(t *testing.T) {
 		{prefix: "@/*", targets: []string{"./*"}},
 	}
 
-	result := resolvePathAlias("@/nonexistent/File", aliases, dir)
+	result := resolvePathAlias("@/nonexistent/File", aliases, dir, fileExists)
 	if result != "" {
 		t.Errorf("expected empty for nonexistent file, got %s", result)
 	}
@@ -113,14 +113,14 @@ func TestResolvePathAliasFileNotFound(t *testing.T) {
 func TestResolvePathAliasMultipleTargets(t *testing.T) {
 	dir := t.TempDir()
 	// First target doesn't exist, second does
-	os.MkdirAll(filepath.Join(dir, "fallback"), 0755)
-	os.WriteFile(filepath.Join(dir, "fallback", "index.ts"), []byte("export const x = 1"), 0644)
+	_ = os.MkdirAll(filepath.Join(dir, "fallback"), 0755)
+	_ = os.WriteFile(filepath.Join(dir, "fallback", "index.ts"), []byte("export const x = 1"), 0644)
 
 	aliases := []pathAlias{
 		{prefix: "@app", targets: []string{"./primary/index.ts", "./fallback/index.ts"}},
 	}
 
-	result := resolvePathAlias("@app", aliases, dir)
+	result := resolvePathAlias("@app", aliases, dir, fileExists)
 	if result == "" {
 		t.Fatal("expected to resolve via fallback target")
 	}
@@ -130,14 +130,14 @@ func TestResolvePathAliasAbsoluteTarget(t *testing.T) {
 	dir := t.TempDir()
 	// Create file with absolute target
 	targetDir := filepath.Join(dir, "absolute")
-	os.MkdirAll(targetDir, 0755)
-	os.WriteFile(filepath.Join(targetDir, "mod.ts"), []byte("export const x = 1"), 0644)
+	_ = os.MkdirAll(targetDir, 0755)
+	_ = os.WriteFile(filepath.Join(targetDir, "mod.ts"), []byte("export const x = 1"), 0644)
 
 	aliases := []pathAlias{
 		{prefix: "@abs", targets: []string{targetDir + "/mod.ts"}},
 	}
 
-	result := resolvePathAlias("@abs", aliases, dir)
+	result := resolvePathAlias("@abs", aliases, dir, fileExists)
 	if result == "" {
 		t.Fatal("expected to resolve absolute target")
 	}
@@ -146,9 +146,9 @@ func TestResolvePathAliasAbsoluteTarget(t *testing.T) {
 func TestResolveImportForModuleWithAliases(t *testing.T) {
 	dir := t.TempDir()
 	// Create the source file and the alias target
-	os.MkdirAll(filepath.Join(dir, "src", "components"), 0755)
-	os.WriteFile(filepath.Join(dir, "src", "main.tsx"), []byte("import Button from '@/components/Button'"), 0644)
-	os.WriteFile(filepath.Join(dir, "src", "components", "Button.tsx"), []byte("export default function Button() {}"), 0644)
+	_ = os.MkdirAll(filepath.Join(dir, "src", "components"), 0755)
+	_ = os.WriteFile(filepath.Join(dir, "src", "main.tsx"), []byte("import Button from '@/components/Button'"), 0644)
+	_ = os.WriteFile(filepath.Join(dir, "src", "components", "Button.tsx"), []byte("export default function Button() {}"), 0644)
 
 	b := New(dir)
 	b.SetPathAliases(
@@ -171,7 +171,7 @@ func TestResolveImportForModuleNoAlias(t *testing.T) {
 	dir := t.TempDir()
 	b := New(dir)
 
-	// No aliases configured — should still work for standard resolution
+	// No aliases configured - should still work for standard resolution
 	result := b.resolveImportForModule(filepath.Join(dir, "main.tsx"), "nonexistent")
 	if result != "" {
 		t.Errorf("expected empty for nonexistent module without aliases, got %s", result)
@@ -211,5 +211,36 @@ func TestSetPathAliasesMismatchedLengths(t *testing.T) {
 
 	if len(b.pathAliases) != 1 {
 		t.Errorf("expected 1 alias (clamped to shorter slice), got %d", len(b.pathAliases))
+	}
+}
+
+// Path aliases belong to one ImportResolver: configuring a second project
+// leaves the first one's resolution alone.
+func TestImportResolversDoNotShareAliases(t *testing.T) {
+	setup := func(name string) (*ImportResolver, string, string) {
+		dir := t.TempDir()
+		_ = os.MkdirAll(filepath.Join(dir, "src", "components"), 0755)
+		importer := filepath.Join(dir, "src", "main.tsx")
+		target := filepath.Join(dir, "src", "components", name+".tsx")
+		_ = os.WriteFile(importer, []byte(""), 0644)
+		_ = os.WriteFile(target, []byte("export default function X() {}"), 0644)
+		b := New(dir)
+		b.SetPathAliases([]string{"@/*"}, [][]string{{"./*"}}, filepath.Join(dir, "src"))
+		return b.ImportResolver(), importer, target
+	}
+	resA, impA, wantA := setup("A")
+	resB, impB, wantB := setup("B")
+	if got := resA.Resolve(impA, "@/components/A"); got != wantA {
+		t.Errorf("project A resolved %q, want %q", got, wantA)
+	}
+	if got := resB.Resolve(impB, "@/components/B"); got != wantB {
+		t.Errorf("project B resolved %q, want %q", got, wantB)
+	}
+	if got := resA.Resolve(impA, "@/components/B"); got != "" {
+		t.Errorf("project A resolved project B's module: %q", got)
+	}
+	var none *ImportResolver
+	if got := none.Resolve(impA, "@/components/A"); got != "" {
+		t.Errorf("a nil resolver must not apply aliases, got %q", got)
 	}
 }

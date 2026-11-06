@@ -45,15 +45,29 @@ func TestRemoveZeroUnits(t *testing.T) {
 		input    string
 		expected string
 	}{
-		{"margin: 0px;", "margin: 0;"},
-		{"width: 0em;", "width: 0;"},
-		{"gap: 0rem;", "gap: 0;"},
-		{"width: 10px;", "width: 10px;"}, // non-zero unchanged
-		// Custom property values must keep their units: they are substituted
-		// verbatim into var()/calc() later, and calc(1rem + var(--x)) is invalid
-		// when --x is the bare number 0.
-		{"--toc-indent: 0rem;", "--toc-indent: 0rem;"},
-		{".a{--x: 0px;--y: 0.5rem;padding: 0px}", ".a{--x: 0px;--y: 0.5rem;padding: 0}"},
+		{"0px", "0"},
+		{"0em", "0"},
+		{"0rem 0rem", "0 0"},
+		{"10px", "10px"}, // non-zero unchanged
+		{"0.0px", "0"},
+		{"10.0px", "10.0px"},
+		{"1.0rem", "1.0rem"},
+		{"translateX(1.0px)", "translateX(1.0px)"},
+		{"translateX(0px)", "translateX(0)"},
+		{"0fr", "0fr"},
+		{"1fr 0fr", "1fr 0fr"},
+		{"0s", "0s"},
+		{"0ms", "0ms"},
+		{"0deg", "0deg"},
+		{"0%", "0%"},
+		{"calc(100% - 0px)", "calc(100% - 0px)"},
+		{"max(0px,10px)", "max(0px,10px)"},
+		{"clamp(0px,50%,100px)", "clamp(0px,50%,100px)"},
+		{"calc(1px + var(--x,0px))", "calc(1px + var(--x,0px))"},
+		{"var(--x,0px)", "var(--x,0px)"},
+		{"x-0px", "x-0px"},
+		{"#0px", "#0px"},
+		{"\\30px", "\\30px"},
 	}
 	for _, tt := range tests {
 		got := removeZeroUnits(tt.input)
@@ -91,7 +105,7 @@ func TestSimplifyCalc(t *testing.T) {
 		{"calc(0 + 10px)", "10px"},
 		{"calc(10px + 0)", "10px"},
 		{"calc(10px * 1)", "10px"},
-		{"calc(10px * 0)", "0"},
+		{"calc(10px * 0)", "0px"},
 		{"calc(1 * 10px)", "10px"},
 		{"calc(0 - 10px)", "-10px"},
 		{"calc(100% - 20px)", "calc(100% - 20px)"}, // complex, unchanged
@@ -101,15 +115,6 @@ func TestSimplifyCalc(t *testing.T) {
 		if got != tt.expected {
 			t.Errorf("simplifyCalc(%q) = %q, want %q", tt.input, got, tt.expected)
 		}
-	}
-}
-
-func TestRemoveTrailingSemicolons(t *testing.T) {
-	input := "color: red; margin: 0; }"
-	expected := "color: red; margin: 0}"
-	got := removeTrailingSemicolons(input)
-	if got != expected {
-		t.Errorf("removeTrailingSemicolons(%q) = %q, want %q", input, got, expected)
 	}
 }
 
@@ -123,8 +128,9 @@ func TestRemoveDuplicateDeclarations(t *testing.T) {
 			"a {color:blue}",
 		},
 		{
+			// The last occurrence stays at its own position.
 			"a { margin: 10px; padding: 5px; margin: 20px; }",
-			"a {margin:20px;padding:5px}",
+			"a {padding:5px;margin:20px}",
 		},
 		{
 			"a { COLOR: red; color: blue; }", // case-insensitive
@@ -143,9 +149,62 @@ func TestRemoveDuplicateDeclarations(t *testing.T) {
 		},
 	}
 	for _, tt := range tests {
-		got := removeDuplicateDeclarations(tt.input)
+		got := Minify(tt.input)
 		if got != tt.expected {
-			t.Errorf("removeDuplicateDeclarations(%q) = %q, want %q", tt.input, got, tt.expected)
+			t.Errorf("Minify(%q) = %q, want %q", tt.input, got, tt.expected)
+		}
+	}
+}
+
+func TestRemoveDuplicateDeclarationsPreservesFormatting(t *testing.T) {
+	tests := []struct {
+		name, input, expected string
+	}{
+		{
+			name:     "folds duplicate, keeps newlines",
+			input:    "a {\n  color: red;\n  color: blue;\n}\n",
+			expected: "a {\n  color: blue;\n}\n",
+		},
+		{
+			name:     "folds duplicate custom property",
+			input:    "a {\n  --x: 1rem;\n  --x: 2rem;\n}\n",
+			expected: "a {\n  --x: 2rem;\n}\n",
+		},
+		{
+			name:     "case-distinct custom properties are preserved",
+			input:    "a {\n  --Foo: 1;\n  --foo: 2;\n}\n",
+			expected: "a {\n  --Foo: 1;\n  --foo: 2;\n}\n",
+		},
+		{
+			name:     "vendor-prefixed fallback preserved",
+			input:    "a {\n  display: -webkit-box;\n  display: flex;\n}\n",
+			expected: "a {\n  display: -webkit-box;\n  display: flex;\n}\n",
+		},
+		{
+			name:     "earlier important wins",
+			input:    "a {\n  color: red !important;\n  color: blue;\n}\n",
+			expected: "a {\n  color: red !important;\n}\n",
+		},
+		{
+			name:     "comment survives a folded declaration",
+			input:    "a {\n  /* keep */\n  color: red;\n  color: blue;\n}\n",
+			expected: "a {\n  /* keep */\n  color: blue;\n}\n",
+		},
+		{
+			name:     "no duplicates is a no-op",
+			input:    "a {\n  color: red;\n  margin: 0;\n}\n",
+			expected: "a {\n  color: red;\n  margin: 0;\n}\n",
+		},
+		{
+			name:     "recurses into at-rules",
+			input:    "@media (x) {\n  a {\n    color: red;\n    color: blue;\n  }\n}\n",
+			expected: "@media (x) {\n  a {\n    color: blue;\n  }\n}\n",
+		},
+	}
+	for _, tt := range tests {
+		got := RemoveDuplicateDeclarations(tt.input)
+		if got != tt.expected {
+			t.Errorf("%s: RemoveDuplicateDeclarations(%q) = %q, want %q", tt.name, tt.input, got, tt.expected)
 		}
 	}
 }

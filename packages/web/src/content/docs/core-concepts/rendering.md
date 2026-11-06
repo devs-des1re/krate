@@ -1,6 +1,7 @@
 ---
 title: Rendering
 order: 5
+description: Choose between static (SSG), incremental (ISR), per-request (SSR), and streamed rendering.
 ---
 
 # Rendering Modes
@@ -11,7 +12,7 @@ per-page config or by using the components that imply them.
 
 The architecture is **static-first**: the Go compiler bakes as much as possible
 into a static shell (layout, `<head>`, server components, resolved suspense
-content). Only genuinely dynamic pieces — the "regions" of a page — are
+content). Only genuinely dynamic pieces - the "regions" of a page - are
 rendered at request time by a small sidecar and spliced into the shell. Krate
 never re-renders an entire page just to update one dynamic part, and it never
 renders a page twice.
@@ -20,7 +21,7 @@ renders a page twice.
 
 | Mode | Config | Output |
 |------|--------|--------|
-| **SSG** (default) | — | Fully static HTML, no request-time work |
+| **SSG** (default) | - | Fully static HTML, no request-time work |
 | **ISR** | `export const config = { isr: true, revalidate: 60 }` | Static shell; page body cached per URL variant and revalidated in the background |
 | **SSR** | `export const config = { ssr: true }` | Static shell; page body rendered fresh on every request |
 | **Streaming** | `export const config = { streaming: true }`, `<Suspense>`, or runtime components | Static shell; each dynamic region streamed in as it resolves |
@@ -36,12 +37,23 @@ export default function Page() {
 ```
 
 The page is rendered once at build time. The output is a static HTML file plus
-a hydration bundle. This is the fastest and most portable mode — it works on
+a hydration bundle. This is the fastest and most portable mode - it works on
 any static host.
 
 Server components (`// @server`) are evaluated at build time and their output is
 baked into the static HTML, so build-time data needs no special page-level
 function. See [Data Fetching](/docs/features/data-fetching/).
+
+Components without client state (no signals or handlers) are also rendered
+entirely at build time. Their expressions follow JavaScript and React semantics:
+`{false}`, `{null}` and `{undefined}` render nothing, `{0 && <b/>}` renders `0`,
+strings are always escaped (only JSX is markup), and array methods such as
+`filter`, `map`, `find` and `join` run on build-time data. Every value such a
+component renders must be known at build time (a prop, a local, or a module
+constant); an expression that cannot be evaluated, or a component that cannot
+be resolved, fails the build with a diagnostic instead of rendering empty
+output. Browser globals like `window` are `undefined` there, exactly as under
+server rendering.
 
 ## ISR (Incremental Static Regeneration)
 
@@ -56,8 +68,16 @@ export default function PricesPage() {
 }
 ```
 
+The Next.js-style segment exports work too: `export const revalidate = 60`
+is ISR, `revalidate = 0` or `export const dynamic = "force-dynamic"` is SSR, and
+`dynamic = "force-static"` / `revalidate = false` keep the page static. A page
+that states no mode but reads tagged or timed data (`fetch` `next` options,
+`unstable_cache`) becomes ISR automatically. To purge ISR pages when data
+changes, call `revalidatePath` / `revalidateTag`; see
+[Caching and Revalidation](/docs/guides/caching-and-revalidation/).
+
 ISR responses are cacheable: Krate emits
-`Cache-Control: public, s-maxage=…, stale-while-revalidate=…` so CDNs hold
+`Cache-Control: public, s-maxage=..., stale-while-revalidate=...` so CDNs hold
 fresh HTML while the sidecar revalidates stale entries in the background.
 `revalidate` defaults to 60 seconds when omitted.
 
@@ -80,7 +100,7 @@ request with the live URL params/query. Responses are `no-store`.
 
 Streaming pages use Suspense boundaries and runtime components. The shell is
 baked with each dynamic boundary's **fallback** in place; as each region
-resolves it is streamed to the client and spliced in — one render per region,
+resolves it is streamed to the client and spliced in - one render per region,
 no two-phase full-page render.
 
 ```tsx
@@ -100,30 +120,12 @@ treated as streaming even without the config:
 ```tsx
 export default function LivePage() {
   return (
-    <Suspense fallback={<p>Loading…</p>}>
+    <Suspense fallback={<p>Loading...</p>}>
       <LiveStatus />
     </Suspense>
   );
 }
 ```
-
-## How it works
-
-- The Go compiler builds every page to a static shell. Server components are
-  baked; static suspense content is baked as its resolved HTML; dynamic
-  boundaries become splice markers (`<!--suspense:…-->` for Suspense regions,
-  `<!--region:…-->` for standalone runtime components).
-- SSR/ISR pages carry one coarse "page" region marker around the whole body.
-- The Node (or bun/deno) sidecar renders **only** the regions the Go server asks
-  for — via `/__krate/regions` — using the compiled page bundle
-  (`dist/.krate/server-bundles/…`) or the compiled runtime-component bundles
-  (`dist/server-components/…`). The Go server splices the returned HTML into the
-  shell and streams it.
-- The Go server resolves the concrete URL to the page's canonical route
-  (e.g. `/video/abc` → `/video/[id]`), forwards the URL params, and keys ISR
-  caching by route + params + query.
-- `manifest.json` records each page's mode, and `server-manifest.json` lists the
-  page bundles and each page's region registry for the sidecar.
 
 ## Choosing an approach
 
@@ -138,4 +140,5 @@ export default function LivePage() {
 
 See [Component Tiers](/docs/core-concepts/component-tiers/) for how server and
 runtime components work, and [Data Fetching](/docs/features/data-fetching/) for
-the full data model.
+the full data model. For how the static shell and sidecar are wired, see
+[Contributing -> Rendering internals](/docs/contributing/rendering/).

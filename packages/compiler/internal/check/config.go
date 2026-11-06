@@ -20,8 +20,14 @@ type Config struct {
 	Rules map[string]Severity
 	// Ignore is the set of rule IDs to suppress.
 	Ignore map[string]bool
-	// JSBudgetBytes is the per-route client JS budget. 0 disables the rule.
+	// JSBudgetBytes is the per-route total client JS budget. 0 disables it.
 	JSBudgetBytes int
+	// HydrationBudgetBytes is the per-route hydration bundle budget.
+	HydrationBudgetBytes int
+	// IslandBudgetBytes is the per-route island chunk budget.
+	IslandBudgetBytes int
+	// RouteBudgetBytes is the per-route HTML + CSS + JS + island budget.
+	RouteBudgetBytes int
 	// FailOn is the minimum severity that makes `krate check` (and a checks-
 	// enabled build) exit non-zero.
 	FailOn Severity
@@ -32,6 +38,11 @@ type Config struct {
 	// Root and Env are carried to custom (plugin) rules.
 	Root string
 	Env  map[string]string
+
+	// Routes is the set of known site routes (leading slash; stored both with
+	// and without a trailing slash) used by the broken-link rule. Populated by
+	// the build pipeline before Run; empty disables the rule.
+	Routes map[string]bool
 }
 
 // customModules resolves configured custom rule paths against Root.
@@ -65,9 +76,6 @@ func DefaultConfig() Config {
 	}
 }
 
-// Disabled returns an inactive config.
-func Disabled() Config { return Config{} }
-
 // rulePolicy resolves whether a rule runs and any severity override. It applies,
 // in order: ignore list, per-rule override, then category override.
 func (c *Config) rulePolicy(id, category string) (active bool, override Severity) {
@@ -98,8 +106,8 @@ func (c *Config) rulePolicy(id, category string) (active bool, override Severity
 //	  perf: true,
 //	  rules: { "a11y/img-alt": "off" },
 //	  ignore: ["seo/canonical"],
-//	  budget: { js: 100 },                  // KB per route
-//	  failOn: "error" | "warning",
+//	  budget: { js: 100, hydration: 40, islandJS: 60, route: 300 }, // KB per route
+//	  failOn: "error" | "warning",   // anything else is an error
 //	}
 func FromMap(m map[string]any, root string, env map[string]string) (Config, error) {
 	// A nil/absent `checks` key leaves the gates inactive: compiler-enforced
@@ -125,7 +133,7 @@ func FromMap(m map[string]any, root string, env map[string]string) (Config, erro
 		if !ok {
 			continue
 		}
-		// `true` means "enabled with the built-in default severity" — leave the
+		// `true` means "enabled with the built-in default severity" - leave the
 		// category absent so rulePolicy falls through to each rule's default.
 		if b, isBool := v.(bool); isBool {
 			if b {
@@ -168,10 +176,12 @@ func FromMap(m map[string]any, root string, env map[string]string) (Config, erro
 		if !ok {
 			return cfg, fmt.Errorf("checks.ignore: expected array, got %T", raw)
 		}
-		for _, item := range arr {
-			if s, ok := item.(string); ok {
-				cfg.Ignore[s] = true
+		for i, item := range arr {
+			s, ok := item.(string)
+			if !ok {
+				return cfg, fmt.Errorf("checks.ignore[%d]: expected string, got %T", i, item)
 			}
+			cfg.Ignore[s] = true
 		}
 	}
 
@@ -180,12 +190,20 @@ func FromMap(m map[string]any, root string, env map[string]string) (Config, erro
 		if !ok {
 			return cfg, fmt.Errorf("checks.budget: expected object, got %T", raw)
 		}
-		if v, ok := budget["js"]; ok {
-			kb, err := numberValue(v)
-			if err != nil {
-				return cfg, fmt.Errorf("checks.budget.js: %w", err)
+		budgetKB := map[string]*int{
+			"js":        &cfg.JSBudgetBytes,
+			"hydration": &cfg.HydrationBudgetBytes,
+			"islandJS":  &cfg.IslandBudgetBytes,
+			"route":     &cfg.RouteBudgetBytes,
+		}
+		for key, dst := range budgetKB {
+			if v, ok := budget[key]; ok {
+				kb, err := numberValue(v)
+				if err != nil {
+					return cfg, fmt.Errorf("checks.budget.%s: %w", key, err)
+				}
+				*dst = int(kb * 1024)
 			}
-			cfg.JSBudgetBytes = int(kb * 1024)
 		}
 	}
 
@@ -194,10 +212,11 @@ func FromMap(m map[string]any, root string, env map[string]string) (Config, erro
 		if !ok {
 			return cfg, fmt.Errorf("checks.failOn: expected string, got %T", v)
 		}
-		cfg.FailOn = ParseSeverity(s)
-		if cfg.FailOn == Off {
-			cfg.FailOn = Error
+		sev, err := parseFailOn(s)
+		if err != nil {
+			return cfg, fmt.Errorf("checks.failOn: %w", err)
 		}
+		cfg.FailOn = sev
 	}
 
 	if raw, ok := m["custom"]; ok {
@@ -205,14 +224,32 @@ func FromMap(m map[string]any, root string, env map[string]string) (Config, erro
 		if !ok {
 			return cfg, fmt.Errorf("checks.custom: expected array, got %T", raw)
 		}
-		for _, item := range arr {
-			if s, ok := item.(string); ok && strings.TrimSpace(s) != "" {
+		for i, item := range arr {
+			s, ok := item.(string)
+			if !ok {
+				return cfg, fmt.Errorf("checks.custom[%d]: expected string, got %T", i, item)
+			}
+			if strings.TrimSpace(s) != "" {
 				cfg.Custom = append(cfg.Custom, s)
 			}
 		}
 	}
 
 	return cfg, nil
+}
+
+// parseFailOn parses a failOn threshold. Only "error" and "warning" are valid
+// (ParseSeverity also folds unknown text into Off, which would make a typo in a
+// CI gate pass silently), so anything else is a config error.
+func parseFailOn(s string) (Severity, error) {
+	switch sev := ParseSeverity(s); {
+	case sev == Error || sev == Warning:
+		return sev, nil
+	case strings.EqualFold(strings.TrimSpace(s), "off"):
+		return Off, fmt.Errorf(`"off" is not a valid failOn value (valid values: "error", "warning"); to run no checks set checks.enabled to false`)
+	default:
+		return Off, fmt.Errorf("unknown value %q (valid values: \"error\", \"warning\")", s)
+	}
 }
 
 // severityValue interprets a config value as a severity. Strings map through

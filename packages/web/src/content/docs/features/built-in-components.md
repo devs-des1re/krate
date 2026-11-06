@@ -1,16 +1,17 @@
 ---
 title: Built-in Components
+description: Script, Style, Link, Icon, and Image components provided by Krate.
 order: 2
 ---
 
 # Built-in Components
 
 Krate provides a set of built-in components that are recognized by the compiler
-by name — they work without any import:
+by name - they work without any import:
 
 | Component | Usage | Description |
 |-----------|-------|-------------|
-| `<Head>` | `<Head><title>…</title></Head>` | Injects content into `<head>` |
+| `<Head>` | `<Head><title>...</title></Head>` | Injects content into `<head>` |
 | `<Script>` | `<Script src="/app.js"/>` or `<Script>{inline}</Script>` | External or inline script in `<body>` |
 | `<Style>` | `<Style>{css}</Style>` | Inline `<style>` in `<head>` |
 | `<Link>` | `<Link href="/about">About</Link>` | SPA-enabled `<a>` |
@@ -28,6 +29,37 @@ by name — they work without any import:
 
 Content inside `<Head>` is hoisted into the page's `<head>`. This works at any
 component depth, including inside layouts and plugin-generated pages.
+
+A `<title>`, `<meta>` or `<link>` rendered outside `<Head>` is also placed in
+the `<head>`, following React 19's document metadata rules: a reactive
+`<title>` updates `document.title`, and metadata inside `<svg>`, with an
+`itemProp`, or inside a conditional branch or list item stays in place (see
+the [React compatibility guide](/docs/guides/react-compatibility#document-metadata)).
+
+### `export const metadata`
+
+A page can also declare its head tags as a literal `metadata` object, the way a
+Next.js page does:
+
+```tsx
+export const metadata = {
+  title: "Pricing",
+  description: "Plans and pricing",
+  alternates: { canonical: "https://example.com/pricing" },
+  openGraph: { title: "Pricing", images: ["/og/pricing.png"] },
+  twitter: { card: "summary_large_image" },
+};
+
+export default function Pricing() {
+  return <main>...</main>;
+}
+```
+
+The build turns it into the document `<title>`, `description`, `keywords`,
+`robots`, `theme-color`, canonical and icon links, and the `og:*` and
+`twitter:*` tags. An explicit `<Head>` on the page wins over `metadata` for the
+same tag, and `metadata` wins over a layout's head. `generateMetadata`, computed
+values, and `metadata` in layouts work too: see [Metadata](/docs/features/metadata/).
 
 ## `<Script>`
 
@@ -60,21 +92,21 @@ Inline CSS is captured into `<head>`.
 <Link href="/new" target="_blank">New tab</Link>
 ```
 
-- **Prefetching** (default on) — `data-prefetch` triggers a prefetch on
+- **Prefetching** (default on) - `data-prefetch` triggers a prefetch on
   hover/focus (debounced) and on viewport entry (`IntersectionObserver`,
   `rootMargin: 200px`).
-- **`replace`** — swaps the history entry instead of pushing.
-- **`scroll`** — scrolls to top on forward navigation by default.
-- **Hash links** — `href="/about#section"` fetches the page then scrolls to
+- **`replace`** - swaps the history entry instead of pushing.
+- **`scroll`** - scrolls to top on forward navigation by default.
+- **Hash links** - `href="/about#section"` fetches the page then scrolls to
   the element.
-- **Modified clicks** — ⌘/Ctrl/Shift/Alt-click and middle-click are never
+- **Modified clicks** - Cmd/Ctrl/Shift/Alt-click and middle-click are never
   intercepted.
-- **External links** — `http(s)://`, `//`, `mailto:`, `tel:`, `#`,
+- **External links** - `http(s)://`, `//`, `mailto:`, `tel:`, `#`,
   `target="_blank"` and `download` become plain anchors the router ignores.
   `target="_blank"` auto-adds `rel="noopener noreferrer"`.
-- **Attributes** — `className` (→ `class`), `target`, `rel`, `title`, `id`,
+- **Attributes** - `className` (-> `class`), `target`, `rel`, `title`, `id`,
   `aria-label`, and other static attributes are forwarded.
-- **Active link** — after navigation, the link matching the current path gets
+- **Active link** - after navigation, the link matching the current path gets
   `aria-current="page"`.
 
 ## `<Icon>`
@@ -84,14 +116,24 @@ Inline CSS is captured into `<head>`.
 <Icon name="menu" />          // from the local icons/ registry
 ```
 
-- **Name resolution** — `icons/<name>.svg` in the project root (local, no
+- **Name resolution** - `icons/<name>.svg` in the project root (local, no
   network) or `set:name` from the Iconify API (e.g. `lucide:heart`).
 - Local SVGs keep their own `viewBox` (fallback `0 0 24 24`); user attributes
   override defaults.
-- SVG markup is **sanitized** before embedding (scripts, comments, and
-  `on*`/`javascript:`/`data:` attributes stripped).
+- The icon is `1em` square, so it scales with the surrounding text. Pass
+  `size={24}` (or `width`/`height`) to change it.
+- Paint comes from the source: a solid icon (`<svg fill="currentColor">`) keeps
+  its fill, an outline one keeps its `stroke`. An icon that sets no paint at
+  all is drawn as a 2px `currentColor` outline.
+- SVG markup is **sanitized** before embedding: scripts, `<foreignObject>`,
+  `<iframe>`/`<object>`/`<embed>`, comments, `on*`/`javascript:`/`data:`
+  attributes, SMIL `set`/`animate` that target a link, `<style>` that imports
+  or fetches external files, and external `<image>` are stripped.
 - Fetched SVGs are cached on disk (`.krate/cache/icons/`); icon names are
   validated against `[a-zA-Z0-9_.-]` (max 64 chars).
+- An icon that is not in `icons/` and cannot be fetched fails the build with
+  [KR8840](/docs/reference/diagnostics/) and the file and line of the `<Icon>`.
+  Nothing about the failure is written into the page.
 
 ## `<Image>`
 
@@ -111,18 +153,18 @@ Inline CSS is captured into `<head>`.
 `<Image>` compiles to a **WebP-first `<picture>`** at build time (pure-Go
 encoder, no cgo):
 
-- **WebP + fallback** — every variant is emitted twice: a
+- **WebP + fallback** - every variant is emitted twice: a
   `<source type="image/webp">` (lossy WebP via a pure-Go encoder) and a
   `<source>` in the original codec (JPEG, or PNG when the source has
   transparency). The `<img>` falls back to the original file for browsers
   without `<picture>`.
-- **Responsive** — a `srcset` at breakpoints (640/768/1024/1280/original
+- **Responsive** - a `srcset` at breakpoints (640/768/1024/1280/original
   width) for both codecs, plus `sizes`.
-- **CLS mitigation** — `width`/`height` attributes and `aspect-ratio:W/H`
+- **CLS mitigation** - `width`/`height` attributes and `aspect-ratio:W/H`
   (intrinsic ratio; width wins if props mismatch) reserve space.
-- **Blur placeholder (LQIP)** — a 16px box-blurred, base64 data-URI as the
+- **Blur placeholder (LQIP)** - a 16px box-blurred, base64 data-URI as the
   `background-image` until the real image loads.
-- **Loading** — `loading="lazy"` by default; `priority` forces `eager` +
+- **Loading** - `loading="lazy"` by default; `priority` forces `eager` +
   `fetchpriority="high"`; `decoding="async"` always set.
-- **Output** — variants written to `.krate/cache/images/` and copied to
+- **Output** - variants written to `.krate/cache/images/` and copied to
   `<outDir>/_krate/images/` (served at `/_krate/images/...`).

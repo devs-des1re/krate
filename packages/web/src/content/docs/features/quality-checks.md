@@ -1,6 +1,6 @@
 ---
 title: Quality Checks
-order: 13
+order: 15
 description: Compiler-enforced accessibility, SEO, and performance gates.
 sidebar:
   label: Quality Checks
@@ -10,7 +10,7 @@ sidebar:
 # Quality Checks
 
 Krate can enforce accessibility, SEO, and performance rules as part of the
-build. Checks run against the **final rendered HTML** — exactly what ships — so
+build. Checks run against the **final rendered HTML** - exactly what ships - so
 a rule can never be fooled by a component that only looks right at author time.
 
 Checks are strictly **opt-in**: without a `checks` key in `krate.config.ts`,
@@ -45,7 +45,7 @@ krate check ./site   # explicit project directory
 
 The command builds the site and re-reads the emitted `dist/` output, so the
 report reflects the real artifact. It exits `0` when no finding meets the
-fail-on threshold, and `1` otherwise — ideal for CI.
+fail-on threshold, and `1` otherwise - ideal for CI.
 
 ```sh
 # CI
@@ -65,12 +65,19 @@ krate check && echo "quality gates passed"
 | `a11y/tabindex` | a11y | warning | positive `tabindex` (breaks focus order) |
 | `a11y/aria-role` | a11y | warning | unknown/invalid ARIA `role` value |
 | `a11y/color-contrast` | a11y | warning | inline text/background contrast below 4.5:1 |
+| `a11y/broken-anchor` | a11y | warning | in-page `#id` link with no matching `id` |
 | `seo/title` | seo | error | missing `<title>` or title over 60 characters |
 | `seo/description` | seo | warning | missing/over-long meta description |
 | `seo/canonical` | seo | warning | missing `<link rel="canonical">` |
 | `seo/og` | seo | warning | missing Open Graph tags (`og:title`/`og:type`/`og:url`) |
+| `seo/og-image` | seo | warning | missing or relative `og:image` |
 | `seo/lang` | seo | warning | `<html>` missing `lang` |
+| `seo/broken-link` | seo | warning | internal link to an unknown route |
+| `seo/duplicate-meta` | seo | warning | title/description shared across pages |
 | `perf/js-budget` | perf | warning | route JS over `budget.js` |
+| `perf/hydration-budget` | perf | warning | route hydration bundle over `budget.hydration` |
+| `perf/island-budget` | perf | warning | island chunks over `budget.islandJS` |
+| `perf/route-budget` | perf | warning | HTML + CSS + JS + islands over `budget.route` |
 | `perf/image-dims` | perf | warning | `<img>` missing `width`/`height` (layout shift) |
 
 `alt=""` is accepted as intentional decoration; the `a11y/img-alt` rule only
@@ -96,24 +103,53 @@ checks: {
 
 `failOn` sets the minimum severity that fails the build/check. Warnings are
 still reported (and visible in the output) without failing when
-`failOn: "error"` (the default).
+`failOn: "error"` (the default). Only `"error"` and `"warning"` are valid: any
+other value (a typo such as `"warnings"`, or `"off"`) is a config error that
+lists the valid values, so a mistyped CI gate cannot pass silently. Use
+`enabled: false` to run no checks. Severity values elsewhere in `checks`
+(categories and `rules`) accept `"error"`, `"warning"` or `"off"`, and
+`ignore`/`custom` entries must be strings.
 
 ### Perf budgets
 
-`budget.js` is the per-route client-JS budget in **kilobytes**, counting the
-page's hydration bundle plus the shared runtime chunk:
+Budget values are per-route **kilobytes**. Four independent budgets are
+available:
+
+| Key | Rule | Counts |
+| --- | --- | --- |
+| `js` | `perf/js-budget` | page hydration + shared runtime |
+| `hydration` | `perf/hydration-budget` | the route's own hydration bundle |
+| `islandJS` | `perf/island-budget` | asynchronous island chunks referenced by the route |
+| `route` | `perf/route-budget` | HTML + linked CSS + JS + island chunks |
 
 ```ts
 checks: {
   perf: "warning",
-  budget: { js: 100 },
+  budget: {
+    js: 100,
+    hydration: 40,
+    islandJS: 120,
+    route: 300,
+  },
 }
 ```
+
+`js` is the total client-JS budget. `hydration` isolates the route bundle, so a
+page can stay small even when a shared runtime grows. `islandJS` catches an
+expensive compiled package or several islands on one route. `route` is the
+end-to-end transfer weight, including the emitted HTML and same-origin
+stylesheets. Island chunks are counted once per route even when several islands
+share a chunk.
+
+The browser conformance gate additionally measures island hydration time from
+navigation start and compares it with `KRATE_HYDRATION_BUDGET_MS` (default
+1500ms; CI uses 2500ms). This is a test/CI threshold, not a build failure: a
+slow machine does not fail `krate build`.
 
 ## Custom rules
 
 Author rules in TypeScript and point `checks.custom` at the module. Custom
-rules run in the embedded QuickJS runtime (`@krate/plugin` provides the types) —
+rules run in the embedded QuickJS runtime (`@krate/plugin` provides the types) -
 no Node and no subprocess.
 
 ```ts
@@ -142,11 +178,11 @@ checks: {
 
 A custom rule receives:
 
-- `page.route` — URL route (e.g. `/blog/hello`)
-- `page.source` — source path relative to the project root
-- `page.html` — the final rendered HTML
-- `page.jsBytes` — the route's client-JS weight
-- `page.ast` — the parsed program as a kind-tagged
+- `page.route` - URL route (e.g. `/blog/hello`)
+- `page.source` - source path relative to the project root
+- `page.html` - the final rendered HTML
+- `page.jsBytes` - the route's client-JS weight
+- `page.ast` - the parsed program as a kind-tagged
   [AST document](/docs/features/typed-routes/) (when available)
 
 and returns an array of `{ rule?, message, severity?, line?, col?, hint? }`. A
@@ -160,6 +196,6 @@ build errors:
 ```
   /pricing
     x seo/title  page has no <title>
-      hint: Export a <Head><title>…</title></Head> or rely on seo.siteName.
+      hint: Export a <Head><title>...</title></Head> or rely on seo.siteName.
     ! perf/js-budget  route ships 212.4KB of JS (budget 150.0KB)
 ```

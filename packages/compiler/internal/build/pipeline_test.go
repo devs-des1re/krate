@@ -1,6 +1,7 @@
 package build
 
 import (
+	"fmt"
 	"image"
 	"image/color"
 	"image/png"
@@ -8,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/kratejs/krate/packages/compiler/internal/config"
@@ -27,18 +29,38 @@ func testProjectPath(t *testing.T) string {
 	return root
 }
 
+// buildTestProject builds the shared examples/ project once per test process
+// and reuses the output. Many integration tests need the built site; rebuilding
+// it for each is by far the dominant cost (and under -race it exceeded the Go
+// test timeout). The examples sources are not mutated between tests, so a single
+// build is sound.
+var (
+	e2eBuildOnce sync.Once
+	e2eBuildDir  string
+	e2eBuildErr  error
+)
+
 func buildTestProject(t *testing.T) string {
 	t.Helper()
+	// Resolve the path per call so requireE2E's skip logic still applies.
 	root := testProjectPath(t)
-	cfg, err := config.Load(root)
-	if err != nil {
-		t.Fatalf("config.Load: %v", err)
+
+	e2eBuildOnce.Do(func() {
+		cfg, err := config.Load(root)
+		if err != nil {
+			e2eBuildErr = fmt.Errorf("config.Load: %w", err)
+			return
+		}
+		if err := New(root, cfg).BuildAll(); err != nil {
+			e2eBuildErr = fmt.Errorf("BuildAll: %w", err)
+			return
+		}
+		e2eBuildDir = cfg.OutDir
+	})
+	if e2eBuildErr != nil {
+		t.Fatal(e2eBuildErr)
 	}
-	b := New(root, cfg)
-	if err := b.BuildAll(); err != nil {
-		t.Fatalf("BuildAll: %v", err)
-	}
-	return cfg.OutDir
+	return e2eBuildDir
 }
 
 func readOut(t *testing.T, outDir, rel string) string {
@@ -58,7 +80,8 @@ func TestBuildLayoutChildrenInjection(t *testing.T) {
 	if !strings.Contains(html, `<nav>`) {
 		t.Errorf("expected layout nav in page, got:\n%.400s", html)
 	}
-	if !strings.Contains(html, `&copy; 2026`) {
+	// JSX text entities are decoded (React semantics), so `&copy;` renders as .
+	if !strings.Contains(html, "\u00a9 2026") {
 		t.Errorf("expected layout footer in page, got:\n%.400s", html)
 	}
 	if !strings.Contains(html, `class=layout`) {
@@ -66,13 +89,17 @@ func TestBuildLayoutChildrenInjection(t *testing.T) {
 	}
 }
 
-// TestBuildLoadingPageRendered verifies src/pages/loading.tsx is emitted and
-// rendered into the loading route's HTML.
+// TestBuildLoadingPageRendered verifies src/pages/loading.tsx is the loading
+// UI of the pages beside it (a data-krate-loading template the SPA router
+// overlays during navigation), not a stray /loading route.
 func TestBuildLoadingPageRendered(t *testing.T) {
 	outDir := buildTestProject(t)
-	html := readOut(t, outDir, filepath.Join("loading", "index.html"))
-	if !strings.Contains(html, "Loading page content...") {
-		t.Errorf("expected loading page content rendered, got:\n%.400s", html)
+	if _, err := os.Stat(filepath.Join(outDir, "loading", "index.html")); err == nil {
+		t.Errorf("loading.tsx must not be emitted as a /loading page")
+	}
+	html := readOut(t, outDir, filepath.Join("about", "index.html"))
+	if !strings.Contains(html, "<template data-krate-loading>") || !strings.Contains(html, "Loading page content...") {
+		t.Errorf("expected the loading template in the page, got:\n%.400s", html)
 	}
 }
 
@@ -84,7 +111,7 @@ func TestBuildMixedTierPage(t *testing.T) {
 	outDir := buildTestProject(t)
 	html := readOut(t, outDir, filepath.Join("server-runtime-demo", "index.html"))
 
-	// Server components are evaluated by QuickJS at build time → a real
+	// Server components are evaluated by QuickJS at build time -> a real
 	// millisecond epoch timestamp is baked into the static HTML.
 	tsRe := regexp.MustCompile(`Compiled at build time: (\d{13})`)
 	m := tsRe.FindStringSubmatch(html)
@@ -92,7 +119,7 @@ func TestBuildMixedTierPage(t *testing.T) {
 		t.Fatalf("expected a 13-digit QuickJS Date.now() timestamp baked at build, got:\n%.600s", html)
 	}
 
-	// Runtime components are NOT baked — each becomes a region splice marker
+	// Runtime components are NOT baked - each becomes a region splice marker
 	// (<!--region:region-<slotID>--><!--/region:region-<slotID>-->) that the
 	// sidecar fills at request time.
 	if !strings.Contains(html, "<!--region:") {
@@ -111,7 +138,7 @@ func TestBuildMixedTierPage(t *testing.T) {
 func TestBuildRuntimeComponentBundlesCompiled(t *testing.T) {
 	outDir := buildTestProject(t)
 	for _, name := range []string{"RuntimeWidget.runtime.js", "RuntimeCard.runtime.js"} {
-		p := filepath.Join(outDir, "server-components", name)
+		p := ServerOutPath(outDir, "server-components", name)
 		if !fileExists(p) {
 			t.Errorf("expected compiled runtime component bundle: %s", p)
 			continue
@@ -133,7 +160,7 @@ func TestGenerateHTMLDevModePreservesInlineScripts(t *testing.T) {
 	style := `<style>.a{color:red}</style>`
 	html := generateHTML(
 		"<div>body</div>", "<title>t</title>", inline, style,
-		[]string{}, "", "runtime.js", "/", true,
+		[]string{}, "", "runtime.js", "/", true, "", "", "",
 	)
 	if !strings.Contains(html, `console.log("inline")`) {
 		t.Errorf("dev-mode HTML dropped inline script:\n%s", html)
@@ -209,35 +236,80 @@ func TestBuildLocalIconsFolder(t *testing.T) {
 	if strings.Contains(html, "onclick") || strings.Contains(html, "alert(1)") {
 		t.Errorf("malicious event handler not sanitized:\n%.800s", html)
 	}
-	if strings.Contains(html, "<script>") {
+	if strings.Contains(html, "<script>alert") {
 		t.Errorf("malicious <script> not stripped:\n%.800s", html)
 	}
 }
 
-// TestBuildLocalIconsFolderMissing verifies a missing local icon produces an
-// escaped error span instead of raw file content and does not break the build.
-func TestBuildLocalIconsFolderMissing(t *testing.T) {
+// TestBuildStaticMapIconsAndImages ensures values that only become literal
+// after static map substitution are still lowered by the late asset transforms.
+func TestBuildStaticMapIconsAndImages(t *testing.T) {
 	root := t.TempDir()
-	if err := os.MkdirAll(filepath.Join(root, "src", "pages"), 0755); err != nil {
-		t.Fatal(err)
-	}
-	page := `export default function Page() { return <Icon name="not-registered" />; }`
-	if err := os.WriteFile(filepath.Join(root, "src", "pages", "index.tsx"), []byte(page), 0644); err != nil {
-		t.Fatal(err)
+	write := func(rel, content string) {
+		t.Helper()
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0755); err != nil {
+			t.Fatalf("mkdir %s: %v", filepath.Dir(p), err)
+		}
+		if err := os.WriteFile(p, []byte(content), 0644); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
+		}
 	}
 
+	write("src/pages/index.tsx", `const media = [{ icon: "menu", src: "/hero.svg" }];
+export default function Page() {
+  return <div>{media.map((m) => (
+    <a><Icon name={m.icon} /><Image src={m.src} alt="Hero" /></a>
+  ))}</div>;
+}`)
+	write("icons/menu.svg", `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg>`)
+	write("public/hero.svg", `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><circle cx="5" cy="5" r="4"/></svg>`)
+
 	cfg := config.Default()
+	cfg.Images.Unoptimized = true
 	cfg.Resolve(root)
-	b := New(root, cfg)
-	if err := b.BuildAll(); err != nil {
+	if err := New(root, cfg).BuildAll(); err != nil {
 		t.Fatalf("BuildAll: %v", err)
 	}
-	html := readOut(t, cfg.OutDir, filepath.Join("index.html"))
-	if !strings.Contains(html, `[local icon`) {
-		t.Errorf("expected escaped error span for missing icon, got:\n%.800s", html)
+	html := readOut(t, cfg.OutDir, "index.html")
+	if !strings.Contains(html, "M4 6h16") {
+		t.Errorf("static map icon was not transformed:\n%.1000s", html)
 	}
-	if strings.Contains(html, `&lt;`) {
-		t.Errorf("error span should not double-escape HTML, got:\n%.800s", html)
+	if !strings.Contains(html, "src=/hero.svg") && !strings.Contains(html, `src="/hero.svg"`) {
+		t.Errorf("static map image was not transformed:\n%.1000s", html)
+	}
+}
+
+// TestBuildMissingIconFailsTheBuild verifies an <Icon> that cannot be resolved
+// is a KR8840 build error: the message never reaches the page and the icon
+// path appears only in the diagnostic, relative to the project.
+func TestBuildMissingIconFailsTheBuild(t *testing.T) {
+	cases := map[string]string{
+		"literal name": `export default function Page() { return <main><Icon name="not-registered" /></main>; }`,
+		"dynamic name": `const items = [{ icon: "not-registered" }];
+export default function Page() { return <main>{items.map((m) => <Icon name={m.icon} />)}</main>; }`,
+	}
+	for name, page := range cases {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			writeFileRel(t, root, "src/pages/index.tsx", page)
+			cfg := config.Default()
+			cfg.Resolve(root)
+			err := New(root, cfg).BuildAll()
+			if err == nil {
+				t.Fatal("BuildAll succeeded although the icon does not exist")
+			}
+			msg := err.Error()
+			if !strings.Contains(msg, "KR8840") || !strings.Contains(msg, "not-registered") {
+				t.Errorf("error lacks the code or icon name:\n%s", msg)
+			}
+			if strings.Contains(msg, filepath.Join(root, "icons")) {
+				t.Errorf("diagnostic shows the absolute icon path, want a project-relative one:\n%s", msg)
+			}
+			if data, rerr := os.ReadFile(filepath.Join(cfg.OutDir, "index.html")); rerr == nil && strings.Contains(string(data), "not-registered") {
+				t.Errorf("icon error text reached the page:\n%.600s", data)
+			}
+		})
 	}
 }
 
@@ -245,10 +317,47 @@ func TestBuildLocalIconsFolderMissing(t *testing.T) {
 func TestGenerateHTMLMinifiedNotDev(t *testing.T) {
 	html := generateHTML(
 		"<div>body</div>", "<title>t</title>", "", "",
-		[]string{}, "", "", "/", false,
+		[]string{}, "", "", "/", false, "", "", "",
 	)
 	if strings.Contains(html, "__krate/hotreload") {
 		t.Errorf("production HTML should not include dev hot-reload script:\n%s", html)
+	}
+}
+
+// TestGenerateHTMLPreloadsHydrationScripts verifies production HTML preloads the
+// shared runtime chunk and the page hydration script in <head> so their fetches
+// start during HTML parse. Dev mode does not (its overlay has its own path).
+func TestGenerateHTMLPreloadsHydrationScripts(t *testing.T) {
+	html := generateHTML(
+		"<div></div>", "<title>t</title>", "", "",
+		nil, "index.abc123.js", "chunks/runtime.def456.js", "about", false, "", "", "",
+		"/chunks/Search-aaa111.js",
+	)
+	if !strings.Contains(html, `<link rel="preload" as="script" href="/chunks/runtime.def456.js">`) {
+		t.Errorf("missing runtime preload:\n%s", html)
+	}
+	if !strings.Contains(html, `<link rel="preload" as="script" href="/about/index.abc123.js">`) {
+		t.Errorf("missing page-script preload:\n%s", html)
+	}
+	if !strings.Contains(html, `<link rel="modulepreload" href="/chunks/Search-aaa111.js">`) {
+		t.Errorf("missing dynamic-chunk modulepreload:\n%s", html)
+	}
+
+	dev := generateHTML("<div></div>", "", "", "", nil, "index.abc123.js", "chunks/runtime.def456.js", "about", true, "", "", "")
+	if strings.Contains(dev, `rel="preload" as="script"`) {
+		t.Errorf("dev HTML should not preload hydration scripts:\n%s", dev)
+	}
+}
+
+func TestDynamicChunkURLs(t *testing.T) {
+	js := `var a=import("/chunks/Search-abc123.js");var b=import('/chunks/Chart-def456.js');var c=import("/chunks/Search-abc123.js");`
+	got := dynamicChunkURLs(js)
+	want := []string{"/chunks/Search-abc123.js", "/chunks/Chart-def456.js"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("dynamicChunkURLs = %v, want %v", got, want)
+	}
+	if dynamicChunkURLs("var x = 1;") != nil {
+		t.Fatal("expected nil for JS without chunks")
 	}
 }
 
@@ -359,10 +468,10 @@ func TestBuildImageResponsive(t *testing.T) {
 		t.Fatalf("image output dir: %v", err)
 	}
 	var webpFound bool
-	// Each variant must carry a hex cache-key tag followed by a width, e.g.
-	// `<tag>_640.webp` — the "tag verification" that the emitted filenames are
-	// content-hashed (cache key) rather than unversioned.
-	tagRe := regexp.MustCompile(`^[0-9a-f]{16}_\d+\.webp$`)
+	// Each variant must carry a hex cache-key tag and width, e.g.
+	// `<tag>_640.webp` or `<tag>_q82_640.webp` - the "tag verification" that the
+	// emitted filenames are content-hashed (cache key) rather than unversioned.
+	tagRe := regexp.MustCompile(`^[0-9a-f]{16}(_q\d+)?_\d+\.webp$`)
 	for _, e := range entries {
 		if strings.HasSuffix(e.Name(), ".webp") {
 			webpFound = true
@@ -452,12 +561,12 @@ func TestBuildLinkOutput(t *testing.T) {
 		t.Errorf("docs link should not prefetch: %q", docs)
 	}
 
-	// replace → history.replaceState.
+	// replace -> history.replaceState.
 	if faq := byHref("/faq"); !strings.Contains(faq, "data-krate-replace") {
 		t.Errorf("faq link missing data-krate-replace: %q", faq)
 	}
 
-	// scroll={false} → data-krate-scroll="false".
+	// scroll={false} -> data-krate-scroll="false".
 	if blog := byHref("/blog"); !strings.Contains(blog, `data-krate-scroll="false"`) {
 		t.Errorf("blog link missing data-krate-scroll: %q", blog)
 	}
@@ -490,10 +599,10 @@ func TestBuildLinkOutput(t *testing.T) {
 	}
 }
 
-// TestRuntimeChunkIncludesReconcile guards against the SPA router losing its
-// dependency: reconcileTrees lives in reconcile.ts, which the runtime bundle
-// (packages/runtime/bundle.cjs) must include for navigation to work.
-func TestRuntimeChunkIncludesReconcile(t *testing.T) {
+// TestRuntimeChunkIncludesRouter guards the eager runtime bundle against losing
+// the SPA router. The router swaps the app shell directly; reconcileTrees is a
+// separate module and must not be pulled into every hydrated page.
+func TestRuntimeChunkIncludesRouter(t *testing.T) {
 	pkgDir, err := os.Getwd()
 	if err != nil {
 		t.Fatal(err)
@@ -501,16 +610,34 @@ func TestRuntimeChunkIncludesReconcile(t *testing.T) {
 	root := filepath.Clean(filepath.Join(pkgDir, "..", "..", "..", ".."))
 	rt := loadRuntimeFromDisk(root)
 	if rt == "" {
-		t.Skip("runtime dist not available in this environment")
+		requireE2E(t, "runtime dist not available in this environment")
 	}
-	for _, want := range []string{
-		"reconcileTrees",
-		"reconcile",
-		"conditional",
-	} {
+	for _, want := range []string{"initRouter", "replaceChildren", "popstate"} {
 		if !strings.Contains(rt, want) {
-			t.Errorf("runtime bundle missing %q — add reconcile.js to bundle.cjs", want)
+			t.Errorf("runtime bundle missing %q", want)
 		}
+	}
+	if strings.Contains(rt, "reconcileTrees") {
+		t.Error("reconcileTrees must not be bundled into the eager runtime")
+	}
+}
+
+// TestImportMapBeforeModulePreload guards Firefox: an import map must be
+// parsed before modulepreload starts resolving bare specifiers.
+func TestImportMapBeforeModulePreload(t *testing.T) {
+	html := generateHTML(
+		"<div></div>", "<title>t</title>", "", "",
+		nil, "index.abc123.js", "chunks/runtime.def456.js", "about", false, "",
+		`<script type="importmap">{"imports":{"preact":"/preact.js"}}</script>`,
+		"", "/chunks/island.abc.js",
+	)
+	importAt := strings.Index(html, `type="importmap"`)
+	preloadAt := strings.Index(html, `rel="modulepreload"`)
+	if importAt < 0 || preloadAt < 0 {
+		t.Fatalf("missing import map or modulepreload:\n%s", html)
+	}
+	if importAt > preloadAt {
+		t.Errorf("import map must precede modulepreload:\n%s", html)
 	}
 }
 
@@ -530,7 +657,7 @@ func TestPageScriptSrc(t *testing.T) {
 		{"docs/getting-started", "index.c.js", "/docs/getting-started/index.c.js"},
 	}
 	for _, tt := range tests {
-		if got := pageScriptSrc(tt.route, tt.jsFile); got != tt.want {
+		if got := pageScriptSrc(tt.route, tt.jsFile, ""); got != tt.want {
 			t.Errorf("pageScriptSrc(%q, %q) = %q, want %q", tt.route, tt.jsFile, got, tt.want)
 		}
 	}
@@ -557,7 +684,7 @@ func TestBuildNestedEffectsEmitted(t *testing.T) {
 }
 
 // TestBuildMemoEmitted verifies a createMemo declaration and its reactive getter
-// binding are both present in a page's hydration JS — without the declaration
+// binding are both present in a page's hydration JS - without the declaration
 // the getter reference (e.g. doubled()) would throw ReferenceError.
 func TestBuildMemoEmitted(t *testing.T) {
 	outDir := buildTestProject(t)
@@ -570,14 +697,16 @@ func TestBuildMemoEmitted(t *testing.T) {
 	if !strings.Contains(js, "createMemo(") {
 		t.Errorf("expected createMemo declaration emitted, got:\n%.600s", js)
 	}
-	if !strings.Contains(js, "()=>r())") && !strings.Contains(js, "()=>i())") {
+	// The minifier picks the memo's name; the binding must read that getter.
+	memo := regexp.MustCompile(`var ([A-Za-z_$][\w$]*)=createMemo\(`).FindStringSubmatch(js)
+	if memo == nil || !strings.Contains(js, "()=>"+memo[1]+"())") {
 		t.Errorf("expected reactive memo getter binding emitted, got:\n%.600s", js)
 	}
 }
 
 // TestBuildResourceEmitted verifies a createResource declaration (getter +
 // actions) is emitted into the page hydration JS and that references to the
-// resource getter/actions (loading/state/refetch) resolve against it — no
+// resource getter/actions (loading/state/refetch) resolve against it - no
 // ReferenceError and no internal sentinel leaked into the output.
 func TestBuildResourceEmitted(t *testing.T) {
 	outDir := buildTestProject(t)
@@ -633,5 +762,63 @@ func writePNG(t *testing.T, path string, img image.Image) {
 	defer f.Close()
 	if err := png.Encode(f, img); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Icons size to the text by default, keep the source's own paint, and accept
+// `size` as width and height, through both the literal-name and the
+// evaluated-name lowering paths.
+func TestBuildIconSizingAndPaint(t *testing.T) {
+	root := t.TempDir()
+	writeFileRel(t, root, "icons/solid.svg", `<svg viewBox="0 0 20 20" fill="currentColor"><path d="M0 0h20v20z"/></svg>`)
+	writeFileRel(t, root, "icons/line.svg", `<svg viewBox="0 0 24 24"><path d="M4 6h16"/></svg>`)
+	writeFileRel(t, root, "src/pages/index.tsx", `function Tag(props: { icon: string }) {
+  return <i><Icon name={props.icon} size={40} /></i>;
+}
+export default function Page() {
+  return (
+    <main>
+      <p>text <Icon name="solid" /> more</p>
+      <Icon name="solid" size={32} />
+      <Icon name="line" width="48" />
+      <Tag icon="solid" />
+    </main>
+  );
+}`)
+	cfg := config.Default()
+	cfg.Resolve(root)
+	cfg.Minify = false
+	if err := New(root, cfg).BuildAll(); err != nil {
+		t.Fatalf("BuildAll: %v", err)
+	}
+	html := readOut(t, cfg.OutDir, "index.html")
+	svgs := regexp.MustCompile(`<svg[^>]*>`).FindAllString(html, -1)
+	if len(svgs) != 4 {
+		t.Fatalf("want 4 svgs, got %d:\n%s", len(svgs), html)
+	}
+	has := func(s, attr string) bool {
+		return strings.Contains(s, " "+attr+"=") || strings.Contains(s, " "+attr+" ")
+	}
+	attrVal := func(s, name string) string {
+		m := regexp.MustCompile(`\s` + name + `="?([^"\s>]+)`).FindStringSubmatch(s)
+		if m == nil {
+			return ""
+		}
+		return m[1]
+	}
+	if attrVal(svgs[0], "width") != "1em" || attrVal(svgs[0], "height") != "1em" {
+		t.Errorf("default size should be 1em: %s", svgs[0])
+	}
+	if attrVal(svgs[0], "fill") != "currentColor" || has(svgs[0], "stroke") || has(svgs[0], "stroke-width") {
+		t.Errorf("solid icon must keep its fill and not gain a stroke: %s", svgs[0])
+	}
+	if attrVal(svgs[1], "width") != "32" || attrVal(svgs[1], "height") != "32" || has(svgs[1], "size") {
+		t.Errorf("size={32} should become width and height: %s", svgs[1])
+	}
+	if attrVal(svgs[2], "width") != "48" || attrVal(svgs[2], "fill") != "none" || attrVal(svgs[2], "stroke") != "currentColor" {
+		t.Errorf("bare icon keeps the stroke default and an explicit width wins: %s", svgs[2])
+	}
+	if attrVal(svgs[3], "width") != "40" || attrVal(svgs[3], "fill") != "currentColor" {
+		t.Errorf("evaluated-name path should size and paint the same way: %s", svgs[3])
 	}
 }

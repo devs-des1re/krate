@@ -2,6 +2,7 @@ package build
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -108,7 +109,12 @@ export function generateStaticParams() {
 		t.Fatal(err)
 	}
 
-	paramSets, err := executeGenerateStaticParams(pagePath, nil, "")
+	cfg := config.Default()
+	cfg.PagesDir = pagesDir
+	cfg.OutDir = filepath.Join(tmpDir, "dist")
+	b := New(tmpDir, cfg)
+
+	paramSets, err := b.executeGenerateStaticParams(pagePath, b.newBundler())
 	if err != nil {
 		t.Fatalf("executeGenerateStaticParams: %v", err)
 	}
@@ -125,6 +131,133 @@ export function generateStaticParams() {
 	}
 }
 
+// TestExecuteGenerateStaticParamsNodeFallback covers the runtime fallback: a
+// generateStaticParams that imports a Node built-in can't run on the embedded
+// QuickJS runtime (esbuild leaves the built-in external), so it must bundle to
+// ESM and run under the configured runtime.
+func TestExecuteGenerateStaticParamsNodeFallback(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not available")
+	}
+	tmpDir := t.TempDir()
+	pagesDir := filepath.Join(tmpDir, "src", "pages")
+	if err := os.MkdirAll(pagesDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	pageContent := `import { homedir } from "node:os";
+export function generateStaticParams() {
+  return [{ id: homedir() ? "ok" : "no" }];
+}
+`
+	pagePath := filepath.Join(pagesDir, "video", "[id].tsx")
+	if err := os.MkdirAll(filepath.Dir(pagePath), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pagePath, []byte(pageContent), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default()
+	cfg.PagesDir = pagesDir
+	cfg.OutDir = filepath.Join(tmpDir, "dist")
+	b := New(tmpDir, cfg)
+
+	paramSets, err := b.executeGenerateStaticParams(pagePath, b.newBundler())
+	if err != nil {
+		t.Fatalf("executeGenerateStaticParams (node fallback): %v", err)
+	}
+	if len(paramSets) != 1 || paramSets[0]["id"] != "ok" {
+		t.Fatalf("unexpected param sets: %+v", paramSets)
+	}
+}
+
+// TestExecuteGenerateStaticParamsRuntime exercises the bundled fallback under
+// each supported build-time runtime (node, bun, deno). CI installs Bun and Deno
+// so this is the runtime matrix gate.
+func TestExecuteGenerateStaticParamsRuntime(t *testing.T) {
+	for _, rt := range []string{"node", "bun", "deno"} {
+		t.Run(rt, func(t *testing.T) {
+			if _, err := exec.LookPath(rt); err != nil {
+				t.Skipf("%s not available", rt)
+			}
+			tmpDir := t.TempDir()
+			pagesDir := filepath.Join(tmpDir, "src", "pages")
+			pagePath := filepath.Join(pagesDir, "video", "[id].tsx")
+			if err := os.MkdirAll(filepath.Dir(pagePath), 0755); err != nil {
+				t.Fatal(err)
+			}
+			pageContent := `import { homedir } from "node:os";
+export function generateStaticParams() {
+  return [{ id: homedir() ? "ok" : "no" }];
+}
+`
+			if err := os.WriteFile(pagePath, []byte(pageContent), 0644); err != nil {
+				t.Fatal(err)
+			}
+			cfg := config.Default()
+			cfg.PagesDir = pagesDir
+			cfg.OutDir = filepath.Join(tmpDir, "dist")
+			cfg.Runtime = rt
+			b := New(tmpDir, cfg)
+			paramSets, err := b.executeGenerateStaticParams(pagePath, b.newBundler())
+			if err != nil {
+				t.Fatalf("executeGenerateStaticParams (%s): %v", rt, err)
+			}
+			if len(paramSets) != 1 || paramSets[0]["id"] != "ok" {
+				t.Fatalf("%s param sets: %+v", rt, paramSets)
+			}
+		})
+	}
+}
+
+func TestExecuteGenerateStaticParamsBundleResolvesAlias(t *testing.T) {
+	if _, err := exec.LookPath("node"); err != nil {
+		t.Skip("node not available")
+	}
+	tmpDir := t.TempDir()
+	pagesDir := filepath.Join(tmpDir, "src", "pages")
+	libDir := filepath.Join(tmpDir, "src", "lib")
+	if err := os.MkdirAll(filepath.Join(pagesDir, "video"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(libDir, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	helper := `import { homedir } from "node:os";
+export function params() {
+  return [{ id: homedir() ? "alias-ok" : "no" }];
+}
+`
+	if err := os.WriteFile(filepath.Join(libDir, "params.ts"), []byte(helper), 0644); err != nil {
+		t.Fatal(err)
+	}
+	page := `import { params } from "@lib/params";
+export function generateStaticParams() {
+  return params();
+}
+`
+	pagePath := filepath.Join(pagesDir, "video", "[id].tsx")
+	if err := os.WriteFile(pagePath, []byte(page), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default()
+	cfg.PagesDir = pagesDir
+	cfg.OutDir = filepath.Join(tmpDir, "dist")
+	cfg.TSBaseDir = tmpDir
+	cfg.PathAliases = config.PathAliases{{Prefix: "@lib/*", Targets: []string{"./src/lib/*"}}}
+	b := New(tmpDir, cfg)
+
+	paramSets, err := b.executeGenerateStaticParams(pagePath, b.newBundler())
+	if err != nil {
+		t.Fatalf("executeGenerateStaticParams: %v", err)
+	}
+	if len(paramSets) != 1 || paramSets[0]["id"] != "alias-ok" {
+		t.Fatalf("unexpected param sets: %+v", paramSets)
+	}
+}
 func TestResolveStaticParamsPages(t *testing.T) {
 	tmpDir := t.TempDir()
 	pagesDir := filepath.Join(tmpDir, "src", "pages")
@@ -213,7 +346,7 @@ func TestInjectStaticParams(t *testing.T) {
 			tmpDir := t.TempDir()
 			pagesDir := filepath.Join(tmpDir, "src", "pages")
 			pagePath := filepath.Join(pagesDir, "video", "[id].tsx")
-			os.MkdirAll(filepath.Dir(pagePath), 0755)
+			_ = os.MkdirAll(filepath.Dir(pagePath), 0755)
 			if err := os.WriteFile(pagePath, []byte(tc.src), 0644); err != nil {
 				t.Fatal(err)
 			}
@@ -344,11 +477,11 @@ func TestInjectDynamicRoutePlaceholdersStaticRoot(t *testing.T) {
 	if !tree.Root.IsSSREval {
 		t.Fatal("static dynamic-route root should be SSREval'd with sentinels")
 	}
-	if got := tree.Root.SSREvalBindings["id"]; got != dynamicParamSentinel("id") {
-		t.Errorf("binding id = %q, want sentinel %q", got, dynamicParamSentinel("id"))
+	if got := tree.Root.SSREvalBindings["id"]; got.StringValue() != dynamicParamSentinel("id") {
+		t.Errorf("binding id = %#v, want sentinel %q", got, dynamicParamSentinel("id"))
 	}
-	if got := tree.Root.SSREvalBindings["params"]; !strings.Contains(got, dynamicParamSentinel("id")) {
-		t.Errorf("params binding = %q, want it to carry the sentinel", got)
+	if got, _ := tree.Root.SSREvalBindings["params"].Get("id"); got.StringValue() != dynamicParamSentinel("id") {
+		t.Errorf("params binding = %#v, want it to carry the sentinel", got)
 	}
 }
 
