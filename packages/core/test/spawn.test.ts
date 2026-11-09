@@ -1,9 +1,9 @@
 import { describe, expect, it } from 'vitest';
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { commandSpec, quoteWindowsArg } from '../src/spawn.js';
-import { isInstalledPackage, printVersion, resolveBinary, versionMismatchWarning } from '../src/binary.js';
+import { ensureExecutable, isInstalledPackage, printVersion, resolveBinary, scaffoldTag, spawnFailure, versionMismatchWarning } from '../src/binary.js';
 
 describe('commandSpec', () => {
   it('spawns directly without a shell on POSIX', () => {
@@ -135,5 +135,71 @@ describe('published files', () => {
     const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf-8'));
     expect(pkg.files).toContain('bin/krate.js');
     expect(pkg.files).not.toContain('bin');
+  });
+});
+
+describe('ensureExecutable', () => {
+  const posix = process.platform !== 'win32';
+  const compiler = (root: string, sub: string) => {
+    const dir = join(root, sub);
+    mkdirSync(dir, { recursive: true });
+    const bin = join(dir, 'krate');
+    writeFileSync(bin, '#!/bin/sh\n');
+    chmodSync(bin, 0o644);
+    return bin;
+  };
+
+  it.runIf(posix)('restores the exec bit on an installed compiler', () => {
+    const root = mkdtempSync(join(tmpdir(), 'krate-exec-'));
+    const bin = compiler(root, 'node_modules/@krate/core-linux-x64/bin');
+    ensureExecutable(bin);
+    expect(statSync(bin).mode & 0o777).toBe(0o755);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it.runIf(posix)('leaves a binary outside node_modules alone', () => {
+    const root = mkdtempSync(join(tmpdir(), 'krate-exec-'));
+    const bin = compiler(root, 'custom/bin');
+    ensureExecutable(bin);
+    expect(statSync(bin).mode & 0o777).toBe(0o644);
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  it('does nothing on Windows or for a missing file', () => {
+    expect(() => ensureExecutable('C:\\node_modules\\krate.exe', 'win32')).not.toThrow();
+    expect(() => ensureExecutable('/nope/node_modules/krate', 'linux')).not.toThrow();
+  });
+});
+
+describe('spawnFailure', () => {
+  const failure = (code: string) => Object.assign(new Error(`spawn x ${code}`), { code });
+
+  it('names the fix for a binary that cannot be executed', () => {
+    const text = spawnFailure(failure('EACCES'), '/app/node_modules/x/bin/krate');
+    expect(text).toContain('spawn x EACCES');
+    expect(text).toContain('chmod +x /app/node_modules/x/bin/krate');
+  });
+
+  it('names the platform package when the binary is missing', () => {
+    expect(spawnFailure(failure('ENOENT'), '/x', '@krate/core-linux-x64')).toContain('@krate/core-linux-x64 is not installed');
+  });
+
+  it('passes other errors through', () => {
+    expect(spawnFailure(failure('EBUSY'), '/x')).toBe('Failed to run krate binary: spawn x EBUSY');
+  });
+});
+
+describe('scaffoldTag', () => {
+  it('follows the pre-release channel the release publishes', () => {
+    expect(scaffoldTag('0.5.0-beta.3')).toBe('beta');
+    expect(scaffoldTag('0.5.0-alpha.4')).toBe('alpha');
+    expect(scaffoldTag('1.0.0-rc.1')).toBe('rc');
+    expect(scaffoldTag('1.0.0-rc1')).toBe('rc1');
+  });
+
+  it('asks for latest on a stable version', () => {
+    expect(scaffoldTag('0.5.0')).toBe('latest');
+    expect(scaffoldTag('1.2.3+build.5')).toBe('latest');
+    expect(scaffoldTag('dev')).toBe('latest');
   });
 });

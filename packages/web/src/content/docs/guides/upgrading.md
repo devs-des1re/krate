@@ -36,7 +36,7 @@ In order, with the one that bites first at the top:
 
 | # | What changed | How you notice | What to do |
 |---|--------------|----------------|------------|
-| 1 | tsconfig `baseUrl` is honoured | `cannot resolve import "@/..." (matched tsconfig path alias)` | `krate fix --apply` |
+| 1 | tsconfig `baseUrl` is honoured | A `KR7125` warning on every build (a target that exists nowhere is an error: `cannot resolve import "@/..."`) | `krate fix --apply` |
 | 2 | Tailwind output follows v4 | Rings, shadows, blurs, outlines and colours look different; a reset appears | [Rename classes](#tailwind-output-follows-v4), or `tailwind.preflight: false` |
 | 3 | `krate dev` binds `127.0.0.1` | Connection refused from a container, WSL or another machine | `krate dev --host 0.0.0.0` |
 | 4 | `krate start` no longer builds | `no build output found in dist` | Run `krate build` first, or use `krate serve` |
@@ -48,8 +48,6 @@ In order, with the one that bites first at the top:
 
 ### `tsconfig.json`: `baseUrl` is strict
 
-This is the change that cost people hours, so it comes first.
-
 0.4 ignored `baseUrl` when it resolved `paths` aliases such as `@/*`. The 0.4
 project template shipped with
 
@@ -60,14 +58,24 @@ project template shipped with
 
 which `tsc` reads as `src/src/*` and the 0.4 compiler read as `src/*`. From 0.5
 Krate resolves `paths` exactly as `tsc` does: **targets are relative to
-`baseUrl`**. With the template above every `@/` import fails:
+`baseUrl`**. When a target does not exist there but does exist relative to the
+project root, as it does in the template above, Krate still reads it from the
+root so the build works, and prints one warning on every build:
+
+```text
+! config: [KR7125] tsconfig.json: paths target "./src/*" does not exist under baseUrl "./src" but does under the project root; Krate resolves it there, tsc does not. Run `krate fix --apply` to set baseUrl to "."
+```
+
+`tsc` and your editor still read the file the strict way, so type-checking and
+go-to-definition on `@/` imports stay broken until you fix the file. A target
+that exists in neither place is a real mismatch and fails the build:
 
 ```text
 Error (src/pages/index.tsx): bundling page src/pages/index.tsx:1:1: cannot resolve import "@/components/Counter" (matched tsconfig path alias "@/*")
     hint: no file exists at the alias target; targets resolve relative to compilerOptions.baseUrl (/app/src). If baseUrl is "./src" and the targets also start with ./src/, run `krate fix --apply` to set baseUrl to "."
 ```
 
-The fix is to make `baseUrl` the project root:
+To silence the warning and make `tsc` agree, make `baseUrl` the project root:
 
 ```json
 "baseUrl": ".",
@@ -110,6 +118,13 @@ with 0.4.0 and 0.5 on one page, `shadow rounded border ring bg-blue-500 blur`):
 | `blur-sm`, `rounded-sm` | 4px, `0.125rem` | 8px, `0.25rem`; `blur-xs` and `rounded-xs` are the old values |
 | `outline-none` | `outline: 2px solid transparent` | `outline-style: none`; `outline-hidden` keeps the old accessible behaviour |
 | Layers | none | `@layer theme, base, components, utilities`, plus `@property` blocks |
+
+`@theme` variables stay live, so utilities read them through `var()`, as in
+Tailwind v4: `.dark { --color-primary: ... }` now re-themes `bg-primary`. A default
+such as `--color-blue-600` or `--spacing` goes live once your project sets it in a
+scanned file. If a stylesheet already sets one of these names for another reason,
+it now changes those utilities; rename the variable, or use `@theme inline`, which
+copies the value into the utility.
 
 What to do:
 
@@ -210,6 +225,14 @@ full list is in [Diagnostics](/docs/reference/diagnostics/).
 | `KR3003`, `KR3007` | A class component with an unsupported `static` member, or `this` in a static | Rewrite the class as a function component |
 | `KR7115` | A tier decorator (`@server`, `@client`, ...) where it cannot apply | Move it to a function, class or the default export |
 | `KR9001`, `KR9002` | Two `404`/`error` files for one segment, or one in a `@slot` | Keep one per directory |
+| `KR8320` | A dynamic tag (`<Tag>`) the build cannot resolve; it used to render an empty `<span>` | Use a const, prop or prop default that folds, or a plain conditional |
+| `KR8321` | `<ui.Button>` where `ui` has no such component; it used to render a literal `<ui.Button>` element | Fix the name, or export the component from the module |
+| `KR8322` | A `@static` or `@server` page reads a module value that top-level code changes in a way the build cannot run | Compute the value in the component, or make the page hydrate |
+| `KR8840` | An `<Icon>` that cannot be resolved; its error text and a local path used to land in the page | Fix the name, add `icons/<name>.svg`, or allow network access to `api.iconify.design` (fetched icons are cached in `.krate/cache/icons`) |
+| `KR7142` | A `generateStaticParams` entry with a missing or unsafe param, or two entries for one path | Fix the entry the error names |
+| `KR7143` | `middleware.ts` exports no handler | Add `export function middleware(request)` or a default export |
+| (no code) | Malformed frontmatter: an unterminated quote, an unclosed `[` or `{`, or a line that is not `key: value` | Fix the file and line the error names |
+| (no code) | A CSS, JS, runtime, chunk, manifest or image file that cannot be written (the build used to print "Done!") | Check disk space and permissions on the output directory |
 
 Config is validated too: a value of the wrong type (`devServer.port: "3000"`)
 and a missing `pagesDir` are errors; an unknown key is a warning. Content
@@ -217,6 +240,32 @@ collections reject two entries with one slug (`a.md` and `a.mdx`) and a
 non-ISO `date`. `krate build ./typo` fails instead of creating the directory.
 `KR7120` (a file in `src/pages/api`) and `KR7125` (above) are not build errors
 by themselves; the first warns, the second only appears in `krate fix`.
+
+Stricter config handling can also fail a build that used to pass:
+
+- A syntax error in `krate.config.*` fails with `file:line:col`, including in an
+  `extends` base. Text after `export default { ... }` used to be ignored.
+- `checks.failOn` accepts only `"error"` or `"warning"`. `"off"` is rejected; use
+  `checks.enabled: false`. Non-string `checks.ignore` and `checks.custom` entries
+  are errors.
+- `--config <path>` fails when the file does not exist, on every command that
+  takes it. It used to fall back to the defaults.
+- `viewTransitions` and `ppr` now take effect. They were ignored unless the config
+  fell back to the static parser, so a setting left in a config can change output.
+
+`KR7140` (Tailwind input with Tailwind off) and `KR7141` (unbalanced CSS) are new
+warnings.
+
+### `spawn .../bin/krate EACCES` on `0.5.0-beta.2`
+
+The `0.5.0-beta.2` platform packages were published without the executable bit,
+so `krate` fails with `EACCES` on every Linux and macOS install, including Docker.
+Windows is not affected. Upgrade to a later release, where the wrapper also
+restores the bit itself, or stay on `beta.2` and run this after installing:
+
+```sh
+chmod +x node_modules/@krate/core-*/bin/krate
+```
 
 ### `bin/krate` is gone from `@krate/core`
 
@@ -241,6 +290,14 @@ native binary and warns when it differs from the npm wrapper.
 These close holes; check them if you run `krate serve` behind a proxy or rely on
 the old behaviour.
 
+- `krate serve` and `krate start` refuse to start when the build recorded
+  middleware and `.krate/middleware.js` is missing, so deploy `.krate/` with
+  `dist`, or when `manifest.json`, `server-manifest.json` or `.krate/api-routes.json`
+  is corrupt. Rebuild a `dist` folder made before this record existed; without it
+  the server only warns.
+- A middleware module with a default export runs in every runtime. The Node, Bun
+  and Deno sidecars and the serverless adapters used to skip it, along with any
+  auth check inside it. One with no handler answers `503`.
 - Middleware without a `matcher` runs for every URL, including ones that end in a
   static extension (`/api/files/report.pdf`); only a real static file skips it.
 - With `server.trustProxy`, the client IP is the `X-Forwarded-For` entry

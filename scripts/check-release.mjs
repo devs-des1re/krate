@@ -5,10 +5,12 @@
  * performance budgets are configured, diagnostic docs and codemods are
  * present, and the migration verification suite still exists.
  */
+import { spawnSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
 import { fileURLToPath } from "node:url";
+import { gunzipSync } from "node:zlib";
 import { platformManifest, platforms } from "./platform-package.mjs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -131,8 +133,57 @@ for (const target of platforms) {
   }
 }
 
+// 8. The compiler must arrive executable. The mode comes from the packer, not
+// from the file on disk, so this packs each package with the pnpm that publishes
+// it. It runs under the repo root to pick up the pinned packageManager.
+function tarMode(tgz, name) {
+  const tar = gunzipSync(fs.readFileSync(tgz));
+  for (let at = 0; at + 512 <= tar.length && tar[at] !== 0; ) {
+    const entry = tar.toString("utf8", at, at + 100).replace(/\0.*$/, "");
+    const size = parseInt(tar.toString("utf8", at + 124, at + 136), 8);
+    if (entry === name) return parseInt(tar.toString("utf8", at + 100, at + 108), 8);
+    at += 512 + Math.ceil(size / 512) * 512;
+  }
+  return undefined;
+}
+const packRoot = path.join(root, "node_modules", ".cache", "krate-check-release");
+for (const target of platforms.filter((t) => t.os !== "win32")) {
+  const dir = path.join(packRoot, target.pkg);
+  fs.rmSync(dir, { recursive: true, force: true });
+  fs.mkdirSync(path.join(dir, "bin"), { recursive: true });
+  fs.writeFileSync(path.join(dir, "bin", "krate"), "binary");
+  fs.writeFileSync(path.join(dir, "package.json"), JSON.stringify(platformManifest(target, coreVersion)));
+  const packed = spawnSync("pnpm", ["pack"], { cwd: dir, encoding: "utf8", shell: process.platform === "win32" });
+  const tgz = fs.readdirSync(dir).find((f) => f.endsWith(".tgz"));
+  if (packed.status !== 0 || !tgz) {
+    fail(`${target.pkg}: pnpm pack failed: ${packed.stderr || packed.stdout}`);
+    continue;
+  }
+  const mode = tarMode(path.join(dir, tgz), "package/bin/krate");
+  if (mode === undefined || (mode & 0o111) !== 0o111) {
+    fail(`${target.pkg}: bin/krate would be published as ${mode?.toString(8)}, so every install fails with EACCES`);
+  }
+}
+fs.rmSync(packRoot, { recursive: true, force: true });
+
+if (!ci.includes("smoke-install")) fail("CI does not run the install smoke test");
+if (!release.includes("smoke-install")) fail("release workflow does not run the install smoke test");
+if (release.indexOf("smoke-install") > release.indexOf("Publish platform packages")) {
+  fail("release workflow runs the install smoke test after publishing");
+}
+const smokeJob = ci.slice(ci.indexOf("  install-smoke:"), ci.indexOf("  go-matrix:"));
+for (const needle of ["macos-latest", "windows-latest", "core-darwin-arm64", "core-win32-x64", "-alpine", "core-linux-x64-musl"]) {
+  if (!smokeJob.includes(needle)) fail(`the CI install smoke test does not cover ${needle}`);
+}
 if (!ci.includes("check:release")) fail("CI does not run check:release");
 if (!release.includes("check:release")) fail("release workflow does not run check:release");
+// A re-run after a partial publish must skip what is already on npm, and a bad
+// pre-release identifier must fail before anything is built or published.
+if (!release.includes("scripts/release-tag.mjs")) fail("release workflow does not derive the dist-tag with scripts/release-tag.mjs");
+if (!/pnpm publish/.test(read("scripts/publish-packages.mjs"))) fail("scripts/publish-packages.mjs does not publish");
+if (/pnpm publish/.test(release)) fail("release workflow publishes with pnpm publish directly; use scripts/publish-packages.mjs so a re-run skips published versions");
+if ((release.match(/scripts\/publish-packages\.mjs/g) ?? []).length < 2) fail("release workflow must publish the platform and npm packages with scripts/publish-packages.mjs");
+if (!ci.includes("release-scripts.test.mjs")) fail("CI does not run the release script tests");
 
 if (failures.length > 0) {
   console.error("check-release: the v1 release contract is not satisfied");
